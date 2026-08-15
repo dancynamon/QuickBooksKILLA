@@ -1,0 +1,10 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/ledger-core",
+    "apps/qbo-local",
+    "apps/ledger",
+]
+
+[workspace.package]
+edition = "2021"

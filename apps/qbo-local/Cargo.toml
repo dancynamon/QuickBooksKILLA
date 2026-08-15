@@ -1,0 +1,11 @@
+[package]
+name = "qbo-local"
+version = "0.1.0"
+edition.workspace = true
+
+[dependencies]
+ledger-core = { path = "../../crates/ledger-core" }
+
+[[bin]]
+name = "qbo-local"
+path = "src/main.rs"
