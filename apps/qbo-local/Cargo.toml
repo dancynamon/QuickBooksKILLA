@@ -2,9 +2,25 @@
 name = "qbo-local"
 version = "0.1.0"
 edition.workspace = true
+description = "Local SQLite replica of QuickBooks Online with an outbox write queue."
 
 [dependencies]
 ledger-core = { path = "../../crates/ledger-core" }
+chrono = { workspace = true }
+rusqlite = { workspace = true }
+rust_decimal = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+tempfile = { workspace = true }
+
+[lib]
+name = "qbo_local"
+path = "src/lib.rs"
 
 [[bin]]
 name = "qbo-local"
