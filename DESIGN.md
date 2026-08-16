@@ -63,8 +63,10 @@ Total documents across all types is in the tens of thousands. At a few KB of raw
 JSON each this is a few hundred MB for complete history — small enough that
 mirroring everything is the cheap option, which is why §3.1 does.
 
-WaterLine CNC was not measured (separate realm, not connected to this session).
-Expected smaller and younger; confirm before sizing the initial sync.
+WaterLine CNC was not measured and is not being sized — Dan's call, 16 Aug 2026.
+Aquamentor is the larger and older book, so it is the binding constraint on
+sync time and disk anyway; WaterLine syncs through the same code path with its
+own realm-scoped budget and needs no separate design accommodation.
 
 ---
 
@@ -692,5 +694,7 @@ without hammering Intuit. Numbers get reported as measurements, never as claims.
 | # | Item | Blocks |
 |---|---|---|
 | 1 | Confirm §0 ⚠️ items against `developer.intuit.com` — batch limit, CDC entity exclusions, `RequestId` scope | M2 write path |
-| 2 | Measure WaterLine CNC realm size | initial sync sizing |
+| 2 | OAuth client id/secret and a sandbox company, on the machine that will run the first live sync | M0 completion |
 | 3 | Confirm QBO's tax rounding mode (§1) | ledger project, not this one |
+
+Closed: WaterLine CNC sizing — not being measured, see §0.
