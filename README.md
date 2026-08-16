@@ -19,6 +19,7 @@ Two projects, one workspace:
 |---|---|
 | `DESIGN.md` | The `qbo-local` design. Replica schema, sync, token rotation, outbox, reconciliation, safety. |
 | `DECISIONS.md` | Running log of review decisions and the reasoning behind them. |
+| `HANDOFF.md` | What to build next to finish M0, and the constraints that go with it. |
 | `docs/CLAUDE_CODE_KICKOFF_PROMPT.md` | Original brief for the ledger project. |
 | `docs/CLAUDE_CODE_PROMPT_2_QBO_CACHE.md` | Original brief for `qbo-local`. |
 
