@@ -7,14 +7,26 @@ apps/*/target
 node_modules/
 dist/
 
-# SQLite
+# SQLite — the replica and its sidecars never belong in git
 *.db
 *.db-wal
 *.db-shm
 
-# Env
+# Secrets. Tokens live in the OS keychain (DESIGN.md §5.1); nothing
+# credential-shaped goes in the repo, and nothing goes anywhere Dropbox syncs.
 .env
 .env.*
+tokens-*.json
+*token*.json
+*.pem
+*.p12
+secrets/
+credentials/
+.qbo-auth/
+
+# Audit and rotation logs contain request payloads
+audit-*.jsonl
+rotation-*.jsonl
 
 # OS
 .DS_Store

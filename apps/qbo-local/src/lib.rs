@@ -12,10 +12,14 @@
 //! - [`auth`]     — §5: token rotation and durable persistence
 //! - [`ratelimit`]— §4.4: per-realm token buckets
 //! - [`outbox`]   — §6: the write queue and its state machine
+//! - [`client`]   — the QBO API boundary, plus an in-memory double
+//! - [`worker`]   — §6.3-6.5: draining the outbox, dependency resolution
 
 pub mod auth;
+pub mod client;
 pub mod domain;
 pub mod outbox;
 pub mod ratelimit;
 pub mod store;
 pub mod sync;
+pub mod worker;

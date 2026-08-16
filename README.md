@@ -30,7 +30,7 @@ than engineering judgement.
 ## Build
 
 ```sh
-cargo test          # 105 tests, all offline
+cargo test          # 128 tests, all offline
 cargo clippy --all-targets
 cargo run --bin qbo-local
 ```
@@ -50,9 +50,16 @@ Built and tested:
 - Per-realm token-bucket rate limiting with jittered backoff
 - CDC cursor planning: staleness fallback, truncation handling
 - SQLite replica schema with forward-only migrations, `STRICT` tables, WAL
+- QBO client boundary plus an in-memory double that reproduces `SyncToken`
+  conflicts, `RequestId` replay, and the Customer/Item idempotency gap
+- The drain worker: per-entity ordering, dependency resolution, local-id
+  rewriting, query-before-create adoption, convergence property test
 
-Not built yet: the Intuit HTTP client, the OAuth flow, the drain worker, the
+Not built yet: the HTTP transport behind the client trait, the OAuth flow, the
 reconciliation sweep, the Tauri shell, the React UI.
+
+The first live authentication run should happen wherever the OAuth credentials
+already live, rather than moving them onto another machine.
 
 ## Two things not to do later
 
