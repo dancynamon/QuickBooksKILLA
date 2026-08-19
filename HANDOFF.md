@@ -9,6 +9,31 @@ tested here.
 
 ---
 
+## 0. Prerequisites — have these in hand before starting
+
+QBO is OAuth 2.0, not a simple API key. An Intuit developer app gives you a
+**Client ID** and **Client Secret**; those cannot call the API on their own. They
+have to complete an authorization round trip first — browser to Intuit's consent
+page, approval, redirect back to a registered URI — which yields the access and
+refresh tokens the client actually uses.
+
+| Need | Notes |
+|---|---|
+| Client ID + Client Secret | From the Intuit developer app |
+| Registered redirect URI | `http://localhost:PORT/callback`, registered on the app; must match exactly |
+| Aquamentor realm id | `1234567890123456` — confirmed live, 16 Aug 2026 |
+| Sandbox company | Only needed once write paths are built (M2). M0 is read-only and can point at production. |
+
+**Check first:** if `~/code/aquamentor-mcp` / `qbo_headless` is already authorized,
+it may hold a valid refresh token. Reusing it skips the consent flow entirely for
+now. Confirm before building the authorization flow — it may not be on M0's
+critical path.
+
+Whatever the source, tokens land in the macOS keychain via the `TokenStore`
+backend in §2.1. Never in the repo, never in a dotfile Dropbox syncs.
+
+---
+
 ## 1. Where the work stands
 
 `cargo test` — 128 tests, all offline, all green. `cargo clippy --all-targets` —
