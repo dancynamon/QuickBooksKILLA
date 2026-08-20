@@ -30,10 +30,11 @@
   --crit-soft:   rgba(178, 47, 34, .12);
   --shadow:      0 18px 44px -22px rgba(13, 25, 34, .45);
 
-  --rail: 204px;
-  --chrome: 46px;
-  --status: 26px;
-  --row: 30px;
+  --fs: 1;            /* text scale, driven by the A-/A+ controls */
+  --rail: calc(204px * var(--fs));
+  --chrome: calc(46px * var(--fs));
+  --status: calc(26px * var(--fs));
+  --row: calc(30px * var(--fs));
 
   --sans: "IBM Plex Sans", ui-sans-serif, system-ui, -apple-system, sans-serif;
   --cond: "IBM Plex Sans Condensed", "IBM Plex Sans", ui-sans-serif, system-ui, sans-serif;
@@ -96,7 +97,7 @@ body {
   background: var(--ground);
   color: var(--ink);
   font-family: var(--sans);
-  font-size: 13px;
+  font-size: calc(13px * var(--fs));
   line-height: 1.45;
   -webkit-font-smoothing: antialiased;
   overflow: hidden;
@@ -116,7 +117,7 @@ button { cursor: pointer; background: none; border: none; padding: 0; }
 
 .lbl {
   font-family: var(--cond);
-  font-size: 10px;
+  font-size: calc(10px * var(--fs));
   font-weight: 600;
   letter-spacing: .10em;
   text-transform: uppercase;
@@ -125,7 +126,7 @@ button { cursor: pointer; background: none; border: none; padding: 0; }
 
 kbd {
   font-family: var(--mono);
-  font-size: 10px;
+  font-size: calc(10px * var(--fs));
   padding: 1px 4px;
   border: 1px solid var(--line);
   border-bottom-width: 2px;
@@ -156,14 +157,14 @@ kbd {
 
 .mark { display: flex; align-items: center; gap: 8px; padding-right: 12px; border-right: 1px solid var(--line-soft); }
 .mark-glyph {
-  width: 22px; height: 22px; flex: none;
+  width: 22px; height: calc(22px * var(--fs)); flex: none;
   display: grid; place-items: center;
   border-radius: 5px;
   background: var(--accent);
   color: var(--accent-ink);
   font-family: var(--cond);
   font-weight: 700;
-  font-size: 13px;
+  font-size: calc(13px * var(--fs));
 }
 .mark-name { font-weight: 600; letter-spacing: -.01em; white-space: nowrap; }
 .mark-name span { color: var(--ink-3); font-weight: 450; }
@@ -179,15 +180,15 @@ kbd {
 }
 .co:hover { border-color: var(--accent-line); }
 .co-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); flex: none; }
-.co-name { font-weight: 500; font-size: 12px; }
-.co-realm { font-family: var(--mono); font-size: 10px; color: var(--ink-3); }
-.co-caret { color: var(--ink-3); font-size: 9px; }
+.co-name { font-weight: 500; font-size: calc(12px * var(--fs)); }
+.co-realm { font-family: var(--mono); font-size: calc(10px * var(--fs)); color: var(--ink-3); }
+.co-caret { color: var(--ink-3); font-size: calc(9px * var(--fs)); }
 
 .omni {
   flex: 1;
   min-width: 90px;
   display: flex; align-items: center; gap: 8px;
-  height: 27px;
+  height: calc(27px * var(--fs));
   padding: 0 9px;
   border: 1px solid var(--line);
   border-radius: 5px;
@@ -197,18 +198,18 @@ kbd {
   transition: border-color .12s, background .12s;
 }
 .omni:hover { border-color: var(--accent-line); background: var(--surface-2); }
-.omni-text { flex: 1; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.omni-text { flex: 1; font-size: calc(12px * var(--fs)); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 .chrome-right { display: flex; align-items: center; gap: 8px; flex: none; }
 
 .pill {
   display: inline-flex; align-items: center; gap: 6px;
-  height: 24px;
+  height: calc(24px * var(--fs));
   padding: 0 8px;
   border-radius: 5px;
   border: 1px solid var(--line);
   background: var(--surface-2);
-  font-size: 11px;
+  font-size: calc(11px * var(--fs));
   white-space: nowrap;
 }
 .pill .dot { width: 6px; height: 6px; border-radius: 50%; flex: none; }
@@ -224,7 +225,7 @@ kbd {
 @media (prefers-reduced-motion: reduce) { .pill.is-live .dot { animation: none; } }
 
 .icon-btn {
-  width: 26px; height: 26px;
+  width: 26px; height: calc(26px * var(--fs));
   display: grid; place-items: center;
   border: 1px solid var(--line);
   border-radius: 5px;
@@ -233,6 +234,30 @@ kbd {
   transition: color .12s, border-color .12s;
 }
 .icon-btn:hover { color: var(--accent); border-color: var(--accent-line); }
+
+.seg {
+  display: inline-flex; flex: none;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  overflow: hidden;
+  background: var(--surface-2);
+}
+.seg button {
+  display: grid; place-items: center;
+  min-width: calc(25px * var(--fs));
+  height: calc(24px * var(--fs));
+  padding: 0 6px;
+  color: var(--ink-2);
+  font-size: calc(12px * var(--fs));
+  line-height: 1;
+  border-right: 1px solid var(--line);
+  transition: color .12s, background .12s;
+}
+.seg button:last-child { border-right: none; }
+.seg button:hover:not(:disabled) { color: var(--accent); background: var(--accent-soft); }
+.seg button[aria-pressed="true"] { background: var(--accent); color: var(--accent-ink); }
+.seg button:disabled { opacity: .35; cursor: default; }
+.seg sup { font-size: .82em; margin-left: 1px; }
 
 /* ─── rail ──────────────────────────────────────────────────────────── */
 .body { display: grid; grid-template-columns: var(--rail) 1fr; min-height: 0; }
@@ -248,10 +273,10 @@ kbd {
 .rail-item {
   display: flex; align-items: center; gap: 9px;
   width: 100%;
-  height: 27px;
+  height: calc(27px * var(--fs));
   padding: 0 10px 0 14px;
   color: var(--ink-2);
-  font-size: 12.5px;
+  font-size: calc(12.5px * var(--fs));
   border-left: 2px solid transparent;
   text-align: left;
   transition: background .1s, color .1s;
@@ -268,7 +293,7 @@ kbd {
 .rail-item .ri-count {
   margin-left: auto;
   font-family: var(--mono);
-  font-size: 10.5px;
+  font-size: calc(10.5px * var(--fs));
   color: var(--ink-3);
 }
 .rail-item .ri-count.alert {
@@ -289,17 +314,17 @@ kbd {
   background: var(--ground);
   border-bottom: 1px solid var(--line);
 }
-.view-title { font-size: 17px; font-weight: 600; letter-spacing: -.015em; margin: 0; }
-.view-sub { color: var(--ink-3); font-size: 12px; }
+.view-title { font-size: calc(17px * var(--fs)); font-weight: 600; letter-spacing: -.015em; margin: 0; }
+.view-sub { color: var(--ink-3); font-size: calc(12px * var(--fs)); }
 .view-head .spacer { flex: 1; }
 
 .btn {
   display: inline-flex; align-items: center; gap: 6px;
-  height: 26px; padding: 0 10px;
+  height: calc(26px * var(--fs)); padding: 0 10px;
   border: 1px solid var(--line);
   border-radius: 5px;
   background: var(--surface);
-  font-size: 12px;
+  font-size: calc(12px * var(--fs));
   transition: border-color .12s, color .12s;
 }
 .btn:hover { border-color: var(--accent-line); color: var(--accent); }
@@ -322,11 +347,11 @@ kbd {
 }
 .strip-cell { padding: 9px 12px; border-right: 1px solid var(--line-soft); }
 .strip-cell:last-child { border-right: none; }
-.strip-val { font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 18px; font-weight: 500; letter-spacing: -.02em; margin-top: 2px; }
+.strip-val { font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: calc(18px * var(--fs)); font-weight: 500; letter-spacing: -.02em; margin-top: 2px; }
 .strip-val.pos { color: var(--ok); }
 .strip-val.neg { color: var(--crit); }
 .strip-val.warn { color: var(--warn); }
-.strip-note { font-size: 11px; color: var(--ink-3); margin-top: 1px; }
+.strip-note { font-size: calc(11px * var(--fs)); color: var(--ink-3); margin-top: 1px; }
 
 /* ─── grid ──────────────────────────────────────────────────────────── */
 .grid-wrap {
@@ -336,19 +361,19 @@ kbd {
   background: var(--surface);
 }
 .grid-scroll { overflow-x: auto; }
-table { border-collapse: collapse; width: 100%; font-size: 12.5px; }
+table { border-collapse: collapse; width: 100%; font-size: calc(12.5px * var(--fs)); }
 thead th {
   position: sticky; top: 0; z-index: 2;
   background: var(--surface-2);
   font-family: var(--cond);
-  font-size: 10px;
+  font-size: calc(10px * var(--fs));
   font-weight: 600;
   letter-spacing: .09em;
   text-transform: uppercase;
   color: var(--ink-3);
   text-align: left;
   padding: 0 10px;
-  height: 26px;
+  height: calc(26px * var(--fs));
   border-bottom: 1px solid var(--line);
   white-space: nowrap;
 }
@@ -371,7 +396,7 @@ tbody tr[data-clickable]:hover { background: var(--accent-soft); }
   display: inline-block;
   padding: 1px 6px;
   border-radius: 3px;
-  font-size: 10.5px;
+  font-size: calc(10.5px * var(--fs));
   font-family: var(--cond);
   font-weight: 600;
   letter-spacing: .04em;
@@ -393,21 +418,21 @@ tbody tr[data-clickable]:hover { background: var(--accent-soft); }
 .panel { border: 1px solid var(--line); border-radius: 7px; background: var(--surface); overflow: hidden; }
 .panel-head {
   display: flex; align-items: center; gap: 8px;
-  height: 30px; padding: 0 12px;
+  height: calc(30px * var(--fs)); padding: 0 12px;
   background: var(--surface-2);
   border-bottom: 1px solid var(--line);
 }
 .panel-body { padding: 11px 12px; }
 
-.kv { display: grid; grid-template-columns: 88px 1fr; gap: 4px 10px; font-size: 12px; }
+.kv { display: grid; grid-template-columns: 88px 1fr; gap: 4px 10px; font-size: calc(12px * var(--fs)); }
 .kv dt { color: var(--ink-3); }
 .kv dd { margin: 0; }
 
 /* ─── class margin bars ─────────────────────────────────────────────── */
 .bars { display: flex; flex-direction: column; gap: 9px; }
 .bar-row { display: grid; grid-template-columns: 1fr auto; gap: 4px 10px; align-items: baseline; }
-.bar-name { font-size: 12px; }
-.bar-fig { font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 12px; }
+.bar-name { font-size: calc(12px * var(--fs)); }
+.bar-fig { font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: calc(12px * var(--fs)); }
 .bar-track { grid-column: 1 / -1; height: 5px; border-radius: 3px; background: var(--surface-3); overflow: hidden; }
 .bar-fill { height: 100%; border-radius: 3px; transition: width .5s cubic-bezier(.2,.8,.2,1); }
 @media (prefers-reduced-motion: reduce) { .bar-fill { transition: none; } }
@@ -415,35 +440,35 @@ tbody tr[data-clickable]:hover { background: var(--accent-soft); }
 /* ─── invoice editor ────────────────────────────────────────────────── */
 .doc-head { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px 16px; padding: 12px; border-bottom: 1px solid var(--line); }
 .field { display: flex; flex-direction: column; gap: 3px; }
-.field-val { font-size: 13px; font-weight: 500; }
+.field-val { font-size: calc(13px * var(--fs)); font-weight: 500; }
 
 .line-add { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-top: 1px solid var(--line); background: var(--surface-2); flex-wrap: wrap; }
 .line-add input {
   flex: 1; min-width: 120px;
-  height: 26px; padding: 0 9px;
+  height: calc(26px * var(--fs)); padding: 0 9px;
   border: 1px solid var(--line);
   border-radius: 5px;
   background: var(--surface);
   font-family: var(--mono);
-  font-size: 12px;
+  font-size: calc(12px * var(--fs));
 }
 .line-add input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
 
 .totals { display: flex; justify-content: flex-end; padding: 10px 12px; border-top: 1px solid var(--line); }
-.totals dl { display: grid; grid-template-columns: auto 108px; gap: 3px 18px; margin: 0; font-size: 12.5px; }
+.totals dl { display: grid; grid-template-columns: auto 108px; gap: 3px 18px; margin: 0; font-size: calc(12.5px * var(--fs)); }
 .totals dt { color: var(--ink-2); text-align: right; }
 .totals dd { margin: 0; font-family: var(--mono); font-variant-numeric: tabular-nums; text-align: right; }
-.totals .grand dt, .totals .grand dd { font-weight: 600; font-size: 14px; padding-top: 5px; border-top: 1px solid var(--line); margin-top: 3px; }
+.totals .grand dt, .totals .grand dd { font-weight: 600; font-size: calc(14px * var(--fs)); padding-top: 5px; border-top: 1px solid var(--line); margin-top: 3px; }
 
 /* ─── failure inbox ─────────────────────────────────────────────────── */
 .fail { border: 1px solid var(--line); border-radius: 7px; background: var(--surface); overflow: hidden; margin-bottom: 10px; }
 .fail-bar { display: flex; align-items: center; gap: 9px; padding: 9px 12px; border-left: 3px solid var(--crit); }
 .fail-bar.warn { border-left-color: var(--warn); }
 .fail-body { padding: 0 12px 11px 15px; }
-.fail-why { font-size: 12px; color: var(--ink-2); max-width: 62ch; }
+.fail-why { font-size: calc(12px * var(--fs)); color: var(--ink-2); max-width: 62ch; }
 .fail-acts { display: flex; gap: 7px; margin-top: 9px; flex-wrap: wrap; }
-.diff { display: grid; grid-template-columns: auto 1fr; gap: 2px 12px; margin-top: 9px; font-size: 12px; padding: 8px 10px; background: var(--ground); border-radius: 5px; border: 1px solid var(--line-soft); }
-.diff .k { color: var(--ink-3); font-family: var(--cond); font-size: 10px; letter-spacing: .08em; text-transform: uppercase; align-self: center; }
+.diff { display: grid; grid-template-columns: auto 1fr; gap: 2px 12px; margin-top: 9px; font-size: calc(12px * var(--fs)); padding: 8px 10px; background: var(--ground); border-radius: 5px; border: 1px solid var(--line-soft); }
+.diff .k { color: var(--ink-3); font-family: var(--cond); font-size: calc(10px * var(--fs)); letter-spacing: .08em; text-transform: uppercase; align-self: center; }
 
 /* ─── status bar ────────────────────────────────────────────────────── */
 .statusbar {
@@ -451,7 +476,7 @@ tbody tr[data-clickable]:hover { background: var(--accent-soft); }
   padding: 0 12px;
   background: var(--surface);
   border-top: 1px solid var(--line);
-  font-size: 11px;
+  font-size: calc(11px * var(--fs));
   color: var(--ink-3);
   overflow: hidden;
   white-space: nowrap;
@@ -477,8 +502,8 @@ tbody tr[data-clickable]:hover { background: var(--accent-soft); }
   box-shadow: var(--shadow);
   overflow: hidden;
 }
-.pal-in { display: flex; align-items: center; gap: 9px; padding: 0 13px; height: 44px; border-bottom: 1px solid var(--line); }
-.pal-in input { flex: 1; border: none; background: none; height: 100%; font-size: 15px; }
+.pal-in { display: flex; align-items: center; gap: 9px; padding: 0 13px; height: calc(44px * var(--fs)); border-bottom: 1px solid var(--line); }
+.pal-in input { flex: 1; border: none; background: none; height: 100%; font-size: calc(15px * var(--fs)); }
 .pal-in input:focus { outline: none; }
 .pal-list { max-height: 46vh; overflow-y: auto; padding: 5px; }
 .pal-sec { padding: 7px 9px 3px; }
@@ -491,10 +516,10 @@ tbody tr[data-clickable]:hover { background: var(--accent-soft); }
 .pal-item[data-active="true"] { background: var(--accent-soft); }
 .pal-item .pi-glyph { width: 16px; flex: none; color: var(--ink-3); display: grid; place-items: center; }
 .pal-item[data-active="true"] .pi-glyph { color: var(--accent); }
-.pal-item .pi-main { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
-.pal-item .pi-meta { font-family: var(--mono); font-size: 11px; color: var(--ink-3); flex: none; }
-.pal-foot { display: flex; align-items: center; gap: 14px; padding: 7px 13px; border-top: 1px solid var(--line); background: var(--surface-2); font-size: 11px; color: var(--ink-3); flex-wrap: wrap; }
-.pal-empty { padding: 22px 13px; text-align: center; color: var(--ink-3); font-size: 12.5px; }
+.pal-item .pi-main { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: calc(13px * var(--fs)); }
+.pal-item .pi-meta { font-family: var(--mono); font-size: calc(11px * var(--fs)); color: var(--ink-3); flex: none; }
+.pal-foot { display: flex; align-items: center; gap: 14px; padding: 7px 13px; border-top: 1px solid var(--line); background: var(--surface-2); font-size: calc(11px * var(--fs)); color: var(--ink-3); flex-wrap: wrap; }
+.pal-empty { padding: 22px 13px; text-align: center; color: var(--ink-3); font-size: calc(12.5px * var(--fs)); }
 
 /* ─── toast ─────────────────────────────────────────────────────────── */
 .toasts { position: fixed; right: 14px; bottom: 38px; z-index: 50; display: flex; flex-direction: column; gap: 7px; align-items: flex-end; }
@@ -506,7 +531,7 @@ tbody tr[data-clickable]:hover { background: var(--accent-soft); }
   border-radius: 6px;
   background: var(--surface);
   box-shadow: var(--shadow);
-  font-size: 12px;
+  font-size: calc(12px * var(--fs));
   animation: rise .22s cubic-bezier(.2,.9,.3,1);
 }
 .toast.warn { border-left-color: var(--warn); }
@@ -521,12 +546,12 @@ tbody tr[data-clickable]:hover { background: var(--accent-soft); }
   padding: 7px 16px;
   background: var(--warn-soft);
   border-bottom: 1px solid color-mix(in srgb, var(--warn) 34%, transparent);
-  font-size: 12px;
+  font-size: calc(12px * var(--fs));
   color: var(--warn);
 }
 .offline-bar[hidden] { display: none; }
 
-.hint { font-size: 11.5px; color: var(--ink-3); margin-top: 9px; }
+.hint { font-size: calc(11.5px * var(--fs)); color: var(--ink-3); margin-top: 9px; }
 .hint kbd { margin: 0 1px; }
 </style>
 
@@ -562,8 +587,17 @@ tbody tr[data-clickable]:hover { background: var(--accent-soft); }
       <button class="pill is-crit" id="failPill" title="Open the failure inbox">
         <span class="dot"></span> 2 need you
       </button>
-      <button class="icon-btn" id="netBtn" title="Simulate losing the network">⇅</button>
-      <button class="icon-btn" id="themeBtn" title="Toggle light and dark">◐</button>
+      <button class="icon-btn" id="netBtn" title="Drop the network and see what still works">⇅</button>
+
+      <div class="seg" role="group" aria-label="Text size">
+        <button id="fsDown" title="Smaller text">A<sup>−</sup></button>
+        <button id="fsUp" title="Bigger text">A<sup>+</sup></button>
+      </div>
+
+      <div class="seg" role="group" aria-label="Appearance">
+        <button id="lightBtn" title="Light mode" aria-pressed="false">☀</button>
+        <button id="darkBtn" title="Dark mode" aria-pressed="false">☾</button>
+      </div>
     </div>
   </header>
 
@@ -576,6 +610,7 @@ tbody tr[data-clickable]:hover { background: var(--accent-soft); }
     <span class="sb-item">Replica <b id="sbRows">41,882</b> records</span>
     <span class="sb-item">History from <b>Mar 2012</b></span>
     <span class="sb-item">Last read <b id="sbMs">9 ms</b></span>
+    <span class="sb-item">Text <b id="sbFs">100%</b></span>
     <span class="spacer"></span>
     <span class="sb-item" id="sbNet">Network idle · CDC poll 15s</span>
     <span class="sb-item">Writes <b id="sbWrites">disabled</b></span>
@@ -721,7 +756,7 @@ tbody tr[data-clickable]:hover { background: var(--accent-soft); }
   ];
 
   /* ─── state ─────────────────────────────────────────────────────────── */
-  const state = { view: "today", arg: null, online: true, pending: 1, syncAge: 4 };
+  const state = { view: "today", arg: null, online: true, pending: 1, syncAge: 4, fs: 1 };
 
   const $  = s => document.querySelector(s);
   const el = (t, c, h) => { const n = document.createElement(t); if (c) n.className = c; if (h != null) n.innerHTML = h; return n; };
@@ -731,11 +766,24 @@ tbody tr[data-clickable]:hover { background: var(--accent-soft); }
      product is that this number never depends on the network. */
   function readMs() { return (Math.random() * 7 + 5).toFixed(0); }
 
-  function toast(msg, ms, warn) {
+  /* `key` makes a toast replace its predecessor instead of stacking — holding
+     down A+ should leave one readout behind, not six. */
+  const toastTimers = new Map();
+  function toast(msg, ms, warn, key) {
+    if (key) {
+      const prior = $("#toasts").querySelector(`[data-key="${key}"]`);
+      if (prior) { clearTimeout(toastTimers.get(key)); prior.remove(); }
+    }
     const t = el("div", "toast" + (warn ? " warn" : ""));
+    if (key) t.dataset.key = key;
     t.innerHTML = `<span>${esc(msg)}</span>` + (ms ? `<span class="t-ms">${esc(ms)}</span>` : "");
     $("#toasts").appendChild(t);
-    setTimeout(() => { t.style.opacity = "0"; t.style.transition = "opacity .3s"; setTimeout(() => t.remove(), 300); }, 3400);
+    const timer = setTimeout(() => {
+      t.style.opacity = "0"; t.style.transition = "opacity .3s";
+      setTimeout(() => t.remove(), 300);
+      if (key) toastTimers.delete(key);
+    }, key ? 1600 : 3400);
+    if (key) toastTimers.set(key, timer);
   }
 
   /* ─── rail ──────────────────────────────────────────────────────────── */
@@ -869,7 +917,7 @@ tbody tr[data-clickable]:hover { background: var(--accent-soft); }
                 ${margins.map(m => `
                   <div class="bar-row">
                     <span class="bar-name"><span class="swatch" style="background:${m.c.color}"></span>${esc(m.c.name)}
-                      <span class="dim num" style="font-size:11px">${plain(m.rev)}</span></span>
+                      <span class="dim num" style="font-size:calc(11px * var(--fs))">${plain(m.rev)}</span></span>
                     <span class="bar-fig">${Math.round(m.margin * 100)}%</span>
                     <div class="bar-track"><div class="bar-fill" style="width:${Math.round(m.margin * 100)}%;background:${m.c.color}"></div></div>
                   </div>`).join("")}
@@ -884,7 +932,7 @@ tbody tr[data-clickable]:hover { background: var(--accent-soft); }
                   <tr>
                     <td class="mono dim" style="width:42px">${a.t}</td>
                     <td><span style="color:${a.kind === "fail" ? "var(--crit)" : a.kind === "local" ? "var(--accent)" : "var(--ink)"}">${esc(a.what)}</span>
-                        <div class="dim" style="font-size:11px;white-space:normal">${esc(a.detail)}</div></td>
+                        <div class="dim" style="font-size:calc(11px * var(--fs));white-space:normal">${esc(a.detail)}</div></td>
                   </tr>`).join("")}</tbody></table>
               </div>
             </div>
@@ -955,7 +1003,7 @@ tbody tr[data-clickable]:hover { background: var(--accent-soft); }
               <div class="field"><span class="lbl">Terms</span><span class="field-val">${esc(c.terms)}</span></div>
               <div class="field"><span class="lbl">Date</span><span class="field-val mono">${inv.date}</span></div>
               <div class="field"><span class="lbl">Class</span><span class="field-val"><span class="swatch" style="background:${cls(inv.cls).color}"></span>${cls(inv.cls).name}</span></div>
-              <div class="field"><span class="lbl">Tax treatment</span><span class="field-val" style="font-size:12px">${esc(c.tax)}</span></div>
+              <div class="field"><span class="lbl">Tax treatment</span><span class="field-val" style="font-size:calc(12px * var(--fs))">${esc(c.tax)}</span></div>
               <div class="field"><span class="lbl">Sync state</span><span class="field-val">${syncTag(inv.sync)}</span></div>
             </div>
 
@@ -967,7 +1015,7 @@ tbody tr[data-clickable]:hover { background: var(--accent-soft); }
             <div class="line-add">
               <span class="lbl" style="flex:none">Add line</span>
               <input id="skuIn" placeholder="Type a SKU — XRT, PM, SIGN…" autocomplete="off" spellcheck="false">
-              <span class="dim" style="font-size:11px">resolves locally, no network</span>
+              <span class="dim" style="font-size:calc(11px * var(--fs))">resolves locally, no network</span>
               <kbd>↵</kbd>
             </div>
 
@@ -1019,7 +1067,7 @@ tbody tr[data-clickable]:hover { background: var(--accent-soft); }
             <div class="panel">
               <div class="panel-head"><span class="lbl">Also in QuickBooks</span></div>
               <div class="panel-body">
-                <p class="dim" style="margin:0 0 9px;font-size:12px">This invoice exists in QBO as well. Open it there for anything this app does not do yet.</p>
+                <p class="dim" style="margin:0 0 9px;font-size:calc(12px * var(--fs))">This invoice exists in QBO as well. Open it there for anything this app does not do yet.</p>
                 <button class="btn" style="width:100%" onclick="return false">Open in QuickBooks ↗</button>
               </div>
             </div>
@@ -1056,8 +1104,8 @@ tbody tr[data-clickable]:hover { background: var(--accent-soft); }
         <div class="strip">
           <div class="strip-cell"><div class="lbl">Open balance</div><div class="strip-val ${c.bal ? "warn" : "pos"}">${money(c.bal)}</div><div class="strip-note">${rows.filter(i => i.bal > 0).length} unpaid</div></div>
           <div class="strip-cell"><div class="lbl">Sales YTD</div><div class="strip-val">${money(c.ytd)}</div><div class="strip-note">2026 to date</div></div>
-          <div class="strip-cell"><div class="lbl">Terms</div><div class="strip-val" style="font-size:15px">${esc(c.terms)}</div><div class="strip-note">${esc(c.tax)}</div></div>
-          <div class="strip-cell"><div class="lbl">Customer since</div><div class="strip-val" style="font-size:15px">2014</div><div class="strip-note">12 years</div></div>
+          <div class="strip-cell"><div class="lbl">Terms</div><div class="strip-val" style="font-size:calc(15px * var(--fs))">${esc(c.terms)}</div><div class="strip-note">${esc(c.tax)}</div></div>
+          <div class="strip-cell"><div class="lbl">Customer since</div><div class="strip-val" style="font-size:calc(15px * var(--fs))">2014</div><div class="strip-note">12 years</div></div>
         </div>
         <div class="grid-wrap"><div class="grid-scroll"><table>
           <thead><tr><th>Type</th><th>No.</th><th>Date</th><th>Class</th><th class="r">Total</th><th class="r">Balance</th><th>Status</th></tr></thead>
@@ -1137,7 +1185,7 @@ tbody tr[data-clickable]:hover { background: var(--accent-soft); }
               </div>
             </div>
           </div>`).join("")}
-        ${FAILURES.length === 0 ? '<div class="panel"><div class="panel-body" style="text-align:center;padding:34px"><div class="strip-val pos" style="font-size:22px">All clear</div><p class="dim" style="margin:6px 0 0">Every queued write reached QuickBooks.</p></div></div>' : ""}
+        ${FAILURES.length === 0 ? '<div class="panel"><div class="panel-body" style="text-align:center;padding:34px"><div class="strip-val pos" style="font-size:calc(22px * var(--fs))">All clear</div><p class="dim" style="margin:6px 0 0">Every queued write reached QuickBooks.</p></div></div>' : ""}
         <p class="hint">A conflict means someone edited the same record in the QuickBooks web app. Ledger Local never picks a winner for you — a silent overwrite is how a real edit disappears without anyone noticing.</p>
       </div>`;
     }
@@ -1266,12 +1314,44 @@ tbody tr[data-clickable]:hover { background: var(--accent-soft); }
     updateChrome();
   };
 
-  $("#themeBtn").onclick = () => {
-    const now = document.documentElement.getAttribute("data-theme");
-    const sysDark = matchMedia("(prefers-color-scheme: dark)").matches;
-    const current = now || (sysDark ? "dark" : "light");
-    document.documentElement.setAttribute("data-theme", current === "dark" ? "light" : "dark");
+  /* ─── display: text size and theme ──────────────────────────────────── */
+  /* Preferences persist where storage is available; a sandboxed frame that
+     refuses it just falls back to defaults rather than throwing. */
+  const store = {
+    get(k, d) { try { const v = localStorage.getItem("ll." + k); return v === null ? d : v; } catch { return d; } },
+    set(k, v) { try { localStorage.setItem("ll." + k, v); } catch { /* not available */ } }
   };
+
+  const FS_MIN = 0.9, FS_MAX = 1.7, FS_STEP = 0.1;
+
+  function setFs(v, announce) {
+    v = Math.round(Math.min(FS_MAX, Math.max(FS_MIN, v)) * 100) / 100;
+    state.fs = v;
+    document.documentElement.style.setProperty("--fs", v);
+    $("#sbFs").textContent = Math.round(v * 100) + "%";
+    $("#fsDown").disabled = v <= FS_MIN + 0.001;
+    $("#fsUp").disabled = v >= FS_MAX - 0.001;
+    store.set("fs", v);
+    if (announce) toast(`Text ${Math.round(v * 100)}%`, null, false, "display");
+  }
+
+  function effectiveTheme() {
+    return document.documentElement.getAttribute("data-theme")
+        || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+  }
+
+  function setTheme(t, announce) {
+    document.documentElement.setAttribute("data-theme", t);
+    store.set("theme", t);
+    $("#lightBtn").setAttribute("aria-pressed", String(t === "light"));
+    $("#darkBtn").setAttribute("aria-pressed", String(t === "dark"));
+    if (announce) toast(t === "dark" ? "Dark mode" : "Light mode", null, false, "display");
+  }
+
+  $("#fsUp").onclick    = () => setFs(state.fs + FS_STEP, true);
+  $("#fsDown").onclick  = () => setFs(state.fs - FS_STEP, true);
+  $("#lightBtn").onclick = () => setTheme("light", true);
+  $("#darkBtn").onclick  = () => setTheme("dark", true);
 
   $("#coBtn").onclick = () => {
     const aqua = $("#coName").textContent.startsWith("Aquamentor");
@@ -1295,6 +1375,14 @@ tbody tr[data-clickable]:hover { background: var(--accent-soft); }
   function palData() {
     const rows = [];
     NAV.forEach(n => rows.push({ sec: "Go to", glyph: n.glyph, main: n.label, meta: "", act: () => go(n.id) }));
+    rows.push(
+      { sec: "Display", glyph: "A", main: "Bigger text",  meta: "⌘⇧+", act: () => setFs(state.fs + FS_STEP, true) },
+      { sec: "Display", glyph: "A", main: "Smaller text", meta: "⌘⇧−", act: () => setFs(state.fs - FS_STEP, true) },
+      { sec: "Display", glyph: "A", main: "Reset text size", meta: "100%", act: () => setFs(1, true) },
+      { sec: "Display", glyph: "☀", main: "Switch to light mode", meta: "", act: () => setTheme("light", true) },
+      { sec: "Display", glyph: "☾", main: "Switch to dark mode",  meta: "", act: () => setTheme("dark", true) },
+      { sec: "Display", glyph: "⇅", main: "Toggle the network",   meta: "", act: () => $("#netBtn").click() }
+    );
     INVOICES.forEach(i => rows.push({
       sec: "Invoices", glyph: "▤",
       main: `Invoice ${i.no} — ${cust(i.cust).short}`,
@@ -1372,6 +1460,12 @@ tbody tr[data-clickable]:hover { background: var(--accent-soft); }
   document.addEventListener("keydown", e => {
     const open = !$("#scrim").hidden;
     if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") { e.preventDefault(); open ? closePal() : openPal(); return; }
+    if ((e.metaKey || e.ctrlKey) && e.shiftKey && (e.key === "+" || e.key === "=")) {
+      e.preventDefault(); setFs(state.fs + FS_STEP, true); return;
+    }
+    if ((e.metaKey || e.ctrlKey) && e.shiftKey && (e.key === "_" || e.key === "-")) {
+      e.preventDefault(); setFs(state.fs - FS_STEP, true); return;
+    }
     if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "s") {
       e.preventDefault();
       if (state.view === "invoice") commitLocally(state.arg);
@@ -1389,6 +1483,8 @@ tbody tr[data-clickable]:hover { background: var(--accent-soft); }
   });
 
   /* ─── boot ──────────────────────────────────────────────────────────── */
+  setFs(parseFloat(store.get("fs", 1)) || 1);
+  setTheme(store.get("theme", null) || effectiveTheme());
   renderRail();
   go("today");
   updateChrome();

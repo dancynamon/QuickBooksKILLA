@@ -19,6 +19,11 @@ dimension (`DESIGN.md` §2.4) running through every document and line.
 | The failure inbox | Conflicts and rejections surfaced for a human decision. Nothing is auto-merged; nothing is silently dropped. |
 | Posting preview | Every invoice shows the journal entry it produces, balanced. Forward-looking to the ledger project, which owns the real posting rules. |
 | Two companies | Switching realms swaps the whole book. They share nothing. |
+| Adjustable text | `A−` / `A+` in the chrome scale the entire interface from 90% to 170%, rows and controls included. |
+| Light and dark | The `☀` / `☾` control. Both themes are designed, not inverted. |
+
+Text size and theme persist between sessions where the browser allows storage,
+and both are also reachable from the command palette.
 
 ## Try this first
 
