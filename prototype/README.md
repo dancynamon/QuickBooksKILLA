@@ -35,3 +35,38 @@ the network and do it again — same speed, and the write waits its turn.
 Design exploration, not production code. Nothing here is wired to the Rust
 crates or to QuickBooks. Its job is to make the target concrete enough to argue
 with before the UI gets built for real in M1.
+
+## Record logic and reference search
+
+Added after the first review round, and grounded in how QuickBooks actually
+models these things rather than invented.
+
+**Reference search.** Type any number into `⌘K`. It resolves against every
+number a record can be known by — invoice number, estimate number, PO number,
+bill number, payment number, the customer's own PO, a tracking number, or an
+amount — and labels which one matched. A typed number is ambiguous (3611 is an
+estimate, 21234 an invoice, 4471882 a customer's PO), so the app says why it
+matched instead of guessing. Alphanumeric references like `KA-2026-4417` work
+the same way.
+
+**Document lineage.** QuickBooks models this with `LinkedTxn`. Every document
+carries a chain rail across the top:
+
+- Estimate → Invoice → Payment
+- Purchase order → Bill → Bill payment
+
+Steps not yet reached show as `not yet`; reached steps are clickable and carry
+their state and amount. Converting an estimate creates an invoice that keeps
+the link back, carries the customer PO across, and lands in the outbox as a
+pending write.
+
+**Customer PO numbers.** On estimates and invoices, and indexed for search.
+Dan's live QuickBooks already has a "P.O. Number" custom field (definition id
+3) on both — populated on invoices, empty on estimates.
+
+**Dropship linking.** A vendor PO can name the customer invoice it fulfils.
+The PO shows what was charged, what it cost, and the gross margin. The invoice
+shows the PO in its linked records.
+
+**Shopify.** Invoices originating from the web store carry the Shopify order
+number and link out to the admin.

@@ -15,9 +15,10 @@
   --surface-3:   #D8E2E9;
   --line:        #CBD8E1;
   --line-soft:   #DFE7ED;
-  --ink:         #0D1922;
-  --ink-2:       #4A6373;
-  --ink-3:       #7C94A4;
+  --ink:         #0B1720;
+  --ink-2:       #3D5666;
+  --ink-3:       #64798A;
+  --ink-dim:     #4E6675;
   --accent:      #C8481F;
   --accent-ink:  #FFFFFF;
   --accent-soft: rgba(200, 72, 31, .10);
@@ -49,9 +50,10 @@
     --surface-3:   #1C2E3A;
     --line:        #21353F;
     --line-soft:   #182833;
-    --ink:         #E4EDF3;
-    --ink-2:       #94ABB9;
-    --ink-3:       #61798A;
+    --ink:         #E9F1F6;
+    --ink-2:       #A8BECB;
+    --ink-3:       #7A91A1;
+    --ink-dim:     #9CB2C0;
     --accent:      #FF7A45;
     --accent-ink:  #14202B;
     --accent-soft: rgba(255, 122, 69, .13);
@@ -73,9 +75,10 @@
   --surface-3:   #1C2E3A;
   --line:        #21353F;
   --line-soft:   #182833;
-  --ink:         #E4EDF3;
-  --ink-2:       #94ABB9;
-  --ink-3:       #61798A;
+  --ink:         #E9F1F6;
+  --ink-2:       #A8BECB;
+  --ink-3:       #7A91A1;
+  --ink-dim:     #9CB2C0;
   --accent:      #FF7A45;
   --accent-ink:  #14202B;
   --accent-soft: rgba(255, 122, 69, .13);
@@ -97,8 +100,9 @@ body {
   background: var(--ground);
   color: var(--ink);
   font-family: var(--sans);
-  font-size: calc(13px * var(--fs));
-  line-height: 1.45;
+  font-size: calc(13.5px * var(--fs));
+  font-weight: 450;
+  line-height: 1.5;
   -webkit-font-smoothing: antialiased;
   overflow: hidden;
 }
@@ -121,7 +125,7 @@ button { cursor: pointer; background: none; border: none; padding: 0; }
   font-weight: 600;
   letter-spacing: .10em;
   text-transform: uppercase;
-  color: var(--ink-3);
+  color: var(--ink-2);
 }
 
 kbd {
@@ -276,6 +280,7 @@ kbd {
   height: calc(27px * var(--fs));
   padding: 0 10px 0 14px;
   color: var(--ink-2);
+  font-weight: 450;
   font-size: calc(12.5px * var(--fs));
   border-left: 2px solid transparent;
   text-align: left;
@@ -365,12 +370,12 @@ table { border-collapse: collapse; width: 100%; font-size: calc(12.5px * var(--f
 thead th {
   position: sticky; top: 0; z-index: 2;
   background: var(--surface-2);
+  color: var(--ink-2);
   font-family: var(--cond);
   font-size: calc(10px * var(--fs));
   font-weight: 600;
   letter-spacing: .09em;
   text-transform: uppercase;
-  color: var(--ink-3);
   text-align: left;
   padding: 0 10px;
   height: calc(26px * var(--fs));
@@ -378,6 +383,7 @@ thead th {
   white-space: nowrap;
 }
 tbody td {
+  font-weight: 450;
   height: var(--row);
   padding: 0 10px;
   border-bottom: 1px solid var(--line-soft);
@@ -389,7 +395,7 @@ tbody tr { transition: background .08s; }
 tbody tr[data-clickable] { cursor: pointer; }
 tbody tr[data-clickable]:hover { background: var(--accent-soft); }
 .r { text-align: right; }
-.dim { color: var(--ink-3); }
+.dim { color: var(--ink-dim); }
 .trunc { max-width: 320px; overflow: hidden; text-overflow: ellipsis; }
 
 .tag {
@@ -410,6 +416,64 @@ tbody tr[data-clickable]:hover { background: var(--accent-soft); }
 .tag.acc  { color: var(--accent); background: var(--accent-soft); border-color: var(--accent-line); }
 
 .swatch { display: inline-block; width: 7px; height: 7px; border-radius: 2px; margin-right: 6px; vertical-align: baseline; }
+
+/* ─── document chain ────────────────────────────────────────────────── */
+.chain {
+  display: flex; align-items: stretch; gap: 7px; flex-wrap: wrap;
+  padding: 10px 16px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--line);
+}
+.chain-arrow { align-self: center; color: var(--ink-3); font-size: calc(13px * var(--fs)); }
+.chain-step {
+  display: flex; flex-direction: column; gap: 1px;
+  min-width: calc(112px * var(--fs));
+  padding: 6px 11px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface-2);
+  text-align: left;
+  transition: border-color .12s, background .12s;
+}
+.chain-step:not(:disabled):hover { border-color: var(--accent-line); background: var(--accent-soft); }
+.chain-step.is-here { border-color: var(--accent); background: var(--accent-soft); }
+.chain-step.is-empty { opacity: .5; border-style: dashed; background: none; }
+.chain-lbl {
+  font-family: var(--cond); font-size: calc(10px * var(--fs)); font-weight: 600;
+  letter-spacing: .09em; text-transform: uppercase; color: var(--ink-3);
+}
+.chain-no { font-size: calc(13px * var(--fs)); font-weight: 500; }
+.chain-step.is-here .chain-no { color: var(--accent); }
+.chain-state { font-size: calc(11px * var(--fs)); color: var(--ink-dim); }
+
+/* ─── linked-record rows ────────────────────────────────────────────── */
+.link-row {
+  display: flex; align-items: center; gap: 9px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--line-soft);
+  width: 100%; text-align: left;
+}
+.link-row:last-child { border-bottom: none; }
+.link-row:hover .link-main { color: var(--accent); }
+.link-glyph {
+  width: calc(24px * var(--fs)); height: calc(24px * var(--fs)); flex: none;
+  display: grid; place-items: center;
+  border-radius: 5px; background: var(--surface-2); border: 1px solid var(--line);
+  color: var(--ink-2); font-size: calc(12px * var(--fs));
+}
+.link-main { flex: 1; min-width: 0; }
+.link-main b { font-weight: 500; }
+.link-sub { font-size: calc(11px * var(--fs)); color: var(--ink-dim); }
+
+/* ─── palette match reason ──────────────────────────────────────────── */
+.pi-why {
+  font-family: var(--cond); font-size: calc(10px * var(--fs)); font-weight: 600;
+  letter-spacing: .06em; text-transform: uppercase;
+  color: var(--accent); background: var(--accent-soft);
+  border: 1px solid var(--accent-line); border-radius: 3px;
+  padding: 0 5px; flex: none; white-space: nowrap;
+}
+.pi-why.soft { color: var(--ink-3); background: var(--surface-2); border-color: var(--line); }
 
 /* ─── two-column detail ─────────────────────────────────────────────── */
 .split { display: grid; grid-template-columns: minmax(0, 1fr) 268px; gap: 14px; align-items: start; }
@@ -664,7 +728,9 @@ tbody tr[data-clickable]:hover { background: var(--accent-soft); }
     { id: "c4", name: "RIDGELINE AQUATICS & FITNESS", short: "Ridgeline Aquatics", terms: "Net 15", bal: 318750, ytd: 942300, tax: "Taxable — NJ 6.625%", city: "Hampton, NJ" },
     { id: "c5", name: "HARBORVIEW SIGNWORKS", short: "Harborview Signs", terms: "Net 30", bal: 445000, ytd: 3120800, tax: "Exempt — resale", city: "Brooklyn, NY" },
     { id: "c6", name: "NORTHGATE AQUATIC SUPPLY", short: "Northgate Aquatic", terms: "Net 45", bal: 1289900, ytd: 6402100, tax: "Exempt — resale", city: "Zion, IL" },
-    { id: "c7", name: "TOWNSHIP OF ELLISBURG REC", short: "Ellisburg Rec", terms: "Net 30", bal: 62400, ytd: 588000, tax: "Exempt — government", city: "Ellisburg, NJ" }
+    { id: "c7", name: "TOWNSHIP OF ELLISBURG REC", short: "Ellisburg Rec", terms: "Net 30", bal: 62400, ytd: 588000, tax: "Exempt — government", city: "Ellisburg, NJ" },
+    { id: "c8", name: "SUMMIT SPORTS OUTFITTERS", short: "Summit Sports", terms: "Net 30", bal: 0, ytd: 412800, tax: "Taxable — NJ 6.625%", city: "Wake Forest, NC" },
+    { id: "c9", name: "TIDEWATER BRAND", short: "Tidewater Brand", terms: "Net 30", bal: 0, ytd: 738400, tax: "Exempt — resale", city: "Kailua, HI" }
   ];
   const cust = id => CUSTOMERS.find(c => c.id === id);
 
@@ -683,23 +749,31 @@ tbody tr[data-clickable]:hover { background: var(--accent-soft); }
   const item = sku => ITEMS.find(i => i.sku === sku);
 
   const INVOICES = [
-    { no: "21234", date: "2026-08-15", cust: "c1", cls: "foam",  total: 7424,   bal: 7424,   age: 0,  status: "Open",  sync: "pending",
-      lines: [ { sku: "XRT-40-SFSP", qty: 1, rate: 4925 }, { sku: "SHIP-U-GND", qty: 1, rate: 2499 } ] },
+    { no: "21234", date: "2026-08-15", cust: "c1", cls: "drop",  total: 14469,  bal: 14469,  age: 0,  status: "Open",  sync: "pending",
+      custPO: "4471882", shopify: "#1042", tracking: "1Z7K4C280114592031", dropshipPO: "PO-4470",
+      lines: [ { sku: "1 RH 001", qty: 6, rate: 1995 }, { sku: "SHIP-U-GND", qty: 1, rate: 2499 } ] },
     { no: "21233", date: "2026-08-14", cust: "c6", cls: "foam",  total: 289900, bal: 289900, age: 2,  status: "Open",  sync: "synced",
+      custPO: "KA-2026-4417", fromEstimate: "3608", tracking: "1Z7K4C280114588017",
       lines: [ { sku: "PM-6X12-BLU", qty: 3, rate: 89900 }, { sku: "XRT-50-STD", qty: 4, rate: 5450 } ] },
     { no: "21232", date: "2026-08-13", cust: "c4", cls: "sign",  total: 39834,  bal: 39834,  age: 3,  status: "Open",  sync: "synced",
+      custPO: "HAF-8871", shopify: "#1039",
       lines: [ { sku: "SIGN-NJ-POOL", qty: 3, rate: 12400 } ] },
     { no: "21231", date: "2026-08-12", cust: "c5", cls: "cnc",   total: 148200, bal: 0,      age: 4,  status: "Paid",  sync: "synced",
+      custPO: "HVSW-0912", fromEstimate: "3604",
       lines: [ { sku: "CNC-CUT-HR", qty: 12, rate: 9500 }, { sku: "UV-PRINT-SF", qty: 24, rate: 1450 } ] },
     { no: "21230", date: "2026-08-11", cust: "c2", cls: "chair", total: 299000, bal: 189500, age: 5,  status: "Part",  sync: "synced",
+      custPO: "UC-PR-55210", fromEstimate: "3601",
       lines: [ { sku: "LG-CHAIR-60", qty: 2, rate: 149500 } ] },
     { no: "21229", date: "2026-08-08", cust: "c3", cls: "foam",  total: 62500,  bal: 0,      age: 8,  status: "Paid",  sync: "synced",
+      shopify: "#1031", tracking: "1Z7K4C280114570994",
       lines: [ { sku: "AM-SC-KB", qty: 50, rate: 1250 } ] },
     { no: "21228", date: "2026-08-06", cust: "c7", cls: "sign",  total: 62400,  bal: 62400,  age: 10, status: "Open",  sync: "synced",
       lines: [ { sku: "SIGN-NJ-POOL", qty: 5, rate: 12400 } ] },
     { no: "21227", date: "2026-08-04", cust: "c1", cls: "foam",  total: 197000, bal: 0,      age: 12, status: "Paid",  sync: "synced",
+      custPO: "4471560",
       lines: [ { sku: "XRT-40-SFSP", qty: 40, rate: 4925 } ] },
     { no: "21226", date: "2026-07-29", cust: "c6", cls: "foam",  total: 998900, bal: 998900, age: 18, status: "Open",  sync: "synced",
+      custPO: "KA-2026-4180",
       lines: [ { sku: "PM-6X12-BLU", qty: 10, rate: 89900 }, { sku: "XRT-50-STD", qty: 18, rate: 5450 } ] },
     { no: "21225", date: "2026-07-24", cust: "c5", cls: "uv",    total: 84600,  bal: 0,      age: 23, status: "Paid",  sync: "synced",
       lines: [ { sku: "UV-PRINT-SF", qty: 58, rate: 1450 } ] },
@@ -714,11 +788,40 @@ tbody tr[data-clickable]:hover { background: var(--accent-soft); }
   ];
 
   const POS = [
-    { no: "PO-4471", date: "2026-08-14", vendor: "Continental Foam",     cls: "foam",  total: 1284000, status: "Open",     rec: "0 of 18 sheets" },
-    { no: "PO-4470", date: "2026-08-12", vendor: "Poolcraft Products",  cls: "drop",  total: 84250,   status: "Shipped",  rec: "dropship" },
-    { no: "PO-4469", date: "2026-08-09", vendor: "Spectra EVA",         cls: "foam",  total: 462800,  status: "Partial",  rec: "12 of 20 sheets" },
-    { no: "PO-4468", date: "2026-08-05", vendor: "Aquabot Systems",     cls: "drop",  total: 39900,   status: "Received", rec: "complete" },
-    { no: "PO-4467", date: "2026-07-31", vendor: "Polymer Source",    cls: "foam",  total: 918400,  status: "Open",     rec: "0 of 24 sheets" }
+    { no: "PO-4471", date: "2026-08-14", vendor: "Continental Foam",    cls: "foam", total: 1284000, status: "Open",     rec: "0 of 18 sheets", bill: null,       forInvoice: null },
+    { no: "PO-4470", date: "2026-08-12", vendor: "Poolcraft Products", cls: "drop", total: 8420,    status: "Shipped",  rec: "dropship",       bill: "BILL-2291", forInvoice: "21234" },
+    { no: "PO-4469", date: "2026-08-09", vendor: "Spectra EVA",        cls: "foam", total: 462800,  status: "Partial",  rec: "12 of 20 sheets",bill: "BILL-2288", forInvoice: null },
+    { no: "PO-4468", date: "2026-08-05", vendor: "Aquabot Systems",    cls: "drop", total: 39900,   status: "Received", rec: "complete",       bill: "BILL-2284", forInvoice: null },
+    { no: "PO-4467", date: "2026-07-31", vendor: "Polymer Source",   cls: "foam", total: 918400,  status: "Open",     rec: "0 of 24 sheets", bill: null,       forInvoice: null }
+  ];
+
+  const ESTIMATES = [
+    { no: "3611", date: "2026-08-20", cust: "c8", cls: "chair", total: 137836, status: "Pending",  expires: "2026-09-19", custPO: "",            sync: "synced", becameInvoice: null,
+      lines: [ { sku: "LG-CHAIR-60", qty: 1, rate: 124500 }, { sku: "SHIP-U-GND", qty: 1, rate: 12836 } ] },
+    { no: "3610", date: "2026-08-20", cust: "c9", cls: "foam",  total: 213625, status: "Pending",  expires: "2026-09-19", custPO: "",            sync: "synced", becameInvoice: null,
+      lines: [ { sku: "XRT-40-SFSP", qty: 35, rate: 5675 }, { sku: "AM-SC-KB", qty: 3, rate: 4500 } ] },
+    { no: "3608", date: "2026-08-02", cust: "c6", cls: "foam",  total: 289900, status: "Accepted", expires: "2026-09-01", custPO: "KA-2026-4417", sync: "synced", becameInvoice: "21233" },
+    { no: "3604", date: "2026-07-28", cust: "c5", cls: "cnc",   total: 148200, status: "Accepted", expires: "2026-08-27", custPO: "HVSW-0912",   sync: "synced", becameInvoice: "21231" },
+    { no: "3601", date: "2026-07-21", cust: "c2", cls: "chair", total: 299000, status: "Accepted", expires: "2026-08-20", custPO: "UC-PR-55210", sync: "synced", becameInvoice: "21230" },
+    { no: "3599", date: "2026-07-09", cust: "c4", cls: "sign",  total: 84200,  status: "Expired",  expires: "2026-08-08", custPO: "",            sync: "synced", becameInvoice: null }
+  ];
+
+  const BILLS = [
+    { no: "BILL-2291", date: "2026-08-13", vendor: "Poolcraft Products", po: "PO-4470", total: 8420,   bal: 8420,  due: "2026-09-12", status: "Open" },
+    { no: "BILL-2288", date: "2026-08-10", vendor: "Spectra EVA",        po: "PO-4469", total: 277680, bal: 0,     due: "2026-09-09", status: "Paid" },
+    { no: "BILL-2284", date: "2026-08-06", vendor: "Aquabot Systems",    po: "PO-4468", total: 39900,  bal: 0,     due: "2026-09-05", status: "Paid" }
+  ];
+
+  const BILLPAYMENTS = [
+    { no: "BP-881", date: "2026-08-18", vendor: "Spectra EVA",     bill: "BILL-2288", amount: 277680, method: "ACH" },
+    { no: "BP-877", date: "2026-08-12", vendor: "Aquabot Systems", bill: "BILL-2284", amount: 39900,  method: "Amex ••4021" }
+  ];
+
+  const PAYMENTS = [
+    { no: "PMT-5512", date: "2026-08-14", cust: "c5", inv: "21231", amount: 148200, method: "Check 8841" },
+    { no: "PMT-5509", date: "2026-08-12", cust: "c3", inv: "21229", amount: 62500,  method: "ACH" },
+    { no: "PMT-5505", date: "2026-08-11", cust: "c2", inv: "21230", amount: 109500, method: "Check 21140" },
+    { no: "PMT-5498", date: "2026-08-06", cust: "c1", inv: "21227", amount: 197000, method: "ACH" }
   ];
 
   const ACTIVITY = [
@@ -748,12 +851,199 @@ tbody tr[data-clickable]:hover { background: var(--accent-soft); }
 
   const NAV = [
     { id: "today",     label: "Today",         glyph: "◆" },
+    { id: "estimates", label: "Estimates",     glyph: "◈", count: () => ESTIMATES.length },
     { id: "invoices",  label: "Invoices",      glyph: "▤", count: () => INVOICES.length },
     { id: "customers", label: "Customers",     glyph: "◑", count: () => CUSTOMERS.length },
     { id: "items",     label: "Items",         glyph: "▦", count: () => ITEMS.length },
     { id: "pos",       label: "Purchase orders",glyph: "▥", count: () => POS.length },
+    { id: "bills",     label: "Bills",         glyph: "▧", count: () => BILLS.length },
+    { id: "payments",  label: "Payments",      glyph: "◍", count: () => PAYMENTS.length },
     { id: "failures",  label: "Needs you",     glyph: "▲", count: () => FAILURES.length, alert: true }
   ];
+
+  /* ─── document lineage ───────────────────────────────────────────────
+     QuickBooks models this with LinkedTxn: an invoice knows the estimate it
+     came from, a bill knows its purchase order. The chain is what you
+     actually want to see — where a document came from and what it became.  */
+
+  const DOC = {
+    estimate: { label: "Estimate", glyph: "◈", view: "estimate" },
+    invoice:  { label: "Invoice",  glyph: "▤", view: "invoice"  },
+    payment:  { label: "Payment",  glyph: "◍", view: "payments" },
+    po:       { label: "PO",       glyph: "▥", view: "po"       },
+    bill:     { label: "Bill",     glyph: "▧", view: "bills"    },
+    billpay:  { label: "Bill pmt", glyph: "◍", view: "bills"    }
+  };
+
+  function lineage(kind, no) {
+    const chain = [];
+    if (kind === "estimate" || kind === "invoice") {
+      let est = null, inv = null;
+      if (kind === "estimate") {
+        est = ESTIMATES.find(e => e.no === no) || null;
+        inv = est && est.becameInvoice ? INVOICES.find(i => i.no === est.becameInvoice) : null;
+      } else {
+        inv = INVOICES.find(i => i.no === no) || null;
+        est = ESTIMATES.find(e => e.becameInvoice === no) || null;
+        if (!est && inv && inv.fromEstimate) est = ESTIMATES.find(e => e.no === inv.fromEstimate) || null;
+      }
+
+      if (est) chain.push({ kind: "estimate", no: est.no, amount: est.total, state: est.status.toLowerCase() });
+      else chain.push({ kind: "estimate", no: null, amount: null, state: "none" });
+
+      if (inv) chain.push({ kind: "invoice", no: inv.no, amount: inv.total, state: inv.status.toLowerCase() });
+      else chain.push({ kind: "invoice", no: null, amount: null, state: "none" });
+
+      const pays = inv ? PAYMENTS.filter(pm => pm.inv === inv.no) : [];
+      chain.push(pays.length
+        ? { kind: "payment", no: pays.map(pm => pm.no).join(", "),
+            amount: pays.reduce((a, pm) => a + pm.amount, 0),
+            state: inv && inv.bal === 0 ? "paid in full" : "partial" }
+        : { kind: "payment", no: null, amount: null, state: "none" });
+    } else {
+      const po   = POS.find(x => x.no === no) || POS.find(x => x.bill === no);
+      const bill = BILLS.find(b => b.no === (po || {}).bill) || BILLS.find(b => b.no === no);
+      const bps  = bill ? BILLPAYMENTS.filter(b => b.bill === bill.no) : [];
+
+      chain.push(po ? { kind: "po", no: po.no, amount: po.total, state: po.status.toLowerCase() }
+                    : { kind: "po", no: null, amount: null, state: "none" });
+      chain.push(bill ? { kind: "bill", no: bill.no, amount: bill.total, state: bill.status.toLowerCase() }
+                      : { kind: "bill", no: null, amount: null, state: "none" });
+      chain.push(bps.length
+        ? { kind: "billpay", no: bps.map(b => b.no).join(", "),
+            amount: bps.reduce((a, b) => a + b.amount, 0), state: "paid" }
+        : { kind: "billpay", no: null, amount: null, state: "none" });
+    }
+    return chain;
+  }
+
+  /* The chain rail shown on top of every document. */
+  function lineageRail(kind, no) {
+    const chain = lineage(kind, no);
+    return `<div class="chain">${chain.map((step, n) => {
+      const meta = DOC[step.kind];
+      const here = step.kind === kind && step.no === no;
+      const dead = !step.no;
+      return `${n ? '<span class="chain-arrow" aria-hidden="true">→</span>' : ""}
+        <button class="chain-step${here ? " is-here" : ""}${dead ? " is-empty" : ""}"
+                ${dead || here ? "disabled" : ""} data-chain="${step.kind}:${step.no || ""}">
+          <span class="chain-lbl">${meta.label}</span>
+          <span class="chain-no mono">${dead ? "not yet" : esc(step.no)}</span>
+          <span class="chain-state">${dead ? "&nbsp;" : esc(step.state)}${step.amount ? " · " + plain(step.amount) : ""}</span>
+        </button>`;
+    }).join("")}</div>`;
+  }
+
+  /* ─── search index ───────────────────────────────────────────────────
+     Typing a number is ambiguous — 3611 is an estimate, 21234 an invoice,
+     4471882 a customer's own PO. Rather than guess, index every number
+     a record can be known by and say which one matched.                  */
+
+  function searchIndex() {
+    const rows = [];
+    const key = (v, why, weight) => ({ v: String(v), why, weight });
+
+    INVOICES.forEach(i => rows.push({
+      kind: "invoice", no: i.no, glyph: "▤",
+      title: `Invoice ${i.no} — ${cust(i.cust).short}`,
+      meta: plain(i.total),
+      keys: [
+        key(i.no, "invoice number", 0),
+        i.custPO && key(i.custPO, "customer PO", 4),
+        i.shopify && key(i.shopify.replace("#", ""), "Shopify order", 8),
+        i.tracking && key(i.tracking, "tracking number", 12),
+        i.fromEstimate && key(i.fromEstimate, "from estimate " + i.fromEstimate, 6),
+        i.dropshipPO && key(i.dropshipPO, "dropship " + i.dropshipPO, 7),
+        key(plain(i.total).replace(/,/g, ""), "amount", 16),
+        i.bal && key(plain(i.bal).replace(/,/g, ""), "balance", 18)
+      ].filter(Boolean),
+      act: () => go("invoice", i.no)
+    }));
+
+    ESTIMATES.forEach(e => rows.push({
+      kind: "estimate", no: e.no, glyph: "◈",
+      title: `Estimate ${e.no} — ${cust(e.cust).short}`,
+      meta: plain(e.total),
+      keys: [
+        key(e.no, "estimate number", 0),
+        e.custPO && key(e.custPO, "customer PO", 4),
+        key(plain(e.total).replace(/,/g, ""), "amount", 16)
+      ].filter(Boolean),
+      act: () => go("estimate", e.no)
+    }));
+
+    POS.forEach(o => rows.push({
+      kind: "po", no: o.no, glyph: "▥",
+      title: `${o.no} — ${o.vendor}`,
+      meta: plain(o.total),
+      keys: [
+        key(o.no, "PO number", 0),
+        key(o.no.replace(/\D/g, ""), "PO number", 1),
+        key(plain(o.total).replace(/,/g, ""), "amount", 16)
+      ],
+      act: () => go("po", o.no)
+    }));
+
+    BILLS.forEach(b => rows.push({
+      kind: "bill", no: b.no, glyph: "▧",
+      title: `${b.no} — ${b.vendor}`,
+      meta: plain(b.total),
+      keys: [
+        key(b.no, "bill number", 0),
+        key(b.no.replace(/\D/g, ""), "bill number", 1),
+        b.po && key(b.po.replace(/\D/g, ""), "from PO " + b.po, 6),
+        key(plain(b.total).replace(/,/g, ""), "amount", 16)
+      ].filter(Boolean),
+      act: () => go("bills")
+    }));
+
+    PAYMENTS.forEach(pm => rows.push({
+      kind: "payment", no: pm.no, glyph: "◍",
+      title: `${pm.no} — ${cust(pm.cust).short}`,
+      meta: plain(pm.amount),
+      keys: [
+        key(pm.no.replace(/\D/g, ""), "payment number", 0),
+        key(pm.inv, "applied to invoice " + pm.inv, 3),
+        key(plain(pm.amount).replace(/,/g, ""), "amount", 16),
+        key(pm.method.replace(/\D/g, "") || "0", "payment reference", 10)
+      ],
+      act: () => go("payments")
+    }));
+
+    CUSTOMERS.forEach(c => rows.push({
+      kind: "customer", no: c.id, glyph: "◑",
+      title: c.name, meta: c.bal ? plain(c.bal) : "",
+      keys: [key(plain(c.bal).replace(/,/g, ""), "open balance", 20)],
+      act: () => go("customer", c.id)
+    }));
+
+    ITEMS.forEach(i => rows.push({
+      kind: "item", no: i.sku, glyph: "▦",
+      title: `${i.sku} — ${i.desc}`, meta: plain(i.price),
+      keys: [key(plain(i.price).replace(/,/g, ""), "unit price", 20)],
+      act: () => go("items")
+    }));
+
+    return rows;
+  }
+
+  /* Score a record against a typed reference. Exact beats prefix beats
+     contains; within each, the more canonical the field the better, so an
+     invoice number outranks an amount that happens to contain the digits. */
+  function scoreKeys(row, q) {
+    let best = null;
+    row.keys.forEach(k => {
+      const v = k.v.toLowerCase();
+      let base = null;
+      if (v === q) base = 1000;
+      else if (v.startsWith(q)) base = 600;
+      else if (v.includes(q)) base = 300;
+      if (base === null) return;
+      const score = base - k.weight;
+      if (!best || score > best.score) best = { score, why: k.why, exact: v === q };
+    });
+    return best;
+  }
 
   /* ─── state ─────────────────────────────────────────────────────────── */
   const state = { view: "today", arg: null, online: true, pending: 1, syncAge: 4, fs: 1 };
@@ -993,7 +1283,8 @@ tbody tr[data-clickable]:hover { background: var(--accent-soft); }
       return head("Invoice " + inv.no, `${esc(c.short)} · ${inv.date}`,
         `<button class="btn" data-go="invoices">← Back</button>
          <button class="btn">Print</button>
-         <button class="btn btn-primary" data-save="${inv.no}">Save <kbd style="border-color:currentColor;background:transparent;color:inherit">⌘S</kbd></button>`) + `
+         <button class="btn btn-primary" data-save="${inv.no}">Save <kbd style="border-color:currentColor;background:transparent;color:inherit">⌘S</kbd></button>`)
+        + lineageRail("invoice", inv.no) + `
       <div class="pad">
         <div class="split">
           <div>
@@ -1004,6 +1295,7 @@ tbody tr[data-clickable]:hover { background: var(--accent-soft); }
               <div class="field"><span class="lbl">Date</span><span class="field-val mono">${inv.date}</span></div>
               <div class="field"><span class="lbl">Class</span><span class="field-val"><span class="swatch" style="background:${cls(inv.cls).color}"></span>${cls(inv.cls).name}</span></div>
               <div class="field"><span class="lbl">Tax treatment</span><span class="field-val" style="font-size:calc(12px * var(--fs))">${esc(c.tax)}</span></div>
+              <div class="field"><span class="lbl">Customer PO</span><span class="field-val mono">${inv.custPO ? esc(inv.custPO) : '<span class="dim">—</span>'}</span></div>
               <div class="field"><span class="lbl">Sync state</span><span class="field-val">${syncTag(inv.sync)}</span></div>
             </div>
 
@@ -1064,10 +1356,15 @@ tbody tr[data-clickable]:hover { background: var(--accent-soft); }
                 <button class="btn" style="margin-top:10px;width:100%" data-cust="${c.id}">Full history</button>
               </div>
             </div>
+            <div class="panel" style="margin-bottom:14px">
+              <div class="panel-head"><span class="lbl">Linked records</span></div>
+              <div class="panel-body" style="padding:2px 12px 10px">
+                ${linkRows(invLinks(inv))}
+              </div>
+            </div>
             <div class="panel">
               <div class="panel-head"><span class="lbl">Also in QuickBooks</span></div>
               <div class="panel-body">
-                <p class="dim" style="margin:0 0 9px;font-size:calc(12px * var(--fs))">This invoice exists in QBO as well. Open it there for anything this app does not do yet.</p>
                 <button class="btn" style="width:100%" onclick="return false">Open in QuickBooks ↗</button>
               </div>
             </div>
@@ -1163,6 +1460,173 @@ tbody tr[data-clickable]:hover { background: var(--accent-soft); }
       </div>`;
     },
 
+    estimates() {
+      const open = ESTIMATES.filter(e => e.status === "Pending");
+      return head("Estimates", `${ESTIMATES.length} this year · ${open.length} still open`,
+        `<button class="btn btn-primary">New estimate</button>`) + `
+      <div class="pad">
+        <div class="strip">
+          <div class="strip-cell"><div class="lbl">Open estimates</div><div class="strip-val">${money(open.reduce((a, e) => a + e.total, 0))}</div><div class="strip-note">${open.length} awaiting a decision</div></div>
+          <div class="strip-cell"><div class="lbl">Accepted, not invoiced</div><div class="strip-val warn">${money(ESTIMATES.filter(e => e.status === "Accepted" && !e.becameInvoice).reduce((a, e) => a + e.total, 0))}</div><div class="strip-note">ready to convert</div></div>
+          <div class="strip-cell"><div class="lbl">Converted</div><div class="strip-val pos">${money(ESTIMATES.filter(e => e.becameInvoice).reduce((a, e) => a + e.total, 0))}</div><div class="strip-note">became invoices</div></div>
+          <div class="strip-cell"><div class="lbl">Expired</div><div class="strip-val">${money(ESTIMATES.filter(e => e.status === "Expired").reduce((a, e) => a + e.total, 0))}</div><div class="strip-note">past their date</div></div>
+        </div>
+        <div class="grid-wrap"><div class="grid-scroll"><table>
+          <thead><tr><th>No.</th><th>Date</th><th>Customer</th><th>Customer PO</th><th>Class</th><th class="r">Total</th><th>Expires</th><th>Status</th><th>Became</th></tr></thead>
+          <tbody>${ESTIMATES.map(e => `
+            <tr data-clickable data-est="${e.no}">
+              <td class="mono">${e.no}</td>
+              <td class="mono dim">${e.date}</td>
+              <td class="trunc">${esc(cust(e.cust).short)}</td>
+              <td class="mono dim">${e.custPO ? esc(e.custPO) : "—"}</td>
+              <td><span class="swatch" style="background:${cls(e.cls).color}"></span><span class="dim">${cls(e.cls).name}</span></td>
+              <td class="r num">${plain(e.total)}</td>
+              <td class="mono dim">${e.expires}</td>
+              <td>${e.status === "Accepted" ? '<span class="tag ok">accepted</span>' : e.status === "Expired" ? '<span class="tag crit">expired</span>' : '<span class="tag warn">pending</span>'}</td>
+              <td>${e.becameInvoice ? `<span class="tag acc">inv ${e.becameInvoice}</span>` : '<span class="dim">—</span>'}</td>
+            </tr>`).join("")}</tbody>
+        </table></div></div>
+        <p class="hint">An accepted estimate with nothing in the Became column is revenue sitting in a drawer. That is the column to scan.</p>
+      </div>`;
+    },
+
+    estimate(no) {
+      const e = ESTIMATES.find(x => x.no === no) || ESTIMATES[0];
+      const c = cust(e.cust);
+      const canConvert = !e.becameInvoice;
+      return head("Estimate " + e.no, `${esc(c.short)} · expires ${e.expires}`,
+        `<button class="btn" data-go="estimates">← Back</button>
+         ${canConvert ? `<button class="btn btn-primary" data-convert="${e.no}">Convert to invoice</button>`
+                      : `<button class="btn" data-inv="${e.becameInvoice}">Open invoice ${e.becameInvoice} →</button>`}`)
+        + lineageRail("estimate", e.no) + `
+      <div class="pad">
+        <div class="split">
+          <div class="panel">
+            <div class="doc-head">
+              <div class="field"><span class="lbl">Customer</span><span class="field-val">${esc(c.short)}</span></div>
+              <div class="field"><span class="lbl">Date</span><span class="field-val mono">${e.date}</span></div>
+              <div class="field"><span class="lbl">Expires</span><span class="field-val mono">${e.expires}</span></div>
+              <div class="field"><span class="lbl">Customer PO</span><span class="field-val mono">${e.custPO ? esc(e.custPO) : '<span class="dim">not supplied</span>'}</span></div>
+              <div class="field"><span class="lbl">Class</span><span class="field-val"><span class="swatch" style="background:${cls(e.cls).color}"></span>${cls(e.cls).name}</span></div>
+              <div class="field"><span class="lbl">Status</span><span class="field-val">${e.status}</span></div>
+            </div>
+            ${e.lines ? `<div class="grid-scroll"><table>
+              <thead><tr><th style="width:34px">#</th><th>Item</th><th>Description</th><th class="r">Qty</th><th class="r">Rate</th><th class="r">Amount</th></tr></thead>
+              <tbody>${e.lines.map((l, n) => {
+                const it = item(l.sku);
+                return `<tr><td class="mono dim">${n + 1}</td><td class="mono">${esc(l.sku)}</td>
+                  <td class="trunc dim">${esc(it ? it.desc : "")}</td>
+                  <td class="r num">${l.qty}</td><td class="r num">${plain(l.rate)}</td>
+                  <td class="r num">${plain(l.qty * l.rate)}</td></tr>`; }).join("")}</tbody>
+            </table></div>` : ""}
+            <div class="totals"><dl>
+              <div class="grand" style="display:contents"><dt>Total</dt><dd>${plain(e.total)}</dd></div>
+            </dl></div>
+          </div>
+          <div class="panel">
+            <div class="panel-head"><span class="lbl">${esc(c.short)}</span></div>
+            <div class="panel-body">
+              <dl class="kv">
+                <dt>Location</dt><dd>${esc(c.city)}</dd>
+                <dt>Terms</dt><dd>${esc(c.terms)}</dd>
+                <dt>Sales YTD</dt><dd class="num">${plain(c.ytd)}</dd>
+              </dl>
+              <button class="btn" style="margin-top:10px;width:100%" data-cust="${c.id}">Full history</button>
+            </div>
+          </div>
+        </div>
+      </div>`;
+    },
+
+    po(no) {
+      const o = POS.find(x => x.no === no) || POS[0];
+      const bill = BILLS.find(b => b.no === o.bill);
+      const inv = o.forInvoice ? INVOICES.find(i => i.no === o.forInvoice) : null;
+      const margin = inv ? Math.round((inv.total - o.total) / inv.total * 100) : null;
+      return head(o.no, `${esc(o.vendor)} · ${o.date}`,
+        `<button class="btn" data-go="pos">← Back</button>
+         ${bill ? `<button class="btn">Open bill ${bill.no}</button>` : `<button class="btn btn-primary">Convert to bill</button>`}`)
+        + lineageRail("po", o.no) + `
+      <div class="pad">
+        <div class="split">
+          <div class="panel">
+            <div class="doc-head">
+              <div class="field"><span class="lbl">Vendor</span><span class="field-val">${esc(o.vendor)}</span></div>
+              <div class="field"><span class="lbl">Date</span><span class="field-val mono">${o.date}</span></div>
+              <div class="field"><span class="lbl">Class</span><span class="field-val"><span class="swatch" style="background:${cls(o.cls).color}"></span>${cls(o.cls).name}</span></div>
+              <div class="field"><span class="lbl">Received</span><span class="field-val">${esc(o.rec)}</span></div>
+              <div class="field"><span class="lbl">Total</span><span class="field-val num">${plain(o.total)}</span></div>
+              <div class="field"><span class="lbl">Status</span><span class="field-val">${o.status}</span></div>
+            </div>
+            ${inv ? `
+            <div class="panel-head" style="border-top:1px solid var(--line)"><span class="lbl">Dropship — fulfils a customer order</span></div>
+            <div class="grid-scroll"><table>
+              <thead><tr><th>Customer invoice</th><th>Customer</th><th class="r">You charged</th><th class="r">Vendor cost</th><th class="r">Gross margin</th></tr></thead>
+              <tbody><tr data-clickable data-inv="${inv.no}">
+                <td class="mono">${inv.no}</td>
+                <td class="trunc">${esc(cust(inv.cust).short)}</td>
+                <td class="r num">${plain(inv.total)}</td>
+                <td class="r num dim">${plain(o.total)}</td>
+                <td class="r num" style="color:${margin > 30 ? "var(--ok)" : margin > 0 ? "var(--warn)" : "var(--crit)"}">${plain(inv.total - o.total)} · ${margin}%</td>
+              </tr></tbody>
+            </table></div>` : ""}
+          </div>
+          <div class="panel">
+            <div class="panel-head"><span class="lbl">Linked records</span></div>
+            <div class="panel-body" style="padding:2px 12px 10px">
+              ${linkRows([
+                bill ? { glyph: "▧", main: `${bill.no} — ${plain(bill.total)}`, sub: `Vendor bill · due ${bill.due} · ${bill.status.toLowerCase()}`, act: () => go("bills") }
+                     : { glyph: "▧", main: "No bill yet", sub: "This PO has not been billed", dead: true },
+                inv ? { glyph: "▤", main: `Invoice ${inv.no}`, sub: `Dropship to ${cust(inv.cust).short}`, act: () => go("invoice", inv.no) }
+                    : { glyph: "▤", main: "Not a dropship", sub: "Stock purchase, no customer order attached", dead: true }
+              ])}
+            </div>
+          </div>
+        </div>
+      </div>`;
+    },
+
+    bills() {
+      return head("Bills", `${BILLS.length} from vendors · every one traced back to its PO`) + `
+      <div class="pad">
+        <div class="grid-wrap"><div class="grid-scroll"><table>
+          <thead><tr><th>No.</th><th>Date</th><th>Vendor</th><th>From PO</th><th class="r">Total</th><th class="r">Balance</th><th>Due</th><th>Status</th><th>Paid by</th></tr></thead>
+          <tbody>${BILLS.map(b => {
+            const bp = BILLPAYMENTS.find(x => x.bill === b.no);
+            return `<tr data-clickable ${b.po ? `data-po="${b.po}"` : ""}>
+              <td class="mono">${b.no}</td>
+              <td class="mono dim">${b.date}</td>
+              <td>${esc(b.vendor)}</td>
+              <td>${b.po ? `<span class="tag acc">${b.po}</span>` : '<span class="dim">—</span>'}</td>
+              <td class="r num">${plain(b.total)}</td>
+              <td class="r num">${b.bal ? plain(b.bal) : '<span class="dim">—</span>'}</td>
+              <td class="mono dim">${b.due}</td>
+              <td>${b.status === "Paid" ? '<span class="tag ok">paid</span>' : '<span class="tag">open</span>'}</td>
+              <td class="mono dim">${bp ? `${bp.no} · ${esc(bp.method)}` : "—"}</td>
+            </tr>`; }).join("")}</tbody>
+        </table></div></div>
+        <p class="hint">Click the PO tag to walk back up the chain to the purchase order.</p>
+      </div>`;
+    },
+
+    payments() {
+      return head("Payments received", `${PAYMENTS.length} applied to invoices`) + `
+      <div class="pad">
+        <div class="grid-wrap"><div class="grid-scroll"><table>
+          <thead><tr><th>No.</th><th>Date</th><th>Customer</th><th>Applied to</th><th class="r">Amount</th><th>Method</th></tr></thead>
+          <tbody>${PAYMENTS.map(pm => `
+            <tr data-clickable data-inv="${pm.inv}">
+              <td class="mono">${pm.no}</td>
+              <td class="mono dim">${pm.date}</td>
+              <td class="trunc">${esc(cust(pm.cust).short)}</td>
+              <td><span class="tag acc">inv ${pm.inv}</span></td>
+              <td class="r num">${plain(pm.amount)}</td>
+              <td class="dim">${esc(pm.method)}</td>
+            </tr>`).join("")}</tbody>
+        </table></div></div>
+      </div>`;
+    },
+
     failures() {
       return head("Needs you", "Writes QuickBooks would not take. Nothing was dropped and nothing was merged behind your back.") + `
       <div class="pad">
@@ -1190,6 +1654,39 @@ tbody tr[data-clickable]:hover { background: var(--accent-soft); }
       </div>`;
     }
   };
+
+  /* Records attached to an invoice that are not part of its lineage:
+     the vendor PO fulfilling it, the Shopify order it came from, the
+     parcel carrying it. */
+  function invLinks(inv) {
+    const out = [];
+    if (inv.dropshipPO) {
+      const po = POS.find(o => o.no === inv.dropshipPO);
+      if (po) out.push({
+        glyph: "▥", main: `${po.no} — ${po.vendor}`,
+        sub: `Dropship · vendor cost ${plain(po.total)} · margin ${Math.round((inv.total - po.total) / inv.total * 100)}%`,
+        act: () => go("po", po.no)
+      });
+    }
+    if (inv.shopify) out.push({
+      glyph: "◎", main: `Shopify order ${inv.shopify}`,
+      sub: "harborworks.myshopify.com · opens in Shopify admin", ext: true
+    });
+    if (inv.tracking) out.push({
+      glyph: "◈", main: inv.tracking, sub: "UPS Ground · opens tracking", ext: true
+    });
+    if (!out.length) out.push({ glyph: "—", main: "Nothing linked", sub: "No dropship PO, Shopify order or parcel", dead: true });
+    return out;
+  }
+
+  function linkRows(links) {
+    return links.map((l, n) => `
+      <button class="link-row" ${l.dead ? "disabled" : ""} data-link="${n}">
+        <span class="link-glyph" aria-hidden="true">${l.glyph}</span>
+        <span class="link-main"><b>${esc(l.main)}</b><div class="link-sub">${esc(l.sub)}</div></span>
+        ${l.ext ? '<span class="dim" aria-hidden="true">↗</span>' : l.dead ? "" : '<span class="dim" aria-hidden="true">›</span>'}
+      </button>`).join("");
+  }
 
   function lineRow(l, n, invCls) {
     const it = item(l.sku);
@@ -1221,6 +1718,36 @@ tbody tr[data-clickable]:hover { background: var(--accent-soft); }
     document.querySelectorAll("[data-inv]").forEach(r => r.onclick = () => go("invoice", r.dataset.inv));
     document.querySelectorAll("[data-cust]").forEach(r => r.onclick = e => { e.stopPropagation(); go("customer", r.dataset.cust); });
     document.querySelectorAll("[data-item]").forEach(r => r.onclick = () => toast("Item detail — not in this prototype"));
+    document.querySelectorAll("[data-est]").forEach(r => r.onclick = () => go("estimate", r.dataset.est));
+    document.querySelectorAll("[data-po]").forEach(r => r.onclick = e => { e.stopPropagation(); go("po", r.dataset.po); });
+
+    document.querySelectorAll("[data-chain]").forEach(b => b.onclick = () => {
+      const [kind, no] = b.dataset.chain.split(":");
+      if (!no) return;
+      const target = { estimate: "estimate", invoice: "invoice", po: "po" }[kind];
+      if (target) go(target, no.split(",")[0].trim());
+      else go(DOC[kind].view);
+    });
+
+    document.querySelectorAll("[data-convert]").forEach(b => b.onclick = () => convertEstimate(b.dataset.convert));
+
+    const links = document.querySelectorAll("[data-link]");
+    if (links.length && state.view === "invoice") {
+      const inv = INVOICES.find(i => i.no === state.arg);
+      const model = invLinks(inv);
+      links.forEach(b => {
+        const l = model[Number(b.dataset.link)];
+        b.onclick = () => l.act ? l.act() : toast(l.ext ? "Opens outside this app" : "Nothing to open");
+      });
+    } else if (links.length && state.view === "po") {
+      const o = POS.find(x => x.no === state.arg);
+      const bill = BILLS.find(b => b.no === o.bill);
+      const inv = o.forInvoice ? INVOICES.find(i => i.no === o.forInvoice) : null;
+      links.forEach(b => {
+        const n = Number(b.dataset.link);
+        b.onclick = () => { if (n === 0 && bill) go("bills"); else if (n === 1 && inv) go("invoice", inv.no); };
+      });
+    }
     document.querySelectorAll("[data-new]").forEach(b => b.onclick = () => toast("New invoice — open 21234 to see the editor"));
 
     const save = document.querySelector("[data-save]");
@@ -1248,6 +1775,27 @@ tbody tr[data-clickable]:hover { background: var(--accent-soft); }
       setTimeout(() => { const s = $("#skuIn"); if (s) s.focus(); }, 0);
       toast(`Added ${hit.sku}`, readMs() + " ms");
     };
+  }
+
+  /* Estimate to invoice, the way QuickBooks models it: a new invoice that
+     keeps a link back to its estimate rather than replacing it. The customer
+     PO carries across, which is the thing that gets retyped by hand today. */
+  function convertEstimate(no) {
+    const e = ESTIMATES.find(x => x.no === no);
+    if (!e || e.becameInvoice) return;
+    const next = String(Math.max(...INVOICES.map(i => Number(i.no))) + 1);
+    INVOICES.unshift({
+      no: next, date: "2026-08-20", cust: e.cust, cls: e.cls,
+      total: e.total, bal: e.total, age: 0, status: "Open", sync: "pending",
+      custPO: e.custPO, fromEstimate: e.no,
+      lines: (e.lines || []).map(l => ({ ...l }))
+    });
+    e.becameInvoice = next;
+    e.status = "Accepted";
+    state.pending++;
+    updateChrome();
+    toast(`Estimate ${no} became invoice ${next}`, readMs() + " ms");
+    go("invoice", next);
   }
 
   /* The demo's whole argument: a save commits to local disk and returns
@@ -1372,36 +1920,24 @@ tbody tr[data-clickable]:hover { background: var(--accent-soft); }
   /* ─── command palette ───────────────────────────────────────────────── */
   let palRows = [], palIdx = 0;
 
-  function palData() {
+  function palCommands() {
     const rows = [];
-    NAV.forEach(n => rows.push({ sec: "Go to", glyph: n.glyph, main: n.label, meta: "", act: () => go(n.id) }));
+    NAV.forEach(n => rows.push({ sec: "Go to", glyph: n.glyph, title: n.label, meta: "", act: () => go(n.id) }));
     rows.push(
-      { sec: "Display", glyph: "A", main: "Bigger text",  meta: "⌘⇧+", act: () => setFs(state.fs + FS_STEP, true) },
-      { sec: "Display", glyph: "A", main: "Smaller text", meta: "⌘⇧−", act: () => setFs(state.fs - FS_STEP, true) },
-      { sec: "Display", glyph: "A", main: "Reset text size", meta: "100%", act: () => setFs(1, true) },
-      { sec: "Display", glyph: "☀", main: "Switch to light mode", meta: "", act: () => setTheme("light", true) },
-      { sec: "Display", glyph: "☾", main: "Switch to dark mode",  meta: "", act: () => setTheme("dark", true) },
-      { sec: "Display", glyph: "⇅", main: "Toggle the network",   meta: "", act: () => $("#netBtn").click() }
+      { sec: "Display", glyph: "A", title: "Bigger text",  meta: "⌘⇧+", act: () => setFs(state.fs + FS_STEP, true) },
+      { sec: "Display", glyph: "A", title: "Smaller text", meta: "⌘⇧−", act: () => setFs(state.fs - FS_STEP, true) },
+      { sec: "Display", glyph: "A", title: "Reset text size", meta: "100%", act: () => setFs(1, true) },
+      { sec: "Display", glyph: "☀", title: "Switch to light mode", meta: "", act: () => setTheme("light", true) },
+      { sec: "Display", glyph: "☾", title: "Switch to dark mode",  meta: "", act: () => setTheme("dark", true) },
+      { sec: "Display", glyph: "⇅", title: "Toggle the network",   meta: "", act: () => $("#netBtn").click() }
     );
-    INVOICES.forEach(i => rows.push({
-      sec: "Invoices", glyph: "▤",
-      main: `Invoice ${i.no} — ${cust(i.cust).short}`,
-      meta: plain(i.total), act: () => go("invoice", i.no)
-    }));
-    CUSTOMERS.forEach(c => rows.push({
-      sec: "Customers", glyph: "◑", main: c.name,
-      meta: c.bal ? plain(c.bal) : "", act: () => go("customer", c.id)
-    }));
-    ITEMS.forEach(i => rows.push({
-      sec: "Items", glyph: "▦", main: `${i.sku} — ${i.desc}`,
-      meta: plain(i.price), act: () => go("items")
-    }));
-    POS.forEach(p => rows.push({
-      sec: "Purchase orders", glyph: "▥", main: `${p.no} — ${p.vendor}`,
-      meta: plain(p.total), act: () => go("pos")
-    }));
     return rows;
   }
+
+  const SEC_OF = {
+    invoice: "Invoices", estimate: "Estimates", po: "Purchase orders",
+    bill: "Bills", payment: "Payments", customer: "Customers", item: "Items"
+  };
 
   function fuzzy(hay, needle) {
     hay = hay.toLowerCase(); needle = needle.toLowerCase();
@@ -1410,18 +1946,60 @@ tbody tr[data-clickable]:hover { background: var(--accent-soft); }
     return n === needle.length;
   }
 
+  /* A typed reference is the fast path. It might be an invoice number, an
+     estimate number, a customer's own PO (often alphanumeric — KA-2026-4417),
+     a tracking number or an amount. Match every key a record is known by and
+     say which one hit, rather than making the user pick a field first. */
+  const normalise = q => q.replace(/[#$,]/g, "").trim().toLowerCase();
+  const looksLikeReference = q => /\d/.test(q);
+
   function renderPal(q) {
     const t0 = performance.now();
-    const all = palData();
-    palRows = q ? all.filter(r => fuzzy(r.main + " " + r.sec, q)).slice(0, 40) : all.slice(0, 40);
-    palIdx = 0;
     const list = $("#palList");
     list.innerHTML = "";
+
+    const index = searchIndex();
+    const commands = palCommands();
+    const scanned = index.length + commands.length;
+    const needle = normalise(q);
+    const isRef = looksLikeReference(q);
+    let out = [];
+
+    if (!q) {
+      out = commands.concat(index.map(r => ({
+        sec: SEC_OF[r.kind] || "Records", glyph: r.glyph, title: r.title,
+        meta: r.meta, act: r.act, score: 0
+      })));
+    } else {
+      // Commands rank below records for a reference-shaped query.
+      commands.filter(c => fuzzy(c.title + " " + c.sec, q)).forEach(c =>
+        out.push({ ...c, score: isRef ? 50 : 700 }));
+
+      index.forEach(r => {
+        const hit = scoreKeys(r, needle);
+        const byTitle = fuzzy(r.title + " " + (SEC_OF[r.kind] || ""), q);
+        if (!hit && !byTitle) return;
+        out.push({
+          sec: SEC_OF[r.kind] || "Records",
+          glyph: r.glyph, title: r.title, meta: r.meta, act: r.act,
+          why: hit ? hit.why : null,
+          exact: hit ? hit.exact : false,
+          score: hit ? hit.score : 400
+        });
+      });
+      out.sort((a, b) => b.score - a.score);
+    }
+
+    palRows = out.slice(0, 40);
+    palIdx = 0;
+
     if (!palRows.length) {
-      list.innerHTML = `<div class="pal-empty">Nothing matches “${esc(q)}”.<br><span class="dim">Every record is local, so this is the whole book — not a slow server.</span></div>`;
+      list.innerHTML = `<div class="pal-empty">Nothing matches “${esc(q)}”.<br>
+        <span class="dim">Every record is on this disk, so this is the whole book — not a slow server.</span></div>`;
       $("#palTime").textContent = "";
       return;
     }
+
     let sec = null;
     palRows.forEach((r, n) => {
       if (r.sec !== sec) { sec = r.sec; list.appendChild(el("div", "pal-sec lbl", sec)); }
@@ -1429,13 +2007,16 @@ tbody tr[data-clickable]:hover { background: var(--accent-soft); }
       b.dataset.active = String(n === 0);
       b.dataset.n = String(n);
       b.innerHTML = `<span class="pi-glyph" aria-hidden="true">${r.glyph}</span>
-                     <span class="pi-main">${esc(r.main)}</span>
+                     <span class="pi-main">${esc(r.title)}</span>
+                     ${r.why ? `<span class="pi-why${r.exact ? "" : " soft"}">${esc(r.why)}</span>` : ""}
                      <span class="pi-meta">${r.meta}</span>`;
       b.onmouseenter = () => setPalIdx(n);
       b.onclick = () => { closePal(); r.act(); };
       list.appendChild(b);
     });
-    $("#palTime").textContent = `${palRows.length} of ${all.length} in ${(performance.now() - t0).toFixed(1)} ms`;
+
+    $("#palTime").textContent =
+      `${palRows.length} of ${scanned} in ${(performance.now() - t0).toFixed(1)} ms`;
   }
 
   function setPalIdx(n) {
