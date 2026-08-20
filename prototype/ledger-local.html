@@ -1,0 +1,1397 @@
+<title>Ledger Local</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans+Condensed:wght@500;600;700&family=IBM+Plex+Sans:wght@400;450;500;600;700&display=swap">
+
+<style>
+/* ─── tokens ─────────────────────────────────────────────────────────────
+   Light is the base set. Dark redefines the same names twice: once behind
+   prefers-color-scheme for viewers on "system", once behind [data-theme]
+   so an explicit toggle wins in both directions.                        */
+:root {
+  --ground:      #EEF3F6;
+  --surface:     #FFFFFF;
+  --surface-2:   #E4EBF0;
+  --surface-3:   #D8E2E9;
+  --line:        #CBD8E1;
+  --line-soft:   #DFE7ED;
+  --ink:         #0D1922;
+  --ink-2:       #4A6373;
+  --ink-3:       #7C94A4;
+  --accent:      #C8481F;
+  --accent-ink:  #FFFFFF;
+  --accent-soft: rgba(200, 72, 31, .10);
+  --accent-line: rgba(200, 72, 31, .34);
+  --ok:          #197552;
+  --ok-soft:     rgba(25, 117, 82, .12);
+  --warn:        #9A5D0C;
+  --warn-soft:   rgba(154, 93, 12, .13);
+  --crit:        #B22F22;
+  --crit-soft:   rgba(178, 47, 34, .12);
+  --shadow:      0 18px 44px -22px rgba(13, 25, 34, .45);
+
+  --rail: 204px;
+  --chrome: 46px;
+  --status: 26px;
+  --row: 30px;
+
+  --sans: "IBM Plex Sans", ui-sans-serif, system-ui, -apple-system, sans-serif;
+  --cond: "IBM Plex Sans Condensed", "IBM Plex Sans", ui-sans-serif, system-ui, sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --ground:      #0A1118;
+    --surface:     #0F1A22;
+    --surface-2:   #15232D;
+    --surface-3:   #1C2E3A;
+    --line:        #21353F;
+    --line-soft:   #182833;
+    --ink:         #E4EDF3;
+    --ink-2:       #94ABB9;
+    --ink-3:       #61798A;
+    --accent:      #FF7A45;
+    --accent-ink:  #14202B;
+    --accent-soft: rgba(255, 122, 69, .13);
+    --accent-line: rgba(255, 122, 69, .40);
+    --ok:          #3DC694;
+    --ok-soft:     rgba(61, 198, 148, .13);
+    --warn:        #E3A340;
+    --warn-soft:   rgba(227, 163, 64, .13);
+    --crit:        #F4695B;
+    --crit-soft:   rgba(244, 105, 91, .13);
+    --shadow:      0 20px 50px -20px rgba(0, 0, 0, .78);
+  }
+}
+
+:root[data-theme="dark"] {
+  --ground:      #0A1118;
+  --surface:     #0F1A22;
+  --surface-2:   #15232D;
+  --surface-3:   #1C2E3A;
+  --line:        #21353F;
+  --line-soft:   #182833;
+  --ink:         #E4EDF3;
+  --ink-2:       #94ABB9;
+  --ink-3:       #61798A;
+  --accent:      #FF7A45;
+  --accent-ink:  #14202B;
+  --accent-soft: rgba(255, 122, 69, .13);
+  --accent-line: rgba(255, 122, 69, .40);
+  --ok:          #3DC694;
+  --ok-soft:     rgba(61, 198, 148, .13);
+  --warn:        #E3A340;
+  --warn-soft:   rgba(227, 163, 64, .13);
+  --crit:        #F4695B;
+  --crit-soft:   rgba(244, 105, 91, .13);
+  --shadow:      0 20px 50px -20px rgba(0, 0, 0, .78);
+}
+
+/* ─── base ──────────────────────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--ground);
+  color: var(--ink);
+  font-family: var(--sans);
+  font-size: 13px;
+  line-height: 1.45;
+  -webkit-font-smoothing: antialiased;
+  overflow: hidden;
+}
+
+button, input, select { font: inherit; color: inherit; }
+button { cursor: pointer; background: none; border: none; padding: 0; }
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+  border-radius: 2px;
+}
+
+.num { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+.mono { font-family: var(--mono); }
+
+.lbl {
+  font-family: var(--cond);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: .10em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
+
+kbd {
+  font-family: var(--mono);
+  font-size: 10px;
+  padding: 1px 4px;
+  border: 1px solid var(--line);
+  border-bottom-width: 2px;
+  border-radius: 3px;
+  background: var(--surface-2);
+  color: var(--ink-2);
+  white-space: nowrap;
+}
+
+/* ─── shell ─────────────────────────────────────────────────────────── */
+.app {
+  height: 100vh;
+  height: 100dvh;
+  display: grid;
+  grid-template-rows: var(--chrome) 1fr var(--status);
+}
+
+/* ─── chrome ────────────────────────────────────────────────────────── */
+.chrome {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 0 12px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--line);
+  min-width: 0;
+}
+
+.mark { display: flex; align-items: center; gap: 8px; padding-right: 12px; border-right: 1px solid var(--line-soft); }
+.mark-glyph {
+  width: 22px; height: 22px; flex: none;
+  display: grid; place-items: center;
+  border-radius: 5px;
+  background: var(--accent);
+  color: var(--accent-ink);
+  font-family: var(--cond);
+  font-weight: 700;
+  font-size: 13px;
+}
+.mark-name { font-weight: 600; letter-spacing: -.01em; white-space: nowrap; }
+.mark-name span { color: var(--ink-3); font-weight: 450; }
+
+.co {
+  display: flex; align-items: center; gap: 7px;
+  padding: 4px 9px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: var(--surface-2);
+  white-space: nowrap;
+  transition: border-color .12s;
+}
+.co:hover { border-color: var(--accent-line); }
+.co-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); flex: none; }
+.co-name { font-weight: 500; font-size: 12px; }
+.co-realm { font-family: var(--mono); font-size: 10px; color: var(--ink-3); }
+.co-caret { color: var(--ink-3); font-size: 9px; }
+
+.omni {
+  flex: 1;
+  min-width: 90px;
+  display: flex; align-items: center; gap: 8px;
+  height: 27px;
+  padding: 0 9px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: var(--ground);
+  color: var(--ink-3);
+  text-align: left;
+  transition: border-color .12s, background .12s;
+}
+.omni:hover { border-color: var(--accent-line); background: var(--surface-2); }
+.omni-text { flex: 1; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.chrome-right { display: flex; align-items: center; gap: 8px; flex: none; }
+
+.pill {
+  display: inline-flex; align-items: center; gap: 6px;
+  height: 24px;
+  padding: 0 8px;
+  border-radius: 5px;
+  border: 1px solid var(--line);
+  background: var(--surface-2);
+  font-size: 11px;
+  white-space: nowrap;
+}
+.pill .dot { width: 6px; height: 6px; border-radius: 50%; flex: none; }
+.pill.is-live  { border-color: color-mix(in srgb, var(--ok) 40%, transparent);   background: var(--ok-soft);   color: var(--ok); }
+.pill.is-off   { border-color: color-mix(in srgb, var(--warn) 44%, transparent); background: var(--warn-soft); color: var(--warn); }
+.pill.is-crit  { border-color: color-mix(in srgb, var(--crit) 44%, transparent); background: var(--crit-soft); color: var(--crit); }
+.pill.is-live .dot { background: var(--ok); box-shadow: 0 0 0 3px var(--ok-soft); }
+.pill.is-off  .dot { background: var(--warn); }
+.pill.is-crit .dot { background: var(--crit); }
+
+@keyframes breathe { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
+.pill.is-live .dot { animation: breathe 2.6s ease-in-out infinite; }
+@media (prefers-reduced-motion: reduce) { .pill.is-live .dot { animation: none; } }
+
+.icon-btn {
+  width: 26px; height: 26px;
+  display: grid; place-items: center;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: var(--surface-2);
+  color: var(--ink-2);
+  transition: color .12s, border-color .12s;
+}
+.icon-btn:hover { color: var(--accent); border-color: var(--accent-line); }
+
+/* ─── rail ──────────────────────────────────────────────────────────── */
+.body { display: grid; grid-template-columns: var(--rail) 1fr; min-height: 0; }
+
+.rail {
+  background: var(--surface);
+  border-right: 1px solid var(--line);
+  padding: 8px 0;
+  overflow-y: auto;
+  display: flex; flex-direction: column; gap: 2px;
+}
+.rail-head { padding: 8px 14px 4px; }
+.rail-item {
+  display: flex; align-items: center; gap: 9px;
+  width: 100%;
+  height: 27px;
+  padding: 0 10px 0 14px;
+  color: var(--ink-2);
+  font-size: 12.5px;
+  border-left: 2px solid transparent;
+  text-align: left;
+  transition: background .1s, color .1s;
+}
+.rail-item:hover { background: var(--surface-2); color: var(--ink); }
+.rail-item[aria-current="true"] {
+  background: var(--accent-soft);
+  border-left-color: var(--accent);
+  color: var(--ink);
+  font-weight: 500;
+}
+.rail-item .ri-glyph { width: 15px; flex: none; display: grid; place-items: center; color: var(--ink-3); }
+.rail-item[aria-current="true"] .ri-glyph { color: var(--accent); }
+.rail-item .ri-count {
+  margin-left: auto;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--ink-3);
+}
+.rail-item .ri-count.alert {
+  color: var(--crit);
+  background: var(--crit-soft);
+  padding: 0 5px;
+  border-radius: 8px;
+  font-weight: 500;
+}
+
+/* ─── main ──────────────────────────────────────────────────────────── */
+.main { min-width: 0; overflow: auto; background: var(--ground); }
+
+.view-head {
+  position: sticky; top: 0; z-index: 5;
+  display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap;
+  padding: 13px 16px 11px;
+  background: var(--ground);
+  border-bottom: 1px solid var(--line);
+}
+.view-title { font-size: 17px; font-weight: 600; letter-spacing: -.015em; margin: 0; }
+.view-sub { color: var(--ink-3); font-size: 12px; }
+.view-head .spacer { flex: 1; }
+
+.btn {
+  display: inline-flex; align-items: center; gap: 6px;
+  height: 26px; padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: var(--surface);
+  font-size: 12px;
+  transition: border-color .12s, color .12s;
+}
+.btn:hover { border-color: var(--accent-line); color: var(--accent); }
+.btn-primary {
+  background: var(--accent); border-color: var(--accent); color: var(--accent-ink); font-weight: 500;
+}
+.btn-primary:hover { color: var(--accent-ink); filter: brightness(1.07); }
+
+.pad { padding: 14px 16px 28px; }
+
+/* ─── strip: the summary band above every grid ──────────────────────── */
+.strip {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(146px, 1fr));
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  overflow: hidden;
+  background: var(--surface);
+  margin-bottom: 14px;
+}
+.strip-cell { padding: 9px 12px; border-right: 1px solid var(--line-soft); }
+.strip-cell:last-child { border-right: none; }
+.strip-val { font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 18px; font-weight: 500; letter-spacing: -.02em; margin-top: 2px; }
+.strip-val.pos { color: var(--ok); }
+.strip-val.neg { color: var(--crit); }
+.strip-val.warn { color: var(--warn); }
+.strip-note { font-size: 11px; color: var(--ink-3); margin-top: 1px; }
+
+/* ─── grid ──────────────────────────────────────────────────────────── */
+.grid-wrap {
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  overflow: hidden;
+  background: var(--surface);
+}
+.grid-scroll { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; font-size: 12.5px; }
+thead th {
+  position: sticky; top: 0; z-index: 2;
+  background: var(--surface-2);
+  font-family: var(--cond);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: .09em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+  text-align: left;
+  padding: 0 10px;
+  height: 26px;
+  border-bottom: 1px solid var(--line);
+  white-space: nowrap;
+}
+tbody td {
+  height: var(--row);
+  padding: 0 10px;
+  border-bottom: 1px solid var(--line-soft);
+  white-space: nowrap;
+  vertical-align: middle;
+}
+tbody tr:last-child td { border-bottom: none; }
+tbody tr { transition: background .08s; }
+tbody tr[data-clickable] { cursor: pointer; }
+tbody tr[data-clickable]:hover { background: var(--accent-soft); }
+.r { text-align: right; }
+.dim { color: var(--ink-3); }
+.trunc { max-width: 320px; overflow: hidden; text-overflow: ellipsis; }
+
+.tag {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 3px;
+  font-size: 10.5px;
+  font-family: var(--cond);
+  font-weight: 600;
+  letter-spacing: .04em;
+  border: 1px solid var(--line);
+  background: var(--surface-2);
+  color: var(--ink-2);
+}
+.tag.ok   { color: var(--ok);   background: var(--ok-soft);   border-color: color-mix(in srgb, var(--ok) 30%, transparent); }
+.tag.warn { color: var(--warn); background: var(--warn-soft); border-color: color-mix(in srgb, var(--warn) 32%, transparent); }
+.tag.crit { color: var(--crit); background: var(--crit-soft); border-color: color-mix(in srgb, var(--crit) 32%, transparent); }
+.tag.acc  { color: var(--accent); background: var(--accent-soft); border-color: var(--accent-line); }
+
+.swatch { display: inline-block; width: 7px; height: 7px; border-radius: 2px; margin-right: 6px; vertical-align: baseline; }
+
+/* ─── two-column detail ─────────────────────────────────────────────── */
+.split { display: grid; grid-template-columns: minmax(0, 1fr) 268px; gap: 14px; align-items: start; }
+@media (max-width: 900px) { .split { grid-template-columns: minmax(0, 1fr); } }
+
+.panel { border: 1px solid var(--line); border-radius: 7px; background: var(--surface); overflow: hidden; }
+.panel-head {
+  display: flex; align-items: center; gap: 8px;
+  height: 30px; padding: 0 12px;
+  background: var(--surface-2);
+  border-bottom: 1px solid var(--line);
+}
+.panel-body { padding: 11px 12px; }
+
+.kv { display: grid; grid-template-columns: 88px 1fr; gap: 4px 10px; font-size: 12px; }
+.kv dt { color: var(--ink-3); }
+.kv dd { margin: 0; }
+
+/* ─── class margin bars ─────────────────────────────────────────────── */
+.bars { display: flex; flex-direction: column; gap: 9px; }
+.bar-row { display: grid; grid-template-columns: 1fr auto; gap: 4px 10px; align-items: baseline; }
+.bar-name { font-size: 12px; }
+.bar-fig { font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 12px; }
+.bar-track { grid-column: 1 / -1; height: 5px; border-radius: 3px; background: var(--surface-3); overflow: hidden; }
+.bar-fill { height: 100%; border-radius: 3px; transition: width .5s cubic-bezier(.2,.8,.2,1); }
+@media (prefers-reduced-motion: reduce) { .bar-fill { transition: none; } }
+
+/* ─── invoice editor ────────────────────────────────────────────────── */
+.doc-head { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px 16px; padding: 12px; border-bottom: 1px solid var(--line); }
+.field { display: flex; flex-direction: column; gap: 3px; }
+.field-val { font-size: 13px; font-weight: 500; }
+
+.line-add { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-top: 1px solid var(--line); background: var(--surface-2); flex-wrap: wrap; }
+.line-add input {
+  flex: 1; min-width: 120px;
+  height: 26px; padding: 0 9px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: var(--surface);
+  font-family: var(--mono);
+  font-size: 12px;
+}
+.line-add input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
+
+.totals { display: flex; justify-content: flex-end; padding: 10px 12px; border-top: 1px solid var(--line); }
+.totals dl { display: grid; grid-template-columns: auto 108px; gap: 3px 18px; margin: 0; font-size: 12.5px; }
+.totals dt { color: var(--ink-2); text-align: right; }
+.totals dd { margin: 0; font-family: var(--mono); font-variant-numeric: tabular-nums; text-align: right; }
+.totals .grand dt, .totals .grand dd { font-weight: 600; font-size: 14px; padding-top: 5px; border-top: 1px solid var(--line); margin-top: 3px; }
+
+/* ─── failure inbox ─────────────────────────────────────────────────── */
+.fail { border: 1px solid var(--line); border-radius: 7px; background: var(--surface); overflow: hidden; margin-bottom: 10px; }
+.fail-bar { display: flex; align-items: center; gap: 9px; padding: 9px 12px; border-left: 3px solid var(--crit); }
+.fail-bar.warn { border-left-color: var(--warn); }
+.fail-body { padding: 0 12px 11px 15px; }
+.fail-why { font-size: 12px; color: var(--ink-2); max-width: 62ch; }
+.fail-acts { display: flex; gap: 7px; margin-top: 9px; flex-wrap: wrap; }
+.diff { display: grid; grid-template-columns: auto 1fr; gap: 2px 12px; margin-top: 9px; font-size: 12px; padding: 8px 10px; background: var(--ground); border-radius: 5px; border: 1px solid var(--line-soft); }
+.diff .k { color: var(--ink-3); font-family: var(--cond); font-size: 10px; letter-spacing: .08em; text-transform: uppercase; align-self: center; }
+
+/* ─── status bar ────────────────────────────────────────────────────── */
+.statusbar {
+  display: flex; align-items: center; gap: 14px;
+  padding: 0 12px;
+  background: var(--surface);
+  border-top: 1px solid var(--line);
+  font-size: 11px;
+  color: var(--ink-3);
+  overflow: hidden;
+  white-space: nowrap;
+}
+.statusbar .sb-item { display: flex; align-items: center; gap: 5px; flex: none; }
+.statusbar .sb-item b { font-family: var(--mono); font-weight: 500; color: var(--ink-2); }
+.statusbar .spacer { flex: 1; }
+
+/* ─── command palette ───────────────────────────────────────────────── */
+.scrim {
+  position: fixed; inset: 0; z-index: 40;
+  background: color-mix(in srgb, var(--ground) 72%, transparent);
+  backdrop-filter: blur(3px);
+  display: grid; place-items: start center;
+  padding-top: 11vh;
+}
+.scrim[hidden] { display: none; }
+.pal {
+  width: min(560px, 92vw);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  box-shadow: var(--shadow);
+  overflow: hidden;
+}
+.pal-in { display: flex; align-items: center; gap: 9px; padding: 0 13px; height: 44px; border-bottom: 1px solid var(--line); }
+.pal-in input { flex: 1; border: none; background: none; height: 100%; font-size: 15px; }
+.pal-in input:focus { outline: none; }
+.pal-list { max-height: 46vh; overflow-y: auto; padding: 5px; }
+.pal-sec { padding: 7px 9px 3px; }
+.pal-item {
+  display: flex; align-items: center; gap: 10px;
+  width: 100%; padding: 6px 9px;
+  border-radius: 5px;
+  text-align: left;
+}
+.pal-item[data-active="true"] { background: var(--accent-soft); }
+.pal-item .pi-glyph { width: 16px; flex: none; color: var(--ink-3); display: grid; place-items: center; }
+.pal-item[data-active="true"] .pi-glyph { color: var(--accent); }
+.pal-item .pi-main { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+.pal-item .pi-meta { font-family: var(--mono); font-size: 11px; color: var(--ink-3); flex: none; }
+.pal-foot { display: flex; align-items: center; gap: 14px; padding: 7px 13px; border-top: 1px solid var(--line); background: var(--surface-2); font-size: 11px; color: var(--ink-3); flex-wrap: wrap; }
+.pal-empty { padding: 22px 13px; text-align: center; color: var(--ink-3); font-size: 12.5px; }
+
+/* ─── toast ─────────────────────────────────────────────────────────── */
+.toasts { position: fixed; right: 14px; bottom: 38px; z-index: 50; display: flex; flex-direction: column; gap: 7px; align-items: flex-end; }
+.toast {
+  display: flex; align-items: center; gap: 9px;
+  padding: 8px 12px;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--ok);
+  border-radius: 6px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+  font-size: 12px;
+  animation: rise .22s cubic-bezier(.2,.9,.3,1);
+}
+.toast.warn { border-left-color: var(--warn); }
+@keyframes rise { from { opacity: 0; transform: translateY(7px); } }
+@media (prefers-reduced-motion: reduce) { .toast { animation: none; } }
+.toast .t-ms { font-family: var(--mono); color: var(--ok); font-weight: 500; }
+.toast.warn .t-ms { color: var(--warn); }
+
+/* ─── offline banner ────────────────────────────────────────────────── */
+.offline-bar {
+  display: flex; align-items: center; gap: 9px;
+  padding: 7px 16px;
+  background: var(--warn-soft);
+  border-bottom: 1px solid color-mix(in srgb, var(--warn) 34%, transparent);
+  font-size: 12px;
+  color: var(--warn);
+}
+.offline-bar[hidden] { display: none; }
+
+.hint { font-size: 11.5px; color: var(--ink-3); margin-top: 9px; }
+.hint kbd { margin: 0 1px; }
+</style>
+
+<div class="app">
+
+  <header class="chrome">
+    <div class="mark">
+      <div class="mark-glyph" aria-hidden="true">L</div>
+      <div class="mark-name">Ledger <span>Local</span></div>
+    </div>
+
+    <button class="co" id="coBtn" title="Switch company">
+      <span class="co-dot" id="coDot"></span>
+      <span class="co-name" id="coName">Aquamentor, Inc.</span>
+      <span class="co-realm" id="coRealm">1234567890123456</span>
+      <span class="co-caret" aria-hidden="true">▾</span>
+    </button>
+
+    <button class="omni" id="omniBtn">
+      <span aria-hidden="true">⌕</span>
+      <span class="omni-text">Search customers, invoices, items, POs…</span>
+      <kbd>⌘K</kbd>
+    </button>
+
+    <div class="chrome-right">
+      <span class="pill is-live" id="syncPill">
+        <span class="dot"></span>
+        <span id="syncText">Synced 4s ago</span>
+      </span>
+      <span class="pill" id="pendPill" hidden>
+        <span class="num" id="pendCount">0</span> queued
+      </span>
+      <button class="pill is-crit" id="failPill" title="Open the failure inbox">
+        <span class="dot"></span> 2 need you
+      </button>
+      <button class="icon-btn" id="netBtn" title="Simulate losing the network">⇅</button>
+      <button class="icon-btn" id="themeBtn" title="Toggle light and dark">◐</button>
+    </div>
+  </header>
+
+  <div class="body">
+    <nav class="rail" id="rail"></nav>
+    <main class="main" id="main" tabindex="-1"></main>
+  </div>
+
+  <footer class="statusbar">
+    <span class="sb-item">Replica <b id="sbRows">41,882</b> records</span>
+    <span class="sb-item">History from <b>Mar 2012</b></span>
+    <span class="sb-item">Last read <b id="sbMs">9 ms</b></span>
+    <span class="spacer"></span>
+    <span class="sb-item" id="sbNet">Network idle · CDC poll 15s</span>
+    <span class="sb-item">Writes <b id="sbWrites">disabled</b></span>
+  </footer>
+</div>
+
+<div class="scrim" id="scrim" hidden>
+  <div class="pal" role="dialog" aria-modal="true" aria-label="Command palette">
+    <div class="pal-in">
+      <span aria-hidden="true" style="color:var(--ink-3)">⌕</span>
+      <input id="palInput" placeholder="Jump to anything, or type a command…" autocomplete="off" spellcheck="false">
+      <kbd>esc</kbd>
+    </div>
+    <div class="pal-list" id="palList"></div>
+    <div class="pal-foot">
+      <span><kbd>↑</kbd><kbd>↓</kbd> move</span>
+      <span><kbd>↵</kbd> open</span>
+      <span class="spacer" style="flex:1"></span>
+      <span id="palTime" class="mono"></span>
+    </div>
+  </div>
+</div>
+
+<div class="toasts" id="toasts"></div>
+
+<script>
+(() => {
+  "use strict";
+
+  /* ─── data ────────────────────────────────────────────────────────────
+     Dummy data, shaped after the real Aquamentor book: aquatic safety
+     equipment, foam fabrication, and CNC/UV job work.                   */
+
+  const money = c => (c / 100).toLocaleString("en-US", { style: "currency", currency: "USD" });
+  const plain = c => (c / 100).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+  const CLASSES = [
+    { id: "foam",  name: "Foam Products",   color: "#4C8FD6" },
+    { id: "sign",  name: "Signs",           color: "#C8853A" },
+    { id: "chair", name: "Lifeguard Chairs",color: "#6FA85B" },
+    { id: "drop",  name: "Dropship/Resale", color: "#9B7BC4" },
+    { id: "cnc",   name: "CNC Cutting",     color: "#4FA8A0" },
+    { id: "uv",    name: "UV Printing",     color: "#D4685F" }
+  ];
+  const cls = id => CLASSES.find(c => c.id === id);
+
+  const CUSTOMERS = [
+    { id: "c1", name: "BLUE HARBOR SWIM SCHOOLS", short: "Blue Harbor Swim", terms: "Net 30", bal: 742400, ytd: 8841200, tax: "Exempt — resale", city: "Denver, CO" },
+    { id: "c2", name: "FAIRVIEW COUNTY PARKS & REC.", short: "Fairview County Parks", terms: "Net 30", bal: 189500, ytd: 2214000, tax: "Exempt — government", city: "Ellisburg, NJ" },
+    { id: "c3", name: "LAKESHORE COMMUNITY CENTER", short: "Lakeshore Community", terms: "Net 30", bal: 0, ytd: 1663500, tax: "Exempt — nonprofit", city: "Freehold, NJ" },
+    { id: "c4", name: "RIDGELINE AQUATICS & FITNESS", short: "Ridgeline Aquatics", terms: "Net 15", bal: 318750, ytd: 942300, tax: "Taxable — NJ 6.625%", city: "Hampton, NJ" },
+    { id: "c5", name: "HARBORVIEW SIGNWORKS", short: "Harborview Signs", terms: "Net 30", bal: 445000, ytd: 3120800, tax: "Exempt — resale", city: "Brooklyn, NY" },
+    { id: "c6", name: "NORTHGATE AQUATIC SUPPLY", short: "Northgate Aquatic", terms: "Net 45", bal: 1289900, ytd: 6402100, tax: "Exempt — resale", city: "Zion, IL" },
+    { id: "c7", name: "TOWNSHIP OF ELLISBURG REC", short: "Ellisburg Rec", terms: "Net 30", bal: 62400, ytd: 588000, tax: "Exempt — government", city: "Ellisburg, NJ" }
+  ];
+  const cust = id => CUSTOMERS.find(c => c.id === id);
+
+  const ITEMS = [
+    { sku: "XRT-40-SFSP",   desc: '40" ExoTube, 6\' towline, custom logo', type: "Inventory",    price: 4925,  cost: 2180,  hand: 214, cls: "foam" },
+    { sku: "XRT-50-STD",    desc: '50" ExoTube rescue tube, red',          type: "Inventory",    price: 5450,  cost: 2410,  hand: 388, cls: "foam" },
+    { sku: "1 RH 001",      desc: "Ring buoy holder — stainless steel",    type: "Inventory",    price: 1995,  cost: 940,   hand: 64,  cls: "drop" },
+    { sku: "PM-6X12-BLU",   desc: "Floating mat 6×12, blue XLPE",          type: "Inventory",    price: 89900, cost: 41200, hand: 12,  cls: "foam" },
+    { sku: "AM-SC-KB",      desc: "Swim club kickboard, EVA",              type: "Inventory",    price: 1250,  cost: 470,   hand: 940, cls: "foam" },
+    { sku: "LG-CHAIR-60",   desc: '60" lifeguard chair, powder-coated',    type: "Inventory",    price: 149500,cost: 78000, hand: 6,   cls: "chair" },
+    { sku: "SIGN-NJ-POOL",  desc: "NJ pool rules sign, 24×36 aluminum",    type: "Inventory",    price: 12400, cost: 4850,  hand: 47,  cls: "sign" },
+    { sku: "CNC-CUT-HR",    desc: "CNC cutting — shop hour",               type: "Service",      price: 9500,  cost: 3400,  hand: null,cls: "cnc" },
+    { sku: "UV-PRINT-SF",   desc: "UV flatbed printing — per sq ft",       type: "Service",      price: 1450,  cost: 520,   hand: null,cls: "uv" },
+    { sku: "SHIP-U-GND",    desc: "Shipping — UPS Ground",                 type: "Non-inventory",price: 2499,  cost: 2499,  hand: null,cls: null }
+  ];
+  const item = sku => ITEMS.find(i => i.sku === sku);
+
+  const INVOICES = [
+    { no: "21234", date: "2026-08-15", cust: "c1", cls: "foam",  total: 7424,   bal: 7424,   age: 0,  status: "Open",  sync: "pending",
+      lines: [ { sku: "XRT-40-SFSP", qty: 1, rate: 4925 }, { sku: "SHIP-U-GND", qty: 1, rate: 2499 } ] },
+    { no: "21233", date: "2026-08-14", cust: "c6", cls: "foam",  total: 289900, bal: 289900, age: 2,  status: "Open",  sync: "synced",
+      lines: [ { sku: "PM-6X12-BLU", qty: 3, rate: 89900 }, { sku: "XRT-50-STD", qty: 4, rate: 5450 } ] },
+    { no: "21232", date: "2026-08-13", cust: "c4", cls: "sign",  total: 39834,  bal: 39834,  age: 3,  status: "Open",  sync: "synced",
+      lines: [ { sku: "SIGN-NJ-POOL", qty: 3, rate: 12400 } ] },
+    { no: "21231", date: "2026-08-12", cust: "c5", cls: "cnc",   total: 148200, bal: 0,      age: 4,  status: "Paid",  sync: "synced",
+      lines: [ { sku: "CNC-CUT-HR", qty: 12, rate: 9500 }, { sku: "UV-PRINT-SF", qty: 24, rate: 1450 } ] },
+    { no: "21230", date: "2026-08-11", cust: "c2", cls: "chair", total: 299000, bal: 189500, age: 5,  status: "Part",  sync: "synced",
+      lines: [ { sku: "LG-CHAIR-60", qty: 2, rate: 149500 } ] },
+    { no: "21229", date: "2026-08-08", cust: "c3", cls: "foam",  total: 62500,  bal: 0,      age: 8,  status: "Paid",  sync: "synced",
+      lines: [ { sku: "AM-SC-KB", qty: 50, rate: 1250 } ] },
+    { no: "21228", date: "2026-08-06", cust: "c7", cls: "sign",  total: 62400,  bal: 62400,  age: 10, status: "Open",  sync: "synced",
+      lines: [ { sku: "SIGN-NJ-POOL", qty: 5, rate: 12400 } ] },
+    { no: "21227", date: "2026-08-04", cust: "c1", cls: "foam",  total: 197000, bal: 0,      age: 12, status: "Paid",  sync: "synced",
+      lines: [ { sku: "XRT-40-SFSP", qty: 40, rate: 4925 } ] },
+    { no: "21226", date: "2026-07-29", cust: "c6", cls: "foam",  total: 998900, bal: 998900, age: 18, status: "Open",  sync: "synced",
+      lines: [ { sku: "PM-6X12-BLU", qty: 10, rate: 89900 }, { sku: "XRT-50-STD", qty: 18, rate: 5450 } ] },
+    { no: "21225", date: "2026-07-24", cust: "c5", cls: "uv",    total: 84600,  bal: 0,      age: 23, status: "Paid",  sync: "synced",
+      lines: [ { sku: "UV-PRINT-SF", qty: 58, rate: 1450 } ] },
+    { no: "21224", date: "2026-07-18", cust: "c4", cls: "foam",  total: 218800, bal: 218800, age: 29, status: "Open",  sync: "synced",
+      lines: [ { sku: "XRT-50-STD", qty: 40, rate: 5450 } ] },
+    { no: "21223", date: "2026-07-02", cust: "c5", cls: "cnc",   total: 190000, bal: 190000, age: 45, status: "Open",  sync: "synced",
+      lines: [ { sku: "CNC-CUT-HR", qty: 20, rate: 9500 } ] },
+    { no: "21222", date: "2026-06-19", cust: "c1", cls: "foam",  total: 214500, bal: 0,      age: 58, status: "Paid",  sync: "synced",
+      lines: [ { sku: "XRT-40-SFSP", qty: 30, rate: 4925 }, { sku: "AM-SC-KB", qty: 52, rate: 1250 } ] },
+    { no: "21221", date: "2026-06-11", cust: "c6", cls: "foam",  total: 291000, bal: 291000, age: 66, status: "Open",  sync: "synced",
+      lines: [ { sku: "PM-6X12-BLU", qty: 2, rate: 89900 }, { sku: "XRT-50-STD", qty: 20, rate: 5450 } ] }
+  ];
+
+  const POS = [
+    { no: "PO-4471", date: "2026-08-14", vendor: "Continental Foam",     cls: "foam",  total: 1284000, status: "Open",     rec: "0 of 18 sheets" },
+    { no: "PO-4470", date: "2026-08-12", vendor: "Poolcraft Products",  cls: "drop",  total: 84250,   status: "Shipped",  rec: "dropship" },
+    { no: "PO-4469", date: "2026-08-09", vendor: "Spectra EVA",         cls: "foam",  total: 462800,  status: "Partial",  rec: "12 of 20 sheets" },
+    { no: "PO-4468", date: "2026-08-05", vendor: "Aquabot Systems",     cls: "drop",  total: 39900,   status: "Received", rec: "complete" },
+    { no: "PO-4467", date: "2026-07-31", vendor: "Polymer Source",    cls: "foam",  total: 918400,  status: "Open",     rec: "0 of 24 sheets" }
+  ];
+
+  const ACTIVITY = [
+    { t: "4s",   what: "CDC poll", detail: "2 invoices, 1 payment changed", kind: "sync" },
+    { t: "3m",   what: "Invoice 21234", detail: "created locally — queued for QBO", kind: "local" },
+    { t: "18m",  what: "Payment received", detail: "Lakeshore of Greater Millbrook — 625.00", kind: "sync" },
+    { t: "41m",  what: "Conflict", detail: "Invoice 21230 changed in QBO web", kind: "fail" },
+    { t: "1h",   what: "PO-4471", detail: "sent to Continental Foam", kind: "sync" },
+    { t: "2h",   what: "Full sweep", detail: "41,882 records verified, 0 drift", kind: "sync" },
+    { t: "5h",   what: "Token rotated", detail: "refresh …7d3a → …b1f9", kind: "sync" }
+  ];
+
+  const FAILURES = [
+    {
+      sev: "crit", kind: "Conflict — record changed in QBO",
+      doc: "Invoice 21230", who: "Fairview County Parks & Rec.",
+      why: "You edited this invoice locally at 9:14am. Someone changed the same invoice in the QuickBooks web app at 9:31am, so the version your edit was based on is no longer current. Nothing was overwritten — both versions are intact and you decide which wins.",
+      diff: [ ["Your edit", "Balance 1,895.00 · added freight line"], ["In QBO now", "Balance 2,140.00 · terms changed to Net 45"] ]
+    },
+    {
+      sev: "warn", kind: "Rejected — QuickBooks refused the write",
+      doc: "Bill from Spectra EVA", who: "PO-4469",
+      why: "QuickBooks rejected this bill because the expense account on line 3 is inactive. The bill is safe here and nothing was posted. Pick an active account and it will go through on the next sync.",
+      diff: [ ["Line 3", "Freight-In (inactive since Jan 2026)"], ["Suggested", "Freight & Delivery — COGS"] ]
+    }
+  ];
+
+  const NAV = [
+    { id: "today",     label: "Today",         glyph: "◆" },
+    { id: "invoices",  label: "Invoices",      glyph: "▤", count: () => INVOICES.length },
+    { id: "customers", label: "Customers",     glyph: "◑", count: () => CUSTOMERS.length },
+    { id: "items",     label: "Items",         glyph: "▦", count: () => ITEMS.length },
+    { id: "pos",       label: "Purchase orders",glyph: "▥", count: () => POS.length },
+    { id: "failures",  label: "Needs you",     glyph: "▲", count: () => FAILURES.length, alert: true }
+  ];
+
+  /* ─── state ─────────────────────────────────────────────────────────── */
+  const state = { view: "today", arg: null, online: true, pending: 1, syncAge: 4 };
+
+  const $  = s => document.querySelector(s);
+  const el = (t, c, h) => { const n = document.createElement(t); if (c) n.className = c; if (h != null) n.innerHTML = h; return n; };
+  const esc = s => String(s).replace(/[&<>"]/g, m => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[m]));
+
+  /* Every navigation reports how long the local read took. The point of the
+     product is that this number never depends on the network. */
+  function readMs() { return (Math.random() * 7 + 5).toFixed(0); }
+
+  function toast(msg, ms, warn) {
+    const t = el("div", "toast" + (warn ? " warn" : ""));
+    t.innerHTML = `<span>${esc(msg)}</span>` + (ms ? `<span class="t-ms">${esc(ms)}</span>` : "");
+    $("#toasts").appendChild(t);
+    setTimeout(() => { t.style.opacity = "0"; t.style.transition = "opacity .3s"; setTimeout(() => t.remove(), 300); }, 3400);
+  }
+
+  /* ─── rail ──────────────────────────────────────────────────────────── */
+  function renderRail() {
+    const rail = $("#rail");
+    rail.innerHTML = "";
+    rail.appendChild(el("div", "rail-head lbl", "Aquamentor"));
+    NAV.forEach(n => {
+      const b = el("button", "rail-item");
+      b.setAttribute("aria-current", String(state.view === n.id));
+      const count = n.count ? n.count() : "";
+      b.innerHTML = `<span class="ri-glyph" aria-hidden="true">${n.glyph}</span>
+                     <span>${esc(n.label)}</span>
+                     ${count !== "" ? `<span class="ri-count${n.alert ? " alert" : ""}">${count}</span>` : ""}`;
+      b.onclick = () => go(n.id);
+      rail.appendChild(b);
+    });
+    rail.appendChild(el("div", "rail-head lbl", "Reports"));
+    [["Profit & loss", "▧"], ["A/R aging", "▨"], ["Inventory value", "▩"]].forEach(([label, glyph]) => {
+      const b = el("button", "rail-item", `<span class="ri-glyph" aria-hidden="true">${glyph}</span><span>${label}</span>`);
+      b.onclick = () => toast(label + " — not in this prototype");
+      rail.appendChild(b);
+    });
+  }
+
+  /* ─── views ─────────────────────────────────────────────────────────── */
+  function head(title, sub, actions) {
+    return `<div class="view-head">
+      <h1 class="view-title">${esc(title)}</h1>
+      <span class="view-sub">${sub || ""}</span>
+      <span class="spacer"></span>${actions || ""}</div>`;
+  }
+
+  const syncTag = s => s === "pending"
+    ? '<span class="tag warn">not yet in QBO</span>'
+    : '<span class="tag ok">synced</span>';
+
+  const statusTag = s =>
+    s === "Paid" ? '<span class="tag ok">paid</span>'
+    : s === "Part" ? '<span class="tag warn">partial</span>'
+    : '<span class="tag">open</span>';
+
+  const VIEWS = {
+
+    today() {
+      const openInv = INVOICES.filter(i => i.bal > 0);
+      const ar = openInv.reduce((s, i) => s + i.bal, 0);
+      const overdue = openInv.filter(i => i.age > 30).reduce((s, i) => s + i.bal, 0);
+      const buckets = [
+        ["Current",  openInv.filter(i => i.age <= 30).reduce((s, i) => s + i.bal, 0)],
+        ["31–60",    openInv.filter(i => i.age > 30 && i.age <= 60).reduce((s, i) => s + i.bal, 0)],
+        ["61–90",    openInv.filter(i => i.age > 60 && i.age <= 90).reduce((s, i) => s + i.bal, 0)],
+        ["90+",      openInv.filter(i => i.age > 90).reduce((s, i) => s + i.bal, 0)]
+      ];
+
+      // Margin by class — the per-product-line P&L the whole class dimension exists for.
+      const margins = CLASSES.map(c => {
+        const rows = INVOICES.filter(i => i.cls === c.id);
+        let rev = 0, cost = 0;
+        rows.forEach(i => i.lines.forEach(l => {
+          const it = item(l.sku); if (!it) return;
+          rev += l.qty * l.rate; cost += l.qty * it.cost;
+        }));
+        return { c, rev, margin: rev ? (rev - cost) / rev : 0 };
+      }).filter(m => m.rev > 0).sort((a, b) => b.rev - a.rev);
+
+      return head("Today", "Thursday, 20 August 2026 · everything below came off local disk") + `
+      <div class="pad">
+        <div class="strip">
+          <div class="strip-cell"><div class="lbl">A/R outstanding</div><div class="strip-val">${money(ar)}</div><div class="strip-note">${openInv.length} open invoices</div></div>
+          <div class="strip-cell"><div class="lbl">Past due</div><div class="strip-val neg">${money(overdue)}</div><div class="strip-note">over 30 days</div></div>
+          <div class="strip-cell"><div class="lbl">Open POs</div><div class="strip-val">${money(POS.filter(p => p.status !== "Received").reduce((s, p) => s + p.total, 0))}</div><div class="strip-note">${POS.filter(p => p.status !== "Received").length} with vendors</div></div>
+          <div class="strip-cell"><div class="lbl">Queued writes</div><div class="strip-val ${state.pending ? "warn" : ""}" id="tPend">${state.pending}</div><div class="strip-note">waiting on QuickBooks</div></div>
+          <div class="strip-cell"><div class="lbl">Needs you</div><div class="strip-val neg">${FAILURES.length}</div><div class="strip-note">conflicts and rejections</div></div>
+        </div>
+
+        <div class="split">
+          <div>
+            <div class="panel" style="margin-bottom:14px">
+              <div class="panel-head"><span class="lbl">A/R aging</span><span class="spacer" style="flex:1"></span><span class="lbl">as of today</span></div>
+              <div class="grid-scroll"><table>
+                <thead><tr><th>Bucket</th><th class="r">Balance</th><th class="r">Share</th><th style="width:44%"></th></tr></thead>
+                <tbody>${buckets.map(([name, val]) => `
+                  <tr><td>${name}</td>
+                    <td class="r num">${plain(val)}</td>
+                    <td class="r num dim">${ar ? Math.round(val / ar * 100) : 0}%</td>
+                    <td><div class="bar-track"><div class="bar-fill" style="width:${ar ? val / ar * 100 : 0}%;background:${name === "90+" ? "var(--crit)" : name === "Current" ? "var(--ok)" : "var(--warn)"}"></div></div></td>
+                  </tr>`).join("")}</tbody>
+              </table></div>
+            </div>
+
+            <div class="panel">
+              <div class="panel-head"><span class="lbl">Recent invoices</span><span class="spacer" style="flex:1"></span>
+                <button class="btn" data-go="invoices">See all ${INVOICES.length}</button></div>
+              <div class="grid-scroll"><table>
+                <thead><tr><th>No.</th><th>Date</th><th>Customer</th><th>Class</th><th class="r">Total</th><th class="r">Balance</th><th>Status</th></tr></thead>
+                <tbody>${INVOICES.slice(0, 7).map(i => `
+                  <tr data-clickable data-inv="${i.no}">
+                    <td class="mono">${i.no}</td>
+                    <td class="mono dim">${i.date.slice(5)}</td>
+                    <td class="trunc">${esc(cust(i.cust).short)}</td>
+                    <td><span class="swatch" style="background:${cls(i.cls).color}"></span><span class="dim">${cls(i.cls).name}</span></td>
+                    <td class="r num">${plain(i.total)}</td>
+                    <td class="r num">${i.bal ? plain(i.bal) : '<span class="dim">—</span>'}</td>
+                    <td>${i.sync === "pending" ? syncTag(i.sync) : statusTag(i.status)}</td>
+                  </tr>`).join("")}</tbody>
+              </table></div>
+            </div>
+
+            <div class="panel" style="margin-top:14px">
+              <div class="panel-head"><span class="lbl">Open purchase orders</span><span class="spacer" style="flex:1"></span>
+                <button class="btn" data-go="pos">See all ${POS.length}</button></div>
+              <div class="grid-scroll"><table>
+                <thead><tr><th>No.</th><th>Vendor</th><th>Class</th><th class="r">Total</th><th>Received</th></tr></thead>
+                <tbody>${POS.filter(p => p.status !== "Received").map(p => `
+                  <tr data-clickable data-go="pos">
+                    <td class="mono">${p.no}</td>
+                    <td class="trunc">${esc(p.vendor)}</td>
+                    <td><span class="swatch" style="background:${cls(p.cls).color}"></span><span class="dim">${cls(p.cls).name}</span></td>
+                    <td class="r num">${plain(p.total)}</td>
+                    <td class="dim">${esc(p.rec)}</td>
+                  </tr>`).join("")}</tbody>
+              </table></div>
+            </div>
+          </div>
+
+          <div>
+            <div class="panel" style="margin-bottom:14px">
+              <div class="panel-head"><span class="lbl">Margin by product line</span></div>
+              <div class="panel-body bars">
+                ${margins.map(m => `
+                  <div class="bar-row">
+                    <span class="bar-name"><span class="swatch" style="background:${m.c.color}"></span>${esc(m.c.name)}
+                      <span class="dim num" style="font-size:11px">${plain(m.rev)}</span></span>
+                    <span class="bar-fig">${Math.round(m.margin * 100)}%</span>
+                    <div class="bar-track"><div class="bar-fill" style="width:${Math.round(m.margin * 100)}%;background:${m.c.color}"></div></div>
+                  </div>`).join("")}
+                <p class="hint" style="margin-top:4px">Bar and figure are gross margin. Revenue in grey.</p>
+              </div>
+            </div>
+
+            <div class="panel">
+              <div class="panel-head"><span class="lbl">Activity</span></div>
+              <div class="panel-body" style="padding:6px 0">
+                <table><tbody>${ACTIVITY.map(a => `
+                  <tr>
+                    <td class="mono dim" style="width:42px">${a.t}</td>
+                    <td><span style="color:${a.kind === "fail" ? "var(--crit)" : a.kind === "local" ? "var(--accent)" : "var(--ink)"}">${esc(a.what)}</span>
+                        <div class="dim" style="font-size:11px;white-space:normal">${esc(a.detail)}</div></td>
+                  </tr>`).join("")}</tbody></table>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>`;
+    },
+
+    invoices() {
+      return head("Invoices", `${INVOICES.length} of 9,214 · filtered to this year`,
+        `<button class="btn btn-primary" data-new="1">New invoice <kbd style="border-color:currentColor;background:transparent;color:inherit">N</kbd></button>`) + `
+      <div class="pad">
+        <div class="grid-wrap"><div class="grid-scroll"><table>
+          <thead><tr>
+            <th>No.</th><th>Date</th><th>Customer</th><th>Class</th>
+            <th class="r">Total</th><th class="r">Balance</th><th class="r">Age</th><th>Status</th><th>Sync</th>
+          </tr></thead>
+          <tbody>${INVOICES.map(i => `
+            <tr data-clickable data-inv="${i.no}">
+              <td class="mono">${i.no}</td>
+              <td class="mono dim">${i.date}</td>
+              <td class="trunc">${esc(cust(i.cust).short)}</td>
+              <td><span class="swatch" style="background:${cls(i.cls).color}"></span><span class="dim">${cls(i.cls).name}</span></td>
+              <td class="r num">${plain(i.total)}</td>
+              <td class="r num">${i.bal ? plain(i.bal) : '<span class="dim">—</span>'}</td>
+              <td class="r num dim">${i.bal ? i.age + "d" : "—"}</td>
+              <td>${statusTag(i.status)}</td>
+              <td>${syncTag(i.sync)}</td>
+            </tr>`).join("")}</tbody>
+        </table></div></div>
+        <p class="hint">Click any row to open it. <kbd>⌘K</kbd> jumps straight to an invoice by number.</p>
+      </div>`;
+    },
+
+    invoice(no) {
+      const inv = INVOICES.find(i => i.no === no) || INVOICES[0];
+      const c = cust(inv.cust);
+      const sub = inv.lines.reduce((s, l) => s + l.qty * l.rate, 0);
+      const taxable = c.tax.startsWith("Taxable");
+      const tax = taxable ? Math.round(sub * 0.06625) : 0;
+
+      // The journal entry this document produces. Shown because a document is
+      // only ever a way of describing its ledger effect.
+      const cogs = inv.lines.reduce((s2, l) => {
+        const it = item(l.sku);
+        return s2 + (it && it.type === "Inventory" ? l.qty * it.cost : 0);
+      }, 0);
+      const post = [
+        ["1200", "Accounts Receivable", sub + tax, 0],
+        ["4100", "Sales income — " + cls(inv.cls).name, 0, sub]
+      ];
+      if (tax) post.push(["2200", "Sales tax payable — NJ", 0, tax]);
+      if (cogs) { post.push(["5000", "Cost of goods sold", cogs, 0]);
+                  post.push(["1300", "Inventory asset", 0, cogs]); }
+      const dr = post.reduce((s2, r) => s2 + r[2], 0);
+      const cr = post.reduce((s2, r) => s2 + r[3], 0);
+
+      return head("Invoice " + inv.no, `${esc(c.short)} · ${inv.date}`,
+        `<button class="btn" data-go="invoices">← Back</button>
+         <button class="btn">Print</button>
+         <button class="btn btn-primary" data-save="${inv.no}">Save <kbd style="border-color:currentColor;background:transparent;color:inherit">⌘S</kbd></button>`) + `
+      <div class="pad">
+        <div class="split">
+          <div>
+          <div class="panel">
+            <div class="doc-head">
+              <div class="field"><span class="lbl">Customer</span><span class="field-val">${esc(c.short)}</span></div>
+              <div class="field"><span class="lbl">Terms</span><span class="field-val">${esc(c.terms)}</span></div>
+              <div class="field"><span class="lbl">Date</span><span class="field-val mono">${inv.date}</span></div>
+              <div class="field"><span class="lbl">Class</span><span class="field-val"><span class="swatch" style="background:${cls(inv.cls).color}"></span>${cls(inv.cls).name}</span></div>
+              <div class="field"><span class="lbl">Tax treatment</span><span class="field-val" style="font-size:12px">${esc(c.tax)}</span></div>
+              <div class="field"><span class="lbl">Sync state</span><span class="field-val">${syncTag(inv.sync)}</span></div>
+            </div>
+
+            <div class="grid-scroll"><table>
+              <thead><tr><th style="width:34px">#</th><th>Item</th><th>Description</th><th class="r">Qty</th><th class="r">Rate</th><th class="r">Amount</th><th>Class</th></tr></thead>
+              <tbody id="lineBody">${inv.lines.map((l, n) => lineRow(l, n, inv.cls)).join("")}</tbody>
+            </table></div>
+
+            <div class="line-add">
+              <span class="lbl" style="flex:none">Add line</span>
+              <input id="skuIn" placeholder="Type a SKU — XRT, PM, SIGN…" autocomplete="off" spellcheck="false">
+              <span class="dim" style="font-size:11px">resolves locally, no network</span>
+              <kbd>↵</kbd>
+            </div>
+
+            <div class="totals">
+              <dl>
+                <dt>Subtotal</dt><dd id="tSub">${plain(sub)}</dd>
+                <dt>Sales tax ${taxable ? "(NJ 6.625%)" : "(exempt)"}</dt><dd id="tTax">${plain(tax)}</dd>
+                <div class="grand" style="display:contents"><dt>Total</dt><dd id="tTot">${plain(sub + tax)}</dd></div>
+              </dl>
+            </div>
+          </div>
+
+          <div class="panel" style="margin-top:14px">
+            <div class="panel-head"><span class="lbl">What this posts to the ledger</span>
+              <span class="spacer" style="flex:1"></span>
+              <span class="tag ${dr === cr ? "ok" : "crit"}">${dr === cr ? "balanced" : "out of balance"}</span></div>
+            <div class="grid-scroll"><table>
+              <thead><tr><th style="width:56px">Acct</th><th>Account</th><th class="r">Debit</th><th class="r">Credit</th></tr></thead>
+              <tbody>${post.map(([no, name, d, cx]) => `
+                <tr>
+                  <td class="mono dim">${no}</td>
+                  <td>${esc(name)}</td>
+                  <td class="r num">${d ? plain(d) : '<span class="dim">—</span>'}</td>
+                  <td class="r num">${cx ? plain(cx) : '<span class="dim">—</span>'}</td>
+                </tr>`).join("")}
+                <tr style="border-top:1px solid var(--line)">
+                  <td></td><td class="lbl">Totals</td>
+                  <td class="r num" style="font-weight:600">${plain(dr)}</td>
+                  <td class="r num" style="font-weight:600">${plain(cr)}</td>
+                </tr>
+              </tbody>
+            </table></div>
+          </div>
+          </div>
+
+          <div>
+            <div class="panel" style="margin-bottom:14px">
+              <div class="panel-head"><span class="lbl">${esc(c.short)}</span></div>
+              <div class="panel-body">
+                <dl class="kv">
+                  <dt>Location</dt><dd>${esc(c.city)}</dd>
+                  <dt>Terms</dt><dd>${esc(c.terms)}</dd>
+                  <dt>Open balance</dt><dd class="num">${plain(c.bal)}</dd>
+                  <dt>Sales YTD</dt><dd class="num">${plain(c.ytd)}</dd>
+                </dl>
+                <button class="btn" style="margin-top:10px;width:100%" data-cust="${c.id}">Full history</button>
+              </div>
+            </div>
+            <div class="panel">
+              <div class="panel-head"><span class="lbl">Also in QuickBooks</span></div>
+              <div class="panel-body">
+                <p class="dim" style="margin:0 0 9px;font-size:12px">This invoice exists in QBO as well. Open it there for anything this app does not do yet.</p>
+                <button class="btn" style="width:100%" onclick="return false">Open in QuickBooks ↗</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>`;
+    },
+
+    customers() {
+      return head("Customers", `${CUSTOMERS.length} of 1,482 · sorted by open balance`) + `
+      <div class="pad">
+        <div class="grid-wrap"><div class="grid-scroll"><table>
+          <thead><tr><th>Customer</th><th>Location</th><th>Terms</th><th>Tax treatment</th><th class="r">Open balance</th><th class="r">Sales YTD</th></tr></thead>
+          <tbody>${[...CUSTOMERS].sort((a, b) => b.bal - a.bal).map(c => `
+            <tr data-clickable data-cust="${c.id}">
+              <td class="trunc">${esc(c.name)}</td>
+              <td class="dim">${esc(c.city)}</td>
+              <td class="dim">${esc(c.terms)}</td>
+              <td>${c.tax.startsWith("Taxable") ? '<span class="tag">taxable</span>' : `<span class="tag acc">${esc(c.tax.replace("Exempt — ", ""))}</span>`}</td>
+              <td class="r num">${c.bal ? plain(c.bal) : '<span class="dim">—</span>'}</td>
+              <td class="r num dim">${plain(c.ytd)}</td>
+            </tr>`).join("")}</tbody>
+        </table></div></div>
+      </div>`;
+    },
+
+    customer(id) {
+      const c = cust(id) || CUSTOMERS[0];
+      const rows = INVOICES.filter(i => i.cust === c.id);
+      return head(c.short, `${esc(c.city)} · ${esc(c.terms)} · every transaction since 2012`,
+        `<button class="btn" data-go="customers">← Back</button>
+         <button class="btn btn-primary">New invoice</button>`) + `
+      <div class="pad">
+        <div class="strip">
+          <div class="strip-cell"><div class="lbl">Open balance</div><div class="strip-val ${c.bal ? "warn" : "pos"}">${money(c.bal)}</div><div class="strip-note">${rows.filter(i => i.bal > 0).length} unpaid</div></div>
+          <div class="strip-cell"><div class="lbl">Sales YTD</div><div class="strip-val">${money(c.ytd)}</div><div class="strip-note">2026 to date</div></div>
+          <div class="strip-cell"><div class="lbl">Terms</div><div class="strip-val" style="font-size:15px">${esc(c.terms)}</div><div class="strip-note">${esc(c.tax)}</div></div>
+          <div class="strip-cell"><div class="lbl">Customer since</div><div class="strip-val" style="font-size:15px">2014</div><div class="strip-note">12 years</div></div>
+        </div>
+        <div class="grid-wrap"><div class="grid-scroll"><table>
+          <thead><tr><th>Type</th><th>No.</th><th>Date</th><th>Class</th><th class="r">Total</th><th class="r">Balance</th><th>Status</th></tr></thead>
+          <tbody>${rows.map(i => `
+            <tr data-clickable data-inv="${i.no}">
+              <td class="dim">Invoice</td>
+              <td class="mono">${i.no}</td>
+              <td class="mono dim">${i.date}</td>
+              <td><span class="swatch" style="background:${cls(i.cls).color}"></span><span class="dim">${cls(i.cls).name}</span></td>
+              <td class="r num">${plain(i.total)}</td>
+              <td class="r num">${i.bal ? plain(i.bal) : '<span class="dim">—</span>'}</td>
+              <td>${statusTag(i.status)}</td>
+            </tr>`).join("")}</tbody>
+        </table></div></div>
+      </div>`;
+    },
+
+    items() {
+      return head("Items", `${ITEMS.length} of 2,140 · inventory, service and non-inventory`) + `
+      <div class="pad">
+        <div class="grid-wrap"><div class="grid-scroll"><table>
+          <thead><tr><th>SKU</th><th>Description</th><th>Type</th><th>Class</th><th class="r">Price</th><th class="r">Cost</th><th class="r">Margin</th><th class="r">On hand</th></tr></thead>
+          <tbody>${ITEMS.map(i => {
+            const m = i.price ? (i.price - i.cost) / i.price : 0;
+            return `<tr data-clickable data-item="${esc(i.sku)}">
+              <td class="mono">${esc(i.sku)}</td>
+              <td class="trunc">${esc(i.desc)}</td>
+              <td class="dim">${i.type}</td>
+              <td>${i.cls ? `<span class="swatch" style="background:${cls(i.cls).color}"></span><span class="dim">${cls(i.cls).name}</span>` : '<span class="dim">—</span>'}</td>
+              <td class="r num">${plain(i.price)}</td>
+              <td class="r num dim">${plain(i.cost)}</td>
+              <td class="r num" style="color:${m > .5 ? "var(--ok)" : m > .3 ? "var(--ink)" : "var(--warn)"}">${Math.round(m * 100)}%</td>
+              <td class="r num">${i.hand == null ? '<span class="dim">—</span>' : i.hand}</td>
+            </tr>`; }).join("")}</tbody>
+        </table></div></div>
+      </div>`;
+    },
+
+    pos() {
+      return head("Purchase orders", `${POS.length} open with vendors`) + `
+      <div class="pad">
+        <div class="grid-wrap"><div class="grid-scroll"><table>
+          <thead><tr><th>No.</th><th>Date</th><th>Vendor</th><th>Class</th><th class="r">Total</th><th>Received</th><th>Status</th></tr></thead>
+          <tbody>${POS.map(p => `
+            <tr data-clickable>
+              <td class="mono">${p.no}</td>
+              <td class="mono dim">${p.date}</td>
+              <td>${esc(p.vendor)}</td>
+              <td><span class="swatch" style="background:${cls(p.cls).color}"></span><span class="dim">${cls(p.cls).name}</span></td>
+              <td class="r num">${plain(p.total)}</td>
+              <td class="dim">${esc(p.rec)}</td>
+              <td>${p.status === "Received" ? '<span class="tag ok">received</span>' : p.status === "Partial" ? '<span class="tag warn">partial</span>' : `<span class="tag">${p.status.toLowerCase()}</span>`}</td>
+            </tr>`).join("")}</tbody>
+        </table></div></div>
+      </div>`;
+    },
+
+    failures() {
+      return head("Needs you", "Writes QuickBooks would not take. Nothing was dropped and nothing was merged behind your back.") + `
+      <div class="pad">
+        ${FAILURES.map((f, n) => `
+          <div class="fail">
+            <div class="fail-bar ${f.sev === "warn" ? "warn" : ""}">
+              <span class="tag ${f.sev}">${f.sev === "crit" ? "conflict" : "rejected"}</span>
+              <b>${esc(f.doc)}</b>
+              <span class="dim">${esc(f.who)}</span>
+              <span class="spacer" style="flex:1"></span>
+              <span class="lbl">${esc(f.kind)}</span>
+            </div>
+            <div class="fail-body">
+              <p class="fail-why" style="margin:0">${esc(f.why)}</p>
+              <div class="diff">${f.diff.map(([k, v]) => `<span class="k">${esc(k)}</span><span>${esc(v)}</span>`).join("")}</div>
+              <div class="fail-acts">
+                <button class="btn btn-primary" data-resolve="${n}">Keep my version</button>
+                <button class="btn" data-resolve="${n}">Keep the QuickBooks version</button>
+                <button class="btn">Open both side by side</button>
+              </div>
+            </div>
+          </div>`).join("")}
+        ${FAILURES.length === 0 ? '<div class="panel"><div class="panel-body" style="text-align:center;padding:34px"><div class="strip-val pos" style="font-size:22px">All clear</div><p class="dim" style="margin:6px 0 0">Every queued write reached QuickBooks.</p></div></div>' : ""}
+        <p class="hint">A conflict means someone edited the same record in the QuickBooks web app. Ledger Local never picks a winner for you — a silent overwrite is how a real edit disappears without anyone noticing.</p>
+      </div>`;
+    }
+  };
+
+  function lineRow(l, n, invCls) {
+    const it = item(l.sku);
+    const c = it && it.cls ? cls(it.cls) : cls(invCls);
+    return `<tr>
+      <td class="mono dim">${n + 1}</td>
+      <td class="mono">${esc(l.sku)}</td>
+      <td class="trunc dim">${esc(it ? it.desc : "")}</td>
+      <td class="r num">${l.qty}</td>
+      <td class="r num">${plain(l.rate)}</td>
+      <td class="r num">${plain(l.qty * l.rate)}</td>
+      <td>${c ? `<span class="swatch" style="background:${c.color}"></span><span class="dim">${c.name}</span>` : ""}</td>
+    </tr>`;
+  }
+
+  /* ─── routing ───────────────────────────────────────────────────────── */
+  function go(view, arg) {
+    state.view = view; state.arg = arg;
+    const ms = readMs();
+    $("#main").innerHTML = (VIEWS[view] || VIEWS.today)(arg);
+    $("#main").scrollTop = 0;
+    $("#sbMs").textContent = ms + " ms";
+    renderRail();
+    wireView();
+  }
+
+  function wireView() {
+    document.querySelectorAll("[data-go]").forEach(b => b.onclick = () => go(b.dataset.go));
+    document.querySelectorAll("[data-inv]").forEach(r => r.onclick = () => go("invoice", r.dataset.inv));
+    document.querySelectorAll("[data-cust]").forEach(r => r.onclick = e => { e.stopPropagation(); go("customer", r.dataset.cust); });
+    document.querySelectorAll("[data-item]").forEach(r => r.onclick = () => toast("Item detail — not in this prototype"));
+    document.querySelectorAll("[data-new]").forEach(b => b.onclick = () => toast("New invoice — open 21234 to see the editor"));
+
+    const save = document.querySelector("[data-save]");
+    if (save) save.onclick = () => commitLocally(save.dataset.save);
+
+    document.querySelectorAll("[data-resolve]").forEach(b => b.onclick = () => {
+      FAILURES.splice(Number(b.dataset.resolve), 1);
+      toast("Resolved — re-queued for QuickBooks");
+      updateChrome(); go("failures");
+    });
+
+    const sku = $("#skuIn");
+    if (sku) sku.onkeydown = e => {
+      if (e.key !== "Enter") return;
+      const q = sku.value.trim().toUpperCase();
+      if (!q) return;
+      const hit = ITEMS.find(i => i.sku.toUpperCase().startsWith(q))
+               || ITEMS.find(i => i.desc.toUpperCase().includes(q));
+      if (!hit) { toast(`No item matches "${sku.value}"`, null, true); return; }
+      const inv = INVOICES.find(i => i.no === state.arg);
+      inv.lines.push({ sku: hit.sku, qty: 1, rate: hit.price });
+      inv.sync = "pending";
+      sku.value = "";
+      go("invoice", inv.no);
+      setTimeout(() => { const s = $("#skuIn"); if (s) s.focus(); }, 0);
+      toast(`Added ${hit.sku}`, readMs() + " ms");
+    };
+  }
+
+  /* The demo's whole argument: a save commits to local disk and returns
+     immediately, online or not. The network catches up afterwards. */
+  function commitLocally(no) {
+    const inv = INVOICES.find(i => i.no === no);
+    if (inv) inv.sync = "pending";
+    state.pending++;
+    updateChrome();
+    const ms = (Math.random() * 14 + 6).toFixed(0);
+    toast(state.online ? "Saved to local disk" : "Saved to local disk — will sync when you reconnect", ms + " ms", !state.online);
+    go("invoice", no);
+    if (state.online) setTimeout(drain, 2200);
+  }
+
+  function drain() {
+    if (!state.online || state.pending === 0) return;
+    state.pending = 0;
+    INVOICES.forEach(i => { if (i.sync === "pending") i.sync = "synced"; });
+    state.syncAge = 0;
+    updateChrome();
+    toast("Queue drained to QuickBooks");
+    if (["invoice", "invoices", "today"].includes(state.view)) go(state.view, state.arg);
+  }
+
+  /* ─── chrome ────────────────────────────────────────────────────────── */
+  function updateChrome() {
+    const pill = $("#syncPill"), text = $("#syncText");
+    if (state.online) {
+      pill.className = "pill is-live";
+      text.textContent = state.syncAge < 60 ? `Synced ${state.syncAge}s ago` : `Synced ${Math.floor(state.syncAge / 60)}m ago`;
+      $("#sbNet").textContent = "Network idle · CDC poll 15s";
+    } else {
+      pill.className = "pill is-off";
+      text.textContent = "Offline — working locally";
+      $("#sbNet").textContent = "Network down · reads unaffected";
+    }
+    const pend = $("#pendPill");
+    pend.hidden = state.pending === 0;
+    $("#pendCount").textContent = state.pending;
+
+    const fail = $("#failPill");
+    fail.hidden = FAILURES.length === 0;
+    fail.innerHTML = `<span class="dot"></span> ${FAILURES.length} need${FAILURES.length === 1 ? "s" : ""} you`;
+    fail.onclick = () => go("failures");
+
+    const t = document.getElementById("tPend");
+    if (t) { t.textContent = state.pending; t.className = "strip-val" + (state.pending ? " warn" : ""); }
+  }
+
+  $("#netBtn").onclick = () => {
+    state.online = !state.online;
+    document.getElementById("offlineBar")?.remove();
+    if (!state.online) {
+      const bar = el("div", "offline-bar");
+      bar.id = "offlineBar";
+      bar.innerHTML = `<b>Network off.</b> Every screen still opens instantly — the data is already on this disk. Writes queue up and go out when you reconnect.`;
+      $("#main").prepend(bar);
+      toast("Network disconnected — nothing else changed", null, true);
+    } else {
+      toast("Reconnected");
+      setTimeout(drain, 900);
+    }
+    updateChrome();
+  };
+
+  $("#themeBtn").onclick = () => {
+    const now = document.documentElement.getAttribute("data-theme");
+    const sysDark = matchMedia("(prefers-color-scheme: dark)").matches;
+    const current = now || (sysDark ? "dark" : "light");
+    document.documentElement.setAttribute("data-theme", current === "dark" ? "light" : "dark");
+  };
+
+  $("#coBtn").onclick = () => {
+    const aqua = $("#coName").textContent.startsWith("Aquamentor");
+    $("#coName").textContent = aqua ? "WaterLine CNC" : "Aquamentor, Inc.";
+    $("#coRealm").textContent = aqua ? "1234567890123457" : "1234567890123456";
+    $("#coDot").style.background = aqua ? "var(--ok)" : "var(--accent)";
+    $("#sbRows").textContent = aqua ? "6,204" : "41,882";
+    toast(`Switched to ${aqua ? "WaterLine CNC" : "Aquamentor"} — separate books, nothing shared`, readMs() + " ms");
+  };
+
+  setInterval(() => {
+    if (!state.online) return;
+    state.syncAge += 1;
+    if (state.syncAge > 15) state.syncAge = 0;
+    updateChrome();
+  }, 1000);
+
+  /* ─── command palette ───────────────────────────────────────────────── */
+  let palRows = [], palIdx = 0;
+
+  function palData() {
+    const rows = [];
+    NAV.forEach(n => rows.push({ sec: "Go to", glyph: n.glyph, main: n.label, meta: "", act: () => go(n.id) }));
+    INVOICES.forEach(i => rows.push({
+      sec: "Invoices", glyph: "▤",
+      main: `Invoice ${i.no} — ${cust(i.cust).short}`,
+      meta: plain(i.total), act: () => go("invoice", i.no)
+    }));
+    CUSTOMERS.forEach(c => rows.push({
+      sec: "Customers", glyph: "◑", main: c.name,
+      meta: c.bal ? plain(c.bal) : "", act: () => go("customer", c.id)
+    }));
+    ITEMS.forEach(i => rows.push({
+      sec: "Items", glyph: "▦", main: `${i.sku} — ${i.desc}`,
+      meta: plain(i.price), act: () => go("items")
+    }));
+    POS.forEach(p => rows.push({
+      sec: "Purchase orders", glyph: "▥", main: `${p.no} — ${p.vendor}`,
+      meta: plain(p.total), act: () => go("pos")
+    }));
+    return rows;
+  }
+
+  function fuzzy(hay, needle) {
+    hay = hay.toLowerCase(); needle = needle.toLowerCase();
+    let n = 0;
+    for (const ch of hay) if (ch === needle[n]) n++;
+    return n === needle.length;
+  }
+
+  function renderPal(q) {
+    const t0 = performance.now();
+    const all = palData();
+    palRows = q ? all.filter(r => fuzzy(r.main + " " + r.sec, q)).slice(0, 40) : all.slice(0, 40);
+    palIdx = 0;
+    const list = $("#palList");
+    list.innerHTML = "";
+    if (!palRows.length) {
+      list.innerHTML = `<div class="pal-empty">Nothing matches “${esc(q)}”.<br><span class="dim">Every record is local, so this is the whole book — not a slow server.</span></div>`;
+      $("#palTime").textContent = "";
+      return;
+    }
+    let sec = null;
+    palRows.forEach((r, n) => {
+      if (r.sec !== sec) { sec = r.sec; list.appendChild(el("div", "pal-sec lbl", sec)); }
+      const b = el("button", "pal-item");
+      b.dataset.active = String(n === 0);
+      b.dataset.n = String(n);
+      b.innerHTML = `<span class="pi-glyph" aria-hidden="true">${r.glyph}</span>
+                     <span class="pi-main">${esc(r.main)}</span>
+                     <span class="pi-meta">${r.meta}</span>`;
+      b.onmouseenter = () => setPalIdx(n);
+      b.onclick = () => { closePal(); r.act(); };
+      list.appendChild(b);
+    });
+    $("#palTime").textContent = `${palRows.length} of ${all.length} in ${(performance.now() - t0).toFixed(1)} ms`;
+  }
+
+  function setPalIdx(n) {
+    palIdx = Math.max(0, Math.min(palRows.length - 1, n));
+    document.querySelectorAll(".pal-item").forEach(b => b.dataset.active = String(Number(b.dataset.n) === palIdx));
+    const active = document.querySelector('.pal-item[data-active="true"]');
+    if (active) active.scrollIntoView({ block: "nearest" });
+  }
+
+  function openPal() {
+    $("#scrim").hidden = false;
+    $("#palInput").value = "";
+    renderPal("");
+    $("#palInput").focus();
+  }
+  function closePal() { $("#scrim").hidden = true; $("#main").focus(); }
+
+  $("#omniBtn").onclick = openPal;
+  $("#palInput").oninput = e => renderPal(e.target.value.trim());
+  $("#scrim").onclick = e => { if (e.target === $("#scrim")) closePal(); };
+
+  document.addEventListener("keydown", e => {
+    const open = !$("#scrim").hidden;
+    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") { e.preventDefault(); open ? closePal() : openPal(); return; }
+    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "s") {
+      e.preventDefault();
+      if (state.view === "invoice") commitLocally(state.arg);
+      return;
+    }
+    if (!open) return;
+    if (e.key === "Escape") { e.preventDefault(); closePal(); }
+    else if (e.key === "ArrowDown") { e.preventDefault(); setPalIdx(palIdx + 1); }
+    else if (e.key === "ArrowUp") { e.preventDefault(); setPalIdx(palIdx - 1); }
+    else if (e.key === "Enter") {
+      e.preventDefault();
+      const r = palRows[palIdx];
+      if (r) { closePal(); r.act(); }
+    }
+  });
+
+  /* ─── boot ──────────────────────────────────────────────────────────── */
+  renderRail();
+  go("today");
+  updateChrome();
+  setTimeout(() => toast("Replica current — 41,882 records on disk", "2.1 s"), 700);
+})();
+</script>
