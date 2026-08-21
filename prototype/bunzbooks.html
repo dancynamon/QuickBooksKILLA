@@ -1,4 +1,4 @@
-<title>Ledger Local</title>
+<title>BunzBooks</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans+Condensed:wght@500;600;700&family=IBM+Plex+Sans:wght@400;450;500;600;700&display=swap">
@@ -30,6 +30,10 @@
   --crit:        #B22F22;
   --crit-soft:   rgba(178, 47, 34, .12);
   --shadow:      0 18px 44px -22px rgba(13, 25, 34, .45);
+  --bun-top:     #E39B3A;
+  --bun-seed:    #FFF1D6;
+  --bun-fill:    #8C4A28;
+  --bun-heel:    #D2872B;
 
   --fs: 1;            /* text scale, driven by the A-/A+ controls */
   --rail: calc(204px * var(--fs));
@@ -65,6 +69,10 @@
     --crit:        #F4695B;
     --crit-soft:   rgba(244, 105, 91, .13);
     --shadow:      0 20px 50px -20px rgba(0, 0, 0, .78);
+    --bun-top:     #F0A94A;
+    --bun-seed:    #FFF6E4;
+    --bun-fill:    #A85A31;
+    --bun-heel:    #DE9236;
   }
 }
 
@@ -90,6 +98,10 @@
   --crit:        #F4695B;
   --crit-soft:   rgba(244, 105, 91, .13);
   --shadow:      0 20px 50px -20px rgba(0, 0, 0, .78);
+  --bun-top:     #F0A94A;
+  --bun-seed:    #FFF6E4;
+  --bun-fill:    #A85A31;
+  --bun-heel:    #DE9236;
 }
 
 /* ─── base ──────────────────────────────────────────────────────────── */
@@ -161,14 +173,8 @@ kbd {
 
 .mark { display: flex; align-items: center; gap: 8px; padding-right: 12px; border-right: 1px solid var(--line-soft); }
 .mark-glyph {
-  width: 22px; height: calc(22px * var(--fs)); flex: none;
-  display: grid; place-items: center;
-  border-radius: 5px;
-  background: var(--accent);
-  color: var(--accent-ink);
-  font-family: var(--cond);
-  font-weight: 700;
-  font-size: calc(13px * var(--fs));
+  width: calc(26px * var(--fs)); height: calc(24px * var(--fs));
+  flex: none; display: block;
 }
 .mark-name { font-weight: 600; letter-spacing: -.01em; white-space: nowrap; }
 .mark-name span { color: var(--ink-3); font-weight: 450; }
@@ -623,8 +629,15 @@ tbody tr[data-clickable]:hover { background: var(--accent-soft); }
 
   <header class="chrome">
     <div class="mark">
-      <div class="mark-glyph" aria-hidden="true">L</div>
-      <div class="mark-name">Ledger <span>Local</span></div>
+      <svg class="mark-glyph" viewBox="0 0 26 24" aria-hidden="true" focusable="false">
+        <path d="M2.4 11.6C2.4 5.9 7.1 2.2 13 2.2s10.6 3.7 10.6 9.4a1.5 1.5 0 0 1-1.5 1.5H3.9a1.5 1.5 0 0 1-1.5-1.5Z" fill="var(--bun-top)"/>
+        <ellipse cx="8.2"  cy="8.1" rx="1.35" ry=".78" fill="var(--bun-seed)" transform="rotate(-22 8.2 8.1)"/>
+        <ellipse cx="13"   cy="6.1" rx="1.35" ry=".78" fill="var(--bun-seed)" transform="rotate(6 13 6.1)"/>
+        <ellipse cx="17.8" cy="8.1" rx="1.35" ry=".78" fill="var(--bun-seed)" transform="rotate(22 17.8 8.1)"/>
+        <rect x="1.7" y="13.6" width="22.6" height="3.5" rx="1.75" fill="var(--bun-fill)"/>
+        <path d="M3.2 18.2h19.6a1.3 1.3 0 0 1 1.3 1.3c0 1.4-1.1 2.4-2.5 2.4H4.4c-1.4 0-2.5-1-2.5-2.4a1.3 1.3 0 0 1 1.3-1.3Z" fill="var(--bun-heel)"/>
+      </svg>
+      <div class="mark-name">Bunz<span>Books</span></div>
     </div>
 
     <button class="co" id="coBtn" title="Switch company">
@@ -783,27 +796,79 @@ tbody tr[data-clickable]:hover { background: var(--accent-soft); }
       lines: [ { sku: "CNC-CUT-HR", qty: 20, rate: 9500 } ] },
     { no: "21222", date: "2026-06-19", cust: "c1", cls: "foam",  total: 214500, bal: 0,      age: 58, status: "Paid",  sync: "synced",
       lines: [ { sku: "XRT-40-SFSP", qty: 30, rate: 4925 }, { sku: "AM-SC-KB", qty: 52, rate: 1250 } ] },
+    { no: "21220", date: "2026-06-05", cust: "c2", cls: "chair", total: 299000, bal: 0,      age: 76, status: "Paid",  sync: "synced",
+      custPO: "UC-PR-54880", fromEstimate: "3596",
+      lines: [ { sku: "LG-CHAIR-60", qty: 2, rate: 149500 } ] },
+    { no: "21218", date: "2026-05-20", cust: "c2", cls: "chair", total: 149500, bal: 0,      age: 92, status: "Paid",  sync: "synced",
+      custPO: "UC-PR-54880", fromEstimate: "3596",
+      lines: [ { sku: "LG-CHAIR-60", qty: 1, rate: 149500 } ] },
     { no: "21221", date: "2026-06-11", cust: "c6", cls: "foam",  total: 291000, bal: 291000, age: 66, status: "Open",  sync: "synced",
       lines: [ { sku: "PM-6X12-BLU", qty: 2, rate: 89900 }, { sku: "XRT-50-STD", qty: 20, rate: 5450 } ] }
   ];
 
   const POS = [
-    { no: "PO-4471", date: "2026-08-14", vendor: "Continental Foam",    cls: "foam", total: 1284000, status: "Open",     rec: "0 of 18 sheets", bill: null,       forInvoice: null },
-    { no: "PO-4470", date: "2026-08-12", vendor: "Poolcraft Products", cls: "drop", total: 8420,    status: "Shipped",  rec: "dropship",       bill: "BILL-2291", forInvoice: "21234" },
-    { no: "PO-4469", date: "2026-08-09", vendor: "Spectra EVA",        cls: "foam", total: 462800,  status: "Partial",  rec: "12 of 20 sheets",bill: "BILL-2288", forInvoice: null },
-    { no: "PO-4468", date: "2026-08-05", vendor: "Aquabot Systems",    cls: "drop", total: 39900,   status: "Received", rec: "complete",       bill: "BILL-2284", forInvoice: null },
-    { no: "PO-4467", date: "2026-07-31", vendor: "Polymer Source",   cls: "foam", total: 918400,  status: "Open",     rec: "0 of 24 sheets", bill: null,       forInvoice: null }
+    { no: "PO-4471", date: "2026-08-14", vendor: "Continental Foam",    cls: "foam", total: 1284000, bill: null,       forInvoice: null,
+      lines: [ { sku: "FOAM-XLPE-BLU", desc: "XLPE sheet 2lb, blue, 4×8×2", qty: 12, recd: 0, rate: 68000 },
+               { sku: "FOAM-XLPE-RED", desc: "XLPE sheet 2lb, red, 4×8×2",  qty: 6,  recd: 0, rate: 78000 } ],
+      receipts: [] },
+    { no: "PO-4470", date: "2026-08-12", vendor: "Poolcraft Products", cls: "drop", total: 8420,    bill: "BILL-2291", forInvoice: "21234",
+      lines: [ { sku: "1 RH 001", desc: "Ring buoy holder — stainless steel", qty: 6, recd: 6, rate: 940 },
+               { sku: "FREIGHT",  desc: "Inbound freight",                    qty: 1, recd: 1, rate: 2780 } ],
+      receipts: [ { date: "2026-08-13", ref: "DR-88214", note: "Shipped direct to Blue Harbor Swim" } ] },
+    { no: "PO-4469", date: "2026-08-09", vendor: "Spectra EVA",        cls: "foam", total: 462800,  bill: "BILL-2288", forInvoice: null,
+      lines: [ { sku: "EVA-38-BLU", desc: "EVA sheet 38kg, blue",  qty: 12, recd: 12, rate: 23140 },
+               { sku: "EVA-38-YEL", desc: "EVA sheet 38kg, yellow", qty: 8,  recd: 0,  rate: 23140 } ],
+      receipts: [ { date: "2026-08-14", ref: "EC-11902", note: "Blue only — yellow backordered to 29 Aug" } ] },
+    { no: "PO-4468", date: "2026-08-05", vendor: "Aquabot Systems",    cls: "drop", total: 39900,   bill: "BILL-2284", forInvoice: null,
+      lines: [ { sku: "MAY-9995670", desc: "Dolphin drive motor assembly", qty: 1, recd: 1, rate: 39900 } ],
+      receipts: [ { date: "2026-08-07", ref: "MT-55118", note: "Complete" } ] },
+    { no: "PO-4467", date: "2026-07-31", vendor: "Polymer Source",   cls: "foam", total: 918400,  bill: null,       forInvoice: null,
+      lines: [ { sku: "RES-PE-NAT", desc: "PE resin, natural, 55lb bag", qty: 24, recd: 0, rate: 38266 } ],
+      receipts: [] }
   ];
 
+  /* Received-to-date drives PO status rather than a hand-set field, so the
+     two can never disagree. */
+  function poReceipt(o) {
+    const ordered  = o.lines.reduce((a, l) => a + l.qty, 0);
+    const received = o.lines.reduce((a, l) => a + l.recd, 0);
+    const value    = o.lines.reduce((a, l) => a + l.recd * l.rate, 0);
+    return { ordered, received, value,
+             pct: ordered ? Math.round(received / ordered * 100) : 0,
+             status: received === 0 ? "Open" : received < ordered ? "Partial" : "Received" };
+  }
+
+  /* Invoiced-to-date on an estimate, same idea. */
+  function estProgress(e) {
+    const invoiced  = (e.progress || []).reduce((a, x) => a + x.amount, 0);
+    const remaining = Math.max(0, e.total - invoiced);
+    return { invoiced, remaining,
+             pct: e.total ? Math.round(invoiced / e.total * 100) : 0,
+             count: (e.progress || []).length };
+  }
+
   const ESTIMATES = [
-    { no: "3611", date: "2026-08-20", cust: "c8", cls: "chair", total: 137836, status: "Pending",  expires: "2026-09-19", custPO: "",            sync: "synced", becameInvoice: null,
+    { no: "3611", date: "2026-08-20", cust: "c8", cls: "chair", total: 137836, status: "Pending",  expires: "2026-09-19", custPO: "",             sync: "synced", progress: [],
       lines: [ { sku: "LG-CHAIR-60", qty: 1, rate: 124500 }, { sku: "SHIP-U-GND", qty: 1, rate: 12836 } ] },
-    { no: "3610", date: "2026-08-20", cust: "c9", cls: "foam",  total: 213625, status: "Pending",  expires: "2026-09-19", custPO: "",            sync: "synced", becameInvoice: null,
+    { no: "3610", date: "2026-08-20", cust: "c9", cls: "foam",  total: 213625, status: "Pending",  expires: "2026-09-19", custPO: "",             sync: "synced", progress: [],
       lines: [ { sku: "XRT-40-SFSP", qty: 35, rate: 5675 }, { sku: "AM-SC-KB", qty: 3, rate: 4500 } ] },
-    { no: "3608", date: "2026-08-02", cust: "c6", cls: "foam",  total: 289900, status: "Accepted", expires: "2026-09-01", custPO: "KA-2026-4417", sync: "synced", becameInvoice: "21233" },
-    { no: "3604", date: "2026-07-28", cust: "c5", cls: "cnc",   total: 148200, status: "Accepted", expires: "2026-08-27", custPO: "HVSW-0912",   sync: "synced", becameInvoice: "21231" },
-    { no: "3601", date: "2026-07-21", cust: "c2", cls: "chair", total: 299000, status: "Accepted", expires: "2026-08-20", custPO: "UC-PR-55210", sync: "synced", becameInvoice: "21230" },
-    { no: "3599", date: "2026-07-09", cust: "c4", cls: "sign",  total: 84200,  status: "Expired",  expires: "2026-08-08", custPO: "",            sync: "synced", becameInvoice: null }
+    { no: "3608", date: "2026-08-02", cust: "c6", cls: "foam",  total: 289900, status: "Accepted", expires: "2026-09-01", custPO: "KA-2026-4417", sync: "synced",
+      lines: [ { sku: "PM-6X12-BLU", qty: 3, rate: 89900 }, { sku: "XRT-50-STD", qty: 4, rate: 5450 } ],
+      progress: [ { inv: "21233", pct: 100, amount: 289900, date: "2026-08-14", note: "Invoiced in full on shipment" } ] },
+    { no: "3604", date: "2026-07-28", cust: "c5", cls: "cnc",   total: 148200, status: "Accepted", expires: "2026-08-27", custPO: "HVSW-0912",    sync: "synced",
+      lines: [ { sku: "CNC-CUT-HR", qty: 12, rate: 9500 }, { sku: "UV-PRINT-SF", qty: 24, rate: 1450 } ],
+      progress: [ { inv: "21231", pct: 100, amount: 148200, date: "2026-08-12", note: "Invoiced on completion" } ] },
+    { no: "3601", date: "2026-07-21", cust: "c2", cls: "chair", total: 299000, status: "Accepted", expires: "2026-08-20", custPO: "UC-PR-55210",  sync: "synced",
+      lines: [ { sku: "LG-CHAIR-60", qty: 2, rate: 149500 } ],
+      progress: [ { inv: "21230", pct: 100, amount: 299000, date: "2026-08-11", note: "Invoiced on delivery" } ] },
+    /* The progress-invoicing case: a big chair order billed in stages. */
+    { no: "3596", date: "2026-05-12", cust: "c2", cls: "chair", total: 598000, status: "Accepted", expires: "2026-06-11", custPO: "UC-PR-54880",  sync: "synced",
+      lines: [ { sku: "LG-CHAIR-60", qty: 4, rate: 149500 } ],
+      progress: [
+        { inv: "21218", pct: 25, amount: 149500, date: "2026-05-20", note: "25% deposit at order" },
+        { inv: "21220", pct: 50, amount: 299000, date: "2026-06-05", note: "50% at frame completion" }
+      ] },
+    { no: "3599", date: "2026-07-09", cust: "c4", cls: "sign",  total: 84200,  status: "Expired",  expires: "2026-08-08", custPO: "",             sync: "synced", progress: [] }
   ];
 
   const BILLS = [
@@ -881,17 +946,25 @@ tbody tr[data-clickable]:hover { background: var(--accent-soft); }
       let est = null, inv = null;
       if (kind === "estimate") {
         est = ESTIMATES.find(e => e.no === no) || null;
-        inv = est && est.becameInvoice ? INVOICES.find(i => i.no === est.becameInvoice) : null;
+        const first = est && est.progress && est.progress.length ? est.progress[0].inv : null;
+        inv = first ? INVOICES.find(i => i.no === first) : null;
       } else {
         inv = INVOICES.find(i => i.no === no) || null;
-        est = ESTIMATES.find(e => e.becameInvoice === no) || null;
+        est = ESTIMATES.find(e => (e.progress || []).some(x => x.inv === no)) || null;
         if (!est && inv && inv.fromEstimate) est = ESTIMATES.find(e => e.no === inv.fromEstimate) || null;
       }
 
       if (est) chain.push({ kind: "estimate", no: est.no, amount: est.total, state: est.status.toLowerCase() });
       else chain.push({ kind: "estimate", no: null, amount: null, state: "none" });
 
-      if (inv) chain.push({ kind: "invoice", no: inv.no, amount: inv.total, state: inv.status.toLowerCase() });
+      if (inv) {
+        const staged = est && (est.progress || []).length > 1;
+        chain.push(staged
+          ? { kind: "invoice", no: est.progress.map(x => x.inv).join(", "),
+              amount: estProgress(est).invoiced,
+              state: `${est.progress.length} invoices · ${estProgress(est).pct}% billed` }
+          : { kind: "invoice", no: inv.no, amount: inv.total, state: inv.status.toLowerCase() });
+      }
       else chain.push({ kind: "invoice", no: null, amount: null, state: "none" });
 
       const pays = inv ? PAYMENTS.filter(pm => pm.inv === inv.no) : [];
@@ -905,7 +978,7 @@ tbody tr[data-clickable]:hover { background: var(--accent-soft); }
       const bill = BILLS.find(b => b.no === (po || {}).bill) || BILLS.find(b => b.no === no);
       const bps  = bill ? BILLPAYMENTS.filter(b => b.bill === bill.no) : [];
 
-      chain.push(po ? { kind: "po", no: po.no, amount: po.total, state: po.status.toLowerCase() }
+      chain.push(po ? { kind: "po", no: po.no, amount: po.total, state: poReceipt(po).status.toLowerCase() }
                     : { kind: "po", no: null, amount: null, state: "none" });
       chain.push(bill ? { kind: "bill", no: bill.no, amount: bill.total, state: bill.status.toLowerCase() }
                       : { kind: "bill", no: null, amount: null, state: "none" });
@@ -1145,7 +1218,7 @@ tbody tr[data-clickable]:hover { background: var(--accent-soft); }
         <div class="strip">
           <div class="strip-cell"><div class="lbl">A/R outstanding</div><div class="strip-val">${money(ar)}</div><div class="strip-note">${openInv.length} open invoices</div></div>
           <div class="strip-cell"><div class="lbl">Past due</div><div class="strip-val neg">${money(overdue)}</div><div class="strip-note">over 30 days</div></div>
-          <div class="strip-cell"><div class="lbl">Open POs</div><div class="strip-val">${money(POS.filter(p => p.status !== "Received").reduce((s, p) => s + p.total, 0))}</div><div class="strip-note">${POS.filter(p => p.status !== "Received").length} with vendors</div></div>
+          <div class="strip-cell"><div class="lbl">Open POs</div><div class="strip-val">${money(POS.filter(p => poReceipt(p).status !== "Received").reduce((s, p) => s + p.total, 0))}</div><div class="strip-note">${POS.filter(p => poReceipt(p).status !== "Received").length} with vendors</div></div>
           <div class="strip-cell"><div class="lbl">Queued writes</div><div class="strip-val ${state.pending ? "warn" : ""}" id="tPend">${state.pending}</div><div class="strip-note">waiting on QuickBooks</div></div>
           <div class="strip-cell"><div class="lbl">Needs you</div><div class="strip-val neg">${FAILURES.length}</div><div class="strip-note">conflicts and rejections</div></div>
         </div>
@@ -1188,13 +1261,13 @@ tbody tr[data-clickable]:hover { background: var(--accent-soft); }
                 <button class="btn" data-go="pos">See all ${POS.length}</button></div>
               <div class="grid-scroll"><table>
                 <thead><tr><th>No.</th><th>Vendor</th><th>Class</th><th class="r">Total</th><th>Received</th></tr></thead>
-                <tbody>${POS.filter(p => p.status !== "Received").map(p => `
+                <tbody>${POS.filter(p => poReceipt(p).status !== "Received").map(p => `
                   <tr data-clickable data-go="pos">
                     <td class="mono">${p.no}</td>
                     <td class="trunc">${esc(p.vendor)}</td>
                     <td><span class="swatch" style="background:${cls(p.cls).color}"></span><span class="dim">${cls(p.cls).name}</span></td>
                     <td class="r num">${plain(p.total)}</td>
-                    <td class="dim">${esc(p.rec)}</td>
+                    <td class="dim">${poReceipt(p).received} of ${poReceipt(p).ordered} received</td>
                   </tr>`).join("")}</tbody>
               </table></div>
             </div>
@@ -1442,20 +1515,22 @@ tbody tr[data-clickable]:hover { background: var(--accent-soft); }
     },
 
     pos() {
-      return head("Purchase orders", `${POS.length} open with vendors`) + `
+      return head("Purchase orders", `${POS.length} with vendors · ${POS.filter(p => poReceipt(p).status === "Partial").length} part-received`) + `
       <div class="pad">
         <div class="grid-wrap"><div class="grid-scroll"><table>
-          <thead><tr><th>No.</th><th>Date</th><th>Vendor</th><th>Class</th><th class="r">Total</th><th>Received</th><th>Status</th></tr></thead>
-          <tbody>${POS.map(p => `
-            <tr data-clickable>
+          <thead><tr><th>No.</th><th>Date</th><th>Vendor</th><th>Class</th><th class="r">Total</th><th class="r">Received</th><th style="width:110px">Progress</th><th>Status</th><th>Bill</th></tr></thead>
+          <tbody>${POS.map(p => { const rc = poReceipt(p); return `
+            <tr data-clickable data-po="${p.no}">
               <td class="mono">${p.no}</td>
               <td class="mono dim">${p.date}</td>
               <td>${esc(p.vendor)}</td>
               <td><span class="swatch" style="background:${cls(p.cls).color}"></span><span class="dim">${cls(p.cls).name}</span></td>
               <td class="r num">${plain(p.total)}</td>
-              <td class="dim">${esc(p.rec)}</td>
-              <td>${p.status === "Received" ? '<span class="tag ok">received</span>' : p.status === "Partial" ? '<span class="tag warn">partial</span>' : `<span class="tag">${p.status.toLowerCase()}</span>`}</td>
-            </tr>`).join("")}</tbody>
+              <td class="r num dim">${rc.received} / ${rc.ordered}</td>
+              <td><div class="bar-track"><div class="bar-fill" style="width:${rc.pct}%;background:${rc.pct === 100 ? "var(--ok)" : rc.pct ? "var(--warn)" : "var(--surface-3)"}"></div></div></td>
+              <td>${rc.status === "Received" ? '<span class="tag ok">received</span>' : rc.status === "Partial" ? '<span class="tag warn">partial</span>' : '<span class="tag">open</span>'}</td>
+              <td>${p.bill ? `<span class="tag acc">${p.bill}</span>` : '<span class="dim">—</span>'}</td>
+            </tr>`; }).join("")}</tbody>
         </table></div></div>
       </div>`;
     },
@@ -1467,12 +1542,12 @@ tbody tr[data-clickable]:hover { background: var(--accent-soft); }
       <div class="pad">
         <div class="strip">
           <div class="strip-cell"><div class="lbl">Open estimates</div><div class="strip-val">${money(open.reduce((a, e) => a + e.total, 0))}</div><div class="strip-note">${open.length} awaiting a decision</div></div>
-          <div class="strip-cell"><div class="lbl">Accepted, not invoiced</div><div class="strip-val warn">${money(ESTIMATES.filter(e => e.status === "Accepted" && !e.becameInvoice).reduce((a, e) => a + e.total, 0))}</div><div class="strip-note">ready to convert</div></div>
-          <div class="strip-cell"><div class="lbl">Converted</div><div class="strip-val pos">${money(ESTIMATES.filter(e => e.becameInvoice).reduce((a, e) => a + e.total, 0))}</div><div class="strip-note">became invoices</div></div>
+          <div class="strip-cell"><div class="lbl">Accepted, not invoiced</div><div class="strip-val warn">${money(ESTIMATES.filter(e => e.status === "Accepted").reduce((a, e) => a + estProgress(e).remaining, 0))}</div><div class="strip-note">accepted but not yet billed</div></div>
+          <div class="strip-cell"><div class="lbl">Invoiced to date</div><div class="strip-val pos">${money(ESTIMATES.reduce((a, e) => a + estProgress(e).invoiced, 0))}</div><div class="strip-note">across all estimates</div></div>
           <div class="strip-cell"><div class="lbl">Expired</div><div class="strip-val">${money(ESTIMATES.filter(e => e.status === "Expired").reduce((a, e) => a + e.total, 0))}</div><div class="strip-note">past their date</div></div>
         </div>
         <div class="grid-wrap"><div class="grid-scroll"><table>
-          <thead><tr><th>No.</th><th>Date</th><th>Customer</th><th>Customer PO</th><th>Class</th><th class="r">Total</th><th>Expires</th><th>Status</th><th>Became</th></tr></thead>
+          <thead><tr><th>No.</th><th>Date</th><th>Customer</th><th>Customer PO</th><th>Class</th><th class="r">Total</th><th>Expires</th><th>Status</th><th class="r">Billed</th><th style="width:118px">Progress</th></tr></thead>
           <tbody>${ESTIMATES.map(e => `
             <tr data-clickable data-est="${e.no}">
               <td class="mono">${e.no}</td>
@@ -1483,21 +1558,26 @@ tbody tr[data-clickable]:hover { background: var(--accent-soft); }
               <td class="r num">${plain(e.total)}</td>
               <td class="mono dim">${e.expires}</td>
               <td>${e.status === "Accepted" ? '<span class="tag ok">accepted</span>' : e.status === "Expired" ? '<span class="tag crit">expired</span>' : '<span class="tag warn">pending</span>'}</td>
-              <td>${e.becameInvoice ? `<span class="tag acc">inv ${e.becameInvoice}</span>` : '<span class="dim">—</span>'}</td>
+              <td class="r num">${estProgress(e).pct ? estProgress(e).pct + "%" : '<span class="dim">—</span>'}</td>
+              <td>${estProgress(e).count
+                ? `<div class="bar-track" title="${estProgress(e).count} invoice(s)"><div class="bar-fill" style="width:${estProgress(e).pct}%;background:${estProgress(e).pct === 100 ? "var(--ok)" : "var(--warn)"}"></div></div>`
+                : '<span class="dim">not billed</span>'}</td>
             </tr>`).join("")}</tbody>
         </table></div></div>
-        <p class="hint">An accepted estimate with nothing in the Became column is revenue sitting in a drawer. That is the column to scan.</p>
+        <p class="hint">An accepted estimate under 100% billed still has money in it. A part-filled bar is work you have done and not yet invoiced.</p>
       </div>`;
     },
 
     estimate(no) {
       const e = ESTIMATES.find(x => x.no === no) || ESTIMATES[0];
       const c = cust(e.cust);
-      const canConvert = !e.becameInvoice;
+      const pr = estProgress(e);
+      const actions = pr.remaining > 0
+        ? `${pr.invoiced ? "" : `<button class="btn" data-progress="${e.no}:50">Invoice 50% deposit</button>`}
+           <button class="btn btn-primary" data-progress="${e.no}:rest">Invoice remaining ${plain(pr.remaining)}</button>`
+        : `<span class="tag ok" style="align-self:center">billed in full</span>`;
       return head("Estimate " + e.no, `${esc(c.short)} · expires ${e.expires}`,
-        `<button class="btn" data-go="estimates">← Back</button>
-         ${canConvert ? `<button class="btn btn-primary" data-convert="${e.no}">Convert to invoice</button>`
-                      : `<button class="btn" data-inv="${e.becameInvoice}">Open invoice ${e.becameInvoice} →</button>`}`)
+        `<button class="btn" data-go="estimates">← Back</button>${actions}`)
         + lineageRail("estimate", e.no) + `
       <div class="pad">
         <div class="split">
@@ -1523,15 +1603,37 @@ tbody tr[data-clickable]:hover { background: var(--accent-soft); }
               <div class="grand" style="display:contents"><dt>Total</dt><dd>${plain(e.total)}</dd></div>
             </dl></div>
           </div>
-          <div class="panel">
-            <div class="panel-head"><span class="lbl">${esc(c.short)}</span></div>
-            <div class="panel-body">
-              <dl class="kv">
-                <dt>Location</dt><dd>${esc(c.city)}</dd>
-                <dt>Terms</dt><dd>${esc(c.terms)}</dd>
-                <dt>Sales YTD</dt><dd class="num">${plain(c.ytd)}</dd>
-              </dl>
-              <button class="btn" style="margin-top:10px;width:100%" data-cust="${c.id}">Full history</button>
+          <div>
+            <div class="panel" style="margin-bottom:14px">
+              <div class="panel-head"><span class="lbl">Billing progress</span>
+                <span class="spacer" style="flex:1"></span>
+                <span class="tag ${pr.pct === 100 ? "ok" : pr.pct ? "warn" : ""}">${pr.pct}% billed</span></div>
+              <div class="panel-body">
+                <div class="bar-track" style="height:7px"><div class="bar-fill" style="width:${pr.pct}%;background:${pr.pct === 100 ? "var(--ok)" : "var(--warn)"}"></div></div>
+                <dl class="kv" style="margin-top:11px">
+                  <dt>Estimate</dt><dd class="num">${plain(e.total)}</dd>
+                  <dt>Invoiced</dt><dd class="num">${plain(pr.invoiced)}</dd>
+                  <dt>Remaining</dt><dd class="num" style="color:${pr.remaining ? "var(--warn)" : "var(--ok)"}">${plain(pr.remaining)}</dd>
+                </dl>
+                ${pr.count ? `<div style="margin-top:9px">${(e.progress || []).map(x => `
+                  <button class="link-row" data-inv="${x.inv}">
+                    <span class="link-glyph" aria-hidden="true">▤</span>
+                    <span class="link-main"><b>Invoice ${x.inv} — ${plain(x.amount)}</b>
+                      <div class="link-sub">${x.pct}% · ${x.date}${x.note ? " · " + esc(x.note) : ""}</div></span>
+                    <span class="dim" aria-hidden="true">›</span>
+                  </button>`).join("")}</div>` : `<p class="hint" style="margin-top:9px">Nothing billed against this estimate yet.</p>`}
+              </div>
+            </div>
+            <div class="panel">
+              <div class="panel-head"><span class="lbl">${esc(c.short)}</span></div>
+              <div class="panel-body">
+                <dl class="kv">
+                  <dt>Location</dt><dd>${esc(c.city)}</dd>
+                  <dt>Terms</dt><dd>${esc(c.terms)}</dd>
+                  <dt>Sales YTD</dt><dd class="num">${plain(c.ytd)}</dd>
+                </dl>
+                <button class="btn" style="margin-top:10px;width:100%" data-cust="${c.id}">Full history</button>
+              </div>
             </div>
           </div>
         </div>
@@ -1543,9 +1645,11 @@ tbody tr[data-clickable]:hover { background: var(--accent-soft); }
       const bill = BILLS.find(b => b.no === o.bill);
       const inv = o.forInvoice ? INVOICES.find(i => i.no === o.forInvoice) : null;
       const margin = inv ? Math.round((inv.total - o.total) / inv.total * 100) : null;
+      const rc = poReceipt(o);
       return head(o.no, `${esc(o.vendor)} · ${o.date}`,
         `<button class="btn" data-go="pos">← Back</button>
-         ${bill ? `<button class="btn">Open bill ${bill.no}</button>` : `<button class="btn btn-primary">Convert to bill</button>`}`)
+         ${rc.received < rc.ordered ? `<button class="btn btn-primary" data-receive="${o.no}">Receive items</button>` : ""}
+         ${bill ? `<button class="btn">Open bill ${bill.no}</button>` : `<button class="btn">Convert to bill</button>`}`)
         + lineageRail("po", o.no) + `
       <div class="pad">
         <div class="split">
@@ -1554,10 +1658,37 @@ tbody tr[data-clickable]:hover { background: var(--accent-soft); }
               <div class="field"><span class="lbl">Vendor</span><span class="field-val">${esc(o.vendor)}</span></div>
               <div class="field"><span class="lbl">Date</span><span class="field-val mono">${o.date}</span></div>
               <div class="field"><span class="lbl">Class</span><span class="field-val"><span class="swatch" style="background:${cls(o.cls).color}"></span>${cls(o.cls).name}</span></div>
-              <div class="field"><span class="lbl">Received</span><span class="field-val">${esc(o.rec)}</span></div>
-              <div class="field"><span class="lbl">Total</span><span class="field-val num">${plain(o.total)}</span></div>
-              <div class="field"><span class="lbl">Status</span><span class="field-val">${o.status}</span></div>
+              <div class="field"><span class="lbl">Received</span><span class="field-val">${rc.received} of ${rc.ordered} units · ${rc.pct}%</span></div>
+              <div class="field"><span class="lbl">Ordered value</span><span class="field-val num">${plain(o.total)}</span></div>
+              <div class="field"><span class="lbl">Status</span><span class="field-val">${rc.status}${rc.status === "Partial" ? ` · ${plain(rc.value)} received` : ""}</span></div>
             </div>
+
+            <div class="panel-head" style="border-top:1px solid var(--line)"><span class="lbl">Lines — ordered against received</span>
+              <span class="spacer" style="flex:1"></span>
+              <span class="tag ${rc.status === "Received" ? "ok" : rc.status === "Partial" ? "warn" : ""}">${rc.status.toLowerCase()}</span></div>
+            <div class="grid-scroll"><table>
+              <thead><tr><th>Item</th><th>Description</th><th class="r">Ordered</th><th class="r">Received</th><th class="r">Remaining</th><th style="width:110px"></th></tr></thead>
+              <tbody>${o.lines.map(l => `
+                <tr>
+                  <td class="mono">${esc(l.sku)}</td>
+                  <td class="trunc dim">${esc(l.desc)}</td>
+                  <td class="r num">${l.qty}</td>
+                  <td class="r num">${l.recd}</td>
+                  <td class="r num" style="color:${l.qty - l.recd ? "var(--warn)" : "var(--ok)"}">${l.qty - l.recd || "—"}</td>
+                  <td><div class="bar-track"><div class="bar-fill" style="width:${l.qty ? l.recd / l.qty * 100 : 0}%;background:${l.recd === l.qty ? "var(--ok)" : "var(--warn)"}"></div></div></td>
+                </tr>`).join("")}</tbody>
+            </table></div>
+
+            ${o.receipts.length ? `
+            <div class="panel-head" style="border-top:1px solid var(--line)"><span class="lbl">Receipt history</span></div>
+            <div class="panel-body" style="padding:2px 12px 10px">
+              ${o.receipts.map(r => `
+                <div class="link-row" style="cursor:default">
+                  <span class="link-glyph" aria-hidden="true">✓</span>
+                  <span class="link-main"><b>${esc(r.ref)}</b>
+                    <div class="link-sub">${r.date} · ${esc(r.note)}</div></span>
+                </div>`).join("")}
+            </div>` : ""}
             ${inv ? `
             <div class="panel-head" style="border-top:1px solid var(--line)"><span class="lbl">Dropship — fulfils a customer order</span></div>
             <div class="grid-scroll"><table>
@@ -1650,7 +1781,7 @@ tbody tr[data-clickable]:hover { background: var(--accent-soft); }
             </div>
           </div>`).join("")}
         ${FAILURES.length === 0 ? '<div class="panel"><div class="panel-body" style="text-align:center;padding:34px"><div class="strip-val pos" style="font-size:calc(22px * var(--fs))">All clear</div><p class="dim" style="margin:6px 0 0">Every queued write reached QuickBooks.</p></div></div>' : ""}
-        <p class="hint">A conflict means someone edited the same record in the QuickBooks web app. Ledger Local never picks a winner for you — a silent overwrite is how a real edit disappears without anyone noticing.</p>
+        <p class="hint">A conflict means someone edited the same record in the QuickBooks web app. BunzBooks never picks a winner for you — a silent overwrite is how a real edit disappears without anyone noticing.</p>
       </div>`;
     }
   };
@@ -1729,7 +1860,11 @@ tbody tr[data-clickable]:hover { background: var(--accent-soft); }
       else go(DOC[kind].view);
     });
 
-    document.querySelectorAll("[data-convert]").forEach(b => b.onclick = () => convertEstimate(b.dataset.convert));
+    document.querySelectorAll("[data-progress]").forEach(b => b.onclick = () => {
+      const [no, mode] = b.dataset.progress.split(":");
+      progressInvoice(no, mode);
+    });
+    document.querySelectorAll("[data-receive]").forEach(b => b.onclick = () => receivePO(b.dataset.receive));
 
     const links = document.querySelectorAll("[data-link]");
     if (links.length && state.view === "invoice") {
@@ -1777,25 +1912,59 @@ tbody tr[data-clickable]:hover { background: var(--accent-soft); }
     };
   }
 
-  /* Estimate to invoice, the way QuickBooks models it: a new invoice that
-     keeps a link back to its estimate rather than replacing it. The customer
-     PO carries across, which is the thing that gets retyped by hand today. */
-  function convertEstimate(no) {
+  /* Progress invoicing. QuickBooks lets one estimate be billed across several
+     invoices — a deposit, a stage payment, the balance — each linked back to
+     the estimate. What matters is that the estimate stays the contract and
+     never gets consumed by the first invoice. */
+  function progressInvoice(no, mode) {
     const e = ESTIMATES.find(x => x.no === no);
-    if (!e || e.becameInvoice) return;
+    if (!e) return;
+    const pr = estProgress(e);
+    if (pr.remaining <= 0) return;
+
+    const amount = mode === "50" ? Math.min(Math.round(e.total * 0.5), pr.remaining) : pr.remaining;
+    const pct = Math.round(amount / e.total * 100);
     const next = String(Math.max(...INVOICES.map(i => Number(i.no))) + 1);
+
     INVOICES.unshift({
       no: next, date: "2026-08-20", cust: e.cust, cls: e.cls,
-      total: e.total, bal: e.total, age: 0, status: "Open", sync: "pending",
+      total: amount, bal: amount, age: 0, status: "Open", sync: "pending",
       custPO: e.custPO, fromEstimate: e.no,
-      lines: (e.lines || []).map(l => ({ ...l }))
+      lines: (e.lines || []).map(l => ({ ...l, rate: Math.round(l.rate * amount / e.total) }))
     });
-    e.becameInvoice = next;
+    e.progress = (e.progress || []).concat([{
+      inv: next, pct, amount, date: "2026-08-20",
+      note: mode === "50" ? "50% deposit" : "Balance"
+    }]);
     e.status = "Accepted";
     state.pending++;
     updateChrome();
-    toast(`Estimate ${no} became invoice ${next}`, readMs() + " ms");
+    const after = estProgress(e);
+    toast(`Invoice ${next} for ${plain(amount)} — estimate ${no} now ${after.pct}% billed`, readMs() + " ms");
     go("invoice", next);
+  }
+
+  /* Partial receipt. Goods arrive in more than one delivery, and the PO has to
+     carry ordered-against-received per line rather than a single done flag —
+     otherwise a backordered colour looks identical to a complete order. */
+  function receivePO(no) {
+    const o = POS.find(x => x.no === no);
+    if (!o) return;
+    const line = o.lines.find(l => l.recd < l.qty);
+    if (!line) return;
+
+    const qty = line.qty - line.recd;
+    line.recd = line.qty;
+    const rc = poReceipt(o);
+    o.receipts = o.receipts.concat([{
+      date: "2026-08-20",
+      ref: `RCV-${o.no.replace(/\D/g, "")}-${o.receipts.length + 1}`,
+      note: `${qty} × ${line.sku}${rc.status === "Partial" ? " — remainder still outstanding" : " — order complete"}`
+    }]);
+    state.pending++;
+    updateChrome();
+    toast(`Received ${qty} × ${line.sku} · ${rc.received} of ${rc.ordered}`, readMs() + " ms");
+    go("po", no);
   }
 
   /* The demo's whole argument: a save commits to local disk and returns

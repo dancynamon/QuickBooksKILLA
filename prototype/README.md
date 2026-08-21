@@ -1,6 +1,7 @@
-# Prototype — Ledger Local
+# Prototype — BunzBooks
 
-A visual prototype of the app `qbo-local` is being built toward. Single
+A visual prototype of the app `qbo-local` is being built toward. Named BunzBooks,
+with a sesame-bun wordmark. Single
 self-contained HTML file, no build step, no dependencies: open it in a browser.
 
 **All data is fictional**, though shaped after the real Aquamentor book —
@@ -70,3 +71,19 @@ shows the PO in its linked records.
 
 **Shopify.** Invoices originating from the web store carry the Shopify order
 number and link out to the admin.
+
+## Progress invoicing and partial receipt
+
+**Progress invoicing.** One estimate can be billed across several invoices — a
+deposit, a stage payment, the balance — each linked back to it. The estimate
+stays the contract rather than being consumed by the first invoice. Estimate
+3596 is the worked example: 25% at order, 50% at frame completion, 25%
+outstanding. The Estimates list shows a billed percentage and a progress bar,
+so an accepted estimate under 100% is visibly money still owed to you.
+
+**Partial PO receipt.** Purchase orders carry ordered-against-received per
+line plus a receipt history, because goods arrive in more than one delivery.
+PO-4469 is the worked example: twelve blue EVA sheets received, eight yellow
+backordered. Without per-line quantities a backordered colour looks identical
+to a complete order. PO status is derived from the line quantities rather than
+stored, so the two can never disagree.
