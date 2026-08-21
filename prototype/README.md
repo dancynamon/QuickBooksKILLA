@@ -87,3 +87,19 @@ PO-4469 is the worked example: twelve blue EVA sheets received, eight yellow
 backordered. Without per-line quantities a backordered colour looks identical
 to a complete order. PO status is derived from the line quantities rather than
 stored, so the two can never disagree.
+
+## Vendor credits
+
+A vendor credit — a short shipment, a return, a price adjustment — sits
+against the vendor until applied to a bill, and can be split across several.
+The Bills list shows credits alongside payments, and the new bill detail view
+shows exactly how a balance is reached: total, less each credit, less each
+payment, equals what is due.
+
+Applying a credit is never automatic. Which bill a credit lands on is an
+accounting decision that changes what you pay this month, so the app proposes
+and the user commits.
+
+Bill balance and status are derived from the credits and payments recorded
+against the bill, not stored — the same principle as PO status coming from
+line quantities. Two fields that can drift apart eventually will.

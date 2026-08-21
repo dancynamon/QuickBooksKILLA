@@ -872,15 +872,42 @@ tbody tr[data-clickable]:hover { background: var(--accent-soft); }
   ];
 
   const BILLS = [
-    { no: "BILL-2291", date: "2026-08-13", vendor: "Poolcraft Products", po: "PO-4470", total: 8420,   bal: 8420,  due: "2026-09-12", status: "Open" },
-    { no: "BILL-2288", date: "2026-08-10", vendor: "Spectra EVA",        po: "PO-4469", total: 277680, bal: 0,     due: "2026-09-09", status: "Paid" },
-    { no: "BILL-2284", date: "2026-08-06", vendor: "Aquabot Systems",    po: "PO-4468", total: 39900,  bal: 0,     due: "2026-09-05", status: "Paid" }
+    { no: "BILL-2291", date: "2026-08-13", vendor: "Poolcraft Products", po: "PO-4470", total: 8420,   due: "2026-09-12" },
+    { no: "BILL-2288", date: "2026-08-10", vendor: "Spectra EVA",        po: "PO-4469", total: 277680, due: "2026-09-09" },
+    { no: "BILL-2284", date: "2026-08-06", vendor: "Aquabot Systems",    po: "PO-4468", total: 39900,  due: "2026-09-05" }
   ];
 
   const BILLPAYMENTS = [
-    { no: "BP-881", date: "2026-08-18", vendor: "Spectra EVA",     bill: "BILL-2288", amount: 277680, method: "ACH" },
+    { no: "BP-881", date: "2026-08-18", vendor: "Spectra EVA",     bill: "BILL-2288", amount: 231400, method: "ACH" },
     { no: "BP-877", date: "2026-08-12", vendor: "Aquabot Systems", bill: "BILL-2284", amount: 39900,  method: "Amex ••4021" }
   ];
+
+  /* A vendor credit is money the vendor owes back — a short shipment, a
+     return, a price adjustment. It sits against the vendor until applied to a
+     bill, and can be split across several. */
+  const VENDORCREDITS = [
+    { no: "VC-441", date: "2026-08-16", vendor: "Spectra EVA", total: 46280,
+      reason: "Two blue sheets delaminated on receipt EC-11902 — credit issued in full",
+      applied: [ { bill: "BILL-2288", amount: 46280, date: "2026-08-16" } ] },
+    { no: "VC-438", date: "2026-08-14", vendor: "Poolcraft Products", total: 940,
+      reason: "One ring buoy holder returned — wrong finish, brushed sent instead of polished",
+      applied: [] },
+    { no: "VC-435", date: "2026-07-28", vendor: "Continental Foam", total: 128400,
+      reason: "Price adjustment on Q3 blanket order — agreed with Tammy 24 Jul",
+      applied: [] }
+  ];
+
+  /* Balances are derived, never stored, so a bill and its credits cannot
+     disagree — the same reason PO status comes from line quantities. */
+  const billCredits = b => VENDORCREDITS.flatMap(v =>
+    (v.applied || []).filter(a => a.bill === b.no).map(a => ({ ...a, vc: v.no })));
+  const billPaid = b => BILLPAYMENTS.filter(x => x.bill === b.no).reduce((a, x) => a + x.amount, 0);
+  const billCredited = b => billCredits(b).reduce((a, c) => a + c.amount, 0);
+  const billBalance = b => b.total - billCredited(b) - billPaid(b);
+  const billStatus = b => billBalance(b) <= 0 ? "Paid" : billPaid(b) || billCredited(b) ? "Partial" : "Open";
+
+  const vcApplied   = v => (v.applied || []).reduce((a, x) => a + x.amount, 0);
+  const vcRemaining = v => v.total - vcApplied(v);
 
   const PAYMENTS = [
     { no: "PMT-5512", date: "2026-08-14", cust: "c5", inv: "21231", amount: 148200, method: "Check 8841" },
@@ -922,6 +949,7 @@ tbody tr[data-clickable]:hover { background: var(--accent-soft); }
     { id: "items",     label: "Items",         glyph: "▦", count: () => ITEMS.length },
     { id: "pos",       label: "Purchase orders",glyph: "▥", count: () => POS.length },
     { id: "bills",     label: "Bills",         glyph: "▧", count: () => BILLS.length },
+    { id: "credits",   label: "Vendor credits",glyph: "◐", count: () => VENDORCREDITS.length },
     { id: "payments",  label: "Payments",      glyph: "◍", count: () => PAYMENTS.length },
     { id: "failures",  label: "Needs you",     glyph: "▲", count: () => FAILURES.length, alert: true }
   ];
@@ -980,7 +1008,7 @@ tbody tr[data-clickable]:hover { background: var(--accent-soft); }
 
       chain.push(po ? { kind: "po", no: po.no, amount: po.total, state: poReceipt(po).status.toLowerCase() }
                     : { kind: "po", no: null, amount: null, state: "none" });
-      chain.push(bill ? { kind: "bill", no: bill.no, amount: bill.total, state: bill.status.toLowerCase() }
+      chain.push(bill ? { kind: "bill", no: bill.no, amount: bill.total, state: billStatus(bill).toLowerCase() }
                       : { kind: "bill", no: null, amount: null, state: "none" });
       chain.push(bps.length
         ? { kind: "billpay", no: bps.map(b => b.no).join(", "),
@@ -1057,6 +1085,18 @@ tbody tr[data-clickable]:hover { background: var(--accent-soft); }
       act: () => go("po", o.no)
     }));
 
+    VENDORCREDITS.forEach(v => rows.push({
+      kind: "credit", no: v.no, glyph: "◐",
+      title: `${v.no} — ${v.vendor}`,
+      meta: plain(v.total),
+      keys: [
+        key(v.no, "credit number", 0),
+        key(v.no.replace(/\D/g, ""), "credit number", 1),
+        key(plain(v.total).replace(/,/g, ""), "credit amount", 16)
+      ],
+      act: () => go("credits")
+    }));
+
     BILLS.forEach(b => rows.push({
       kind: "bill", no: b.no, glyph: "▧",
       title: `${b.no} — ${b.vendor}`,
@@ -1067,7 +1107,7 @@ tbody tr[data-clickable]:hover { background: var(--accent-soft); }
         b.po && key(b.po.replace(/\D/g, ""), "from PO " + b.po, 6),
         key(plain(b.total).replace(/,/g, ""), "amount", 16)
       ].filter(Boolean),
-      act: () => go("bills")
+      act: () => go("bill", b.no)
     }));
 
     PAYMENTS.forEach(pm => rows.push({
@@ -1706,7 +1746,7 @@ tbody tr[data-clickable]:hover { background: var(--accent-soft); }
             <div class="panel-head"><span class="lbl">Linked records</span></div>
             <div class="panel-body" style="padding:2px 12px 10px">
               ${linkRows([
-                bill ? { glyph: "▧", main: `${bill.no} — ${plain(bill.total)}`, sub: `Vendor bill · due ${bill.due} · ${bill.status.toLowerCase()}`, act: () => go("bills") }
+                bill ? { glyph: "▧", main: `${bill.no} — ${plain(bill.total)}`, sub: `Vendor bill · due ${bill.due} · ${billStatus(bill).toLowerCase()}`, act: () => go("bill", bill.no) }
                      : { glyph: "▧", main: "No bill yet", sub: "This PO has not been billed", dead: true },
                 inv ? { glyph: "▤", main: `Invoice ${inv.no}`, sub: `Dropship to ${cust(inv.cust).short}`, act: () => go("invoice", inv.no) }
                     : { glyph: "▤", main: "Not a dropship", sub: "Stock purchase, no customer order attached", dead: true }
@@ -1718,25 +1758,124 @@ tbody tr[data-clickable]:hover { background: var(--accent-soft); }
     },
 
     bills() {
+      const openCredit = VENDORCREDITS.reduce((a, v) => a + vcRemaining(v), 0);
       return head("Bills", `${BILLS.length} from vendors · every one traced back to its PO`) + `
       <div class="pad">
+        ${openCredit ? `<div class="strip" style="margin-bottom:14px">
+          <div class="strip-cell"><div class="lbl">Owed to vendors</div><div class="strip-val">${money(BILLS.reduce((a, b) => a + billBalance(b), 0))}</div><div class="strip-note">across ${BILLS.filter(b => billBalance(b) > 0).length} open bills</div></div>
+          <div class="strip-cell"><div class="lbl">Unapplied credit</div><div class="strip-val pos">${money(openCredit)}</div><div class="strip-note">money back you have not taken yet</div></div>
+        </div>` : ""}
         <div class="grid-wrap"><div class="grid-scroll"><table>
-          <thead><tr><th>No.</th><th>Date</th><th>Vendor</th><th>From PO</th><th class="r">Total</th><th class="r">Balance</th><th>Due</th><th>Status</th><th>Paid by</th></tr></thead>
-          <tbody>${BILLS.map(b => {
-            const bp = BILLPAYMENTS.find(x => x.bill === b.no);
-            return `<tr data-clickable ${b.po ? `data-po="${b.po}"` : ""}>
+          <thead><tr><th>No.</th><th>Date</th><th>Vendor</th><th>From PO</th><th class="r">Total</th><th class="r">Credits</th><th class="r">Paid</th><th class="r">Balance</th><th>Due</th><th>Status</th></tr></thead>
+          <tbody>${BILLS.map(b => `
+            <tr data-clickable data-bill="${b.no}">
               <td class="mono">${b.no}</td>
               <td class="mono dim">${b.date}</td>
               <td>${esc(b.vendor)}</td>
               <td>${b.po ? `<span class="tag acc">${b.po}</span>` : '<span class="dim">—</span>'}</td>
               <td class="r num">${plain(b.total)}</td>
-              <td class="r num">${b.bal ? plain(b.bal) : '<span class="dim">—</span>'}</td>
+              <td class="r num">${billCredited(b) ? `<span style="color:var(--ok)">−${plain(billCredited(b))}</span>` : '<span class="dim">—</span>'}</td>
+              <td class="r num dim">${billPaid(b) ? plain(billPaid(b)) : "—"}</td>
+              <td class="r num">${billBalance(b) ? plain(billBalance(b)) : '<span class="dim">—</span>'}</td>
               <td class="mono dim">${b.due}</td>
-              <td>${b.status === "Paid" ? '<span class="tag ok">paid</span>' : '<span class="tag">open</span>'}</td>
-              <td class="mono dim">${bp ? `${bp.no} · ${esc(bp.method)}` : "—"}</td>
-            </tr>`; }).join("")}</tbody>
+              <td>${billStatus(b) === "Paid" ? '<span class="tag ok">paid</span>' : billStatus(b) === "Partial" ? '<span class="tag warn">partial</span>' : '<span class="tag">open</span>'}</td>
+            </tr>`).join("")}</tbody>
         </table></div></div>
-        <p class="hint">Click the PO tag to walk back up the chain to the purchase order.</p>
+        <p class="hint">Balance is total less credits less payments, computed from the records rather than stored — a bill and its credits cannot drift apart.</p>
+      </div>`;
+    },
+
+    bill(no) {
+      const b = BILLS.find(x => x.no === no) || BILLS[0];
+      const credits = billCredits(b);
+      const pays = BILLPAYMENTS.filter(x => x.bill === b.no);
+      const bal = billBalance(b);
+      const available = VENDORCREDITS.filter(v => v.vendor === b.vendor && vcRemaining(v) > 0);
+      return head(b.no, `${esc(b.vendor)} · due ${b.due}`,
+        `<button class="btn" data-go="bills">← Back</button>
+         ${available.length && bal > 0 ? `<button class="btn btn-primary" data-applyvc="${available[0].no}:${b.no}">Apply ${plain(Math.min(vcRemaining(available[0]), bal))} credit</button>` : ""}
+         ${bal > 0 ? `<button class="btn">Pay bill</button>` : `<span class="tag ok" style="align-self:center">settled</span>`}`)
+        + lineageRail("bill", b.no) + `
+      <div class="pad">
+        <div class="split">
+          <div class="panel">
+            <div class="doc-head">
+              <div class="field"><span class="lbl">Vendor</span><span class="field-val">${esc(b.vendor)}</span></div>
+              <div class="field"><span class="lbl">Bill date</span><span class="field-val mono">${b.date}</span></div>
+              <div class="field"><span class="lbl">Due</span><span class="field-val mono">${b.due}</span></div>
+              <div class="field"><span class="lbl">From PO</span><span class="field-val mono">${b.po || "—"}</span></div>
+              <div class="field"><span class="lbl">Status</span><span class="field-val">${billStatus(b)}</span></div>
+            </div>
+            <div class="panel-head" style="border-top:1px solid var(--line)"><span class="lbl">How this balance is reached</span></div>
+            <div class="grid-scroll"><table>
+              <tbody>
+                <tr><td>Bill total</td><td class="r num">${plain(b.total)}</td><td class="dim" style="width:46%">as billed by ${esc(b.vendor)}</td></tr>
+                ${credits.map(c => `<tr>
+                  <td>Credit applied <span class="tag acc">${c.vc}</span></td>
+                  <td class="r num" style="color:var(--ok)">−${plain(c.amount)}</td>
+                  <td class="dim">${c.date}</td></tr>`).join("")}
+                ${pays.map(x => `<tr>
+                  <td>Payment ${x.no}</td>
+                  <td class="r num dim">−${plain(x.amount)}</td>
+                  <td class="dim">${x.date} · ${esc(x.method)}</td></tr>`).join("")}
+                <tr style="border-top:1px solid var(--line)">
+                  <td style="font-weight:600">Balance due</td>
+                  <td class="r num" style="font-weight:600;color:${bal > 0 ? "var(--warn)" : "var(--ok)"}">${plain(bal)}</td>
+                  <td class="dim">${bal > 0 ? "still owed" : "settled"}</td></tr>
+              </tbody>
+            </table></div>
+          </div>
+          <div>
+            <div class="panel" style="margin-bottom:14px">
+              <div class="panel-head"><span class="lbl">Credit available from ${esc(b.vendor)}</span></div>
+              <div class="panel-body" style="padding:2px 12px 10px">
+                ${available.length ? available.map(v => `
+                  <button class="link-row" data-vc="${v.no}">
+                    <span class="link-glyph" aria-hidden="true">◐</span>
+                    <span class="link-main"><b>${v.no} — ${plain(vcRemaining(v))} unapplied</b>
+                      <div class="link-sub">${esc(v.reason)}</div></span>
+                    <span class="dim" aria-hidden="true">›</span>
+                  </button>`).join("")
+                : `<p class="hint" style="margin:8px 0">No unapplied credit from this vendor.</p>`}
+              </div>
+            </div>
+            <div class="panel">
+              <div class="panel-head"><span class="lbl">Linked records</span></div>
+              <div class="panel-body" style="padding:2px 12px 10px">
+                ${linkRows([ b.po
+                  ? { glyph: "▥", main: b.po, sub: "Purchase order this bill came from" }
+                  : { glyph: "▥", main: "No purchase order", sub: "Entered directly", dead: true } ])}
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>`;
+    },
+
+    credits() {
+      const unapplied = VENDORCREDITS.reduce((a, v) => a + vcRemaining(v), 0);
+      return head("Vendor credits", `${VENDORCREDITS.length} on file · ${money(unapplied)} not yet applied`) + `
+      <div class="pad">
+        <div class="strip">
+          <div class="strip-cell"><div class="lbl">Issued</div><div class="strip-val">${money(VENDORCREDITS.reduce((a, v) => a + v.total, 0))}</div><div class="strip-note">total credited by vendors</div></div>
+          <div class="strip-cell"><div class="lbl">Applied</div><div class="strip-val">${money(VENDORCREDITS.reduce((a, v) => a + vcApplied(v), 0))}</div><div class="strip-note">taken against bills</div></div>
+          <div class="strip-cell"><div class="lbl">Unapplied</div><div class="strip-val pos">${money(unapplied)}</div><div class="strip-note">money back still on the table</div></div>
+        </div>
+        <div class="grid-wrap"><div class="grid-scroll"><table>
+          <thead><tr><th>No.</th><th>Date</th><th>Vendor</th><th>Reason</th><th class="r">Amount</th><th class="r">Applied</th><th class="r">Available</th><th>Against</th></tr></thead>
+          <tbody>${VENDORCREDITS.map(v => `
+            <tr data-clickable ${v.applied.length ? `data-bill="${v.applied[0].bill}"` : ""}>
+              <td class="mono">${v.no}</td>
+              <td class="mono dim">${v.date}</td>
+              <td>${esc(v.vendor)}</td>
+              <td class="trunc dim">${esc(v.reason)}</td>
+              <td class="r num">${plain(v.total)}</td>
+              <td class="r num dim">${vcApplied(v) ? plain(vcApplied(v)) : "—"}</td>
+              <td class="r num" style="color:${vcRemaining(v) ? "var(--ok)" : "var(--ink-dim)"}">${vcRemaining(v) ? plain(vcRemaining(v)) : "—"}</td>
+              <td>${v.applied.length ? v.applied.map(a => `<span class="tag acc">${a.bill}</span>`).join(" ") : '<span class="tag warn">unapplied</span>'}</td>
+            </tr>`).join("")}</tbody>
+        </table></div></div>
+        <p class="hint">An unapplied credit is money a vendor already agreed you are owed. It only reduces what you pay once it is applied to a bill.</p>
       </div>`;
     },
 
@@ -1855,7 +1994,7 @@ tbody tr[data-clickable]:hover { background: var(--accent-soft); }
     document.querySelectorAll("[data-chain]").forEach(b => b.onclick = () => {
       const [kind, no] = b.dataset.chain.split(":");
       if (!no) return;
-      const target = { estimate: "estimate", invoice: "invoice", po: "po" }[kind];
+      const target = { estimate: "estimate", invoice: "invoice", po: "po", bill: "bill" }[kind];
       if (target) go(target, no.split(",")[0].trim());
       else go(DOC[kind].view);
     });
@@ -1865,6 +2004,12 @@ tbody tr[data-clickable]:hover { background: var(--accent-soft); }
       progressInvoice(no, mode);
     });
     document.querySelectorAll("[data-receive]").forEach(b => b.onclick = () => receivePO(b.dataset.receive));
+    document.querySelectorAll("[data-bill]").forEach(r => r.onclick = e => { e.stopPropagation(); go("bill", r.dataset.bill); });
+    document.querySelectorAll("[data-vc]").forEach(r => r.onclick = () => go("credits"));
+    document.querySelectorAll("[data-applyvc]").forEach(b => b.onclick = () => {
+      const [vc, bill] = b.dataset.applyvc.split(":");
+      applyCredit(vc, bill);
+    });
 
     const links = document.querySelectorAll("[data-link]");
     if (links.length && state.view === "invoice") {
@@ -1942,6 +2087,23 @@ tbody tr[data-clickable]:hover { background: var(--accent-soft); }
     const after = estProgress(e);
     toast(`Invoice ${next} for ${plain(amount)} — estimate ${no} now ${after.pct}% billed`, readMs() + " ms");
     go("invoice", next);
+  }
+
+  /* Applying a vendor credit reduces what you owe on a specific bill. It is
+     never applied automatically: which bill a credit lands on is an accounting
+     decision, and quietly picking one changes what you pay this month. */
+  function applyCredit(vcNo, billNo) {
+    const v = VENDORCREDITS.find(x => x.no === vcNo);
+    const b = BILLS.find(x => x.no === billNo);
+    if (!v || !b) return;
+    const amount = Math.min(vcRemaining(v), billBalance(b));
+    if (amount <= 0) return;
+
+    v.applied = (v.applied || []).concat([{ bill: b.no, amount, date: "2026-08-20" }]);
+    state.pending++;
+    updateChrome();
+    toast(`${vcNo} applied — ${b.no} now ${plain(billBalance(b))} due`, readMs() + " ms");
+    go("bill", b.no);
   }
 
   /* Partial receipt. Goods arrive in more than one delivery, and the PO has to
@@ -2105,7 +2267,8 @@ tbody tr[data-clickable]:hover { background: var(--accent-soft); }
 
   const SEC_OF = {
     invoice: "Invoices", estimate: "Estimates", po: "Purchase orders",
-    bill: "Bills", payment: "Payments", customer: "Customers", item: "Items"
+    bill: "Bills", credit: "Vendor credits", payment: "Payments",
+    customer: "Customers", item: "Items"
   };
 
   function fuzzy(hay, needle) {
