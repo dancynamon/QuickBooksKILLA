@@ -103,3 +103,24 @@ and the user commits.
 Bill balance and status are derived from the credits and payments recorded
 against the bill, not stored — the same principle as PO status coming from
 line quantities. Two fields that can drift apart eventually will.
+
+## Vendors, payments, items and reports
+
+**Vendors.** Vendors were referenced by every PO, bill and credit with nowhere
+to go. Each now has a page: open bills, unapplied credit, outstanding POs with
+receipt progress, spend to date, and a 1099-NEC flag (the brief calls for 1099
+tracking, and one subcontractor is marked to show it).
+
+**Receive payment.** Workflow 5 from the brief. One payment applied across
+several open invoices, oldest first, with any remainder shown as unapplied
+rather than silently spread — guessing which invoice a customer meant to pay is
+how disputes start. Age is colour-coded so the overdue ones are obvious.
+
+**Item detail.** Price, cost, margin, on-hand, units sold, and where-used —
+every invoice and estimate the SKU appears on. A SKU page that cannot answer
+"where has this been used" is not worth opening.
+
+**Reports.** Profit & loss by product line, and a full A/R aging matrix by
+customer and bucket. Both computed from documents rather than stored totals.
+The P&L bars are gross margin, not revenue: a line can be large and thin or
+small and fat, and those are different questions.

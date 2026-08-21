@@ -897,6 +897,16 @@ tbody tr[data-clickable]:hover { background: var(--accent-soft); }
       applied: [] }
   ];
 
+  const VENDORS = [
+    { name: "Continental Foam",    terms: "Net 30", is1099: false, contact: "tammy@continentalfoam.com",  city: "Fairfield, NJ",   ytd: 4218400, buys: "XLPE and EVA foam sheet" },
+    { name: "Spectra EVA",        terms: "Net 30", is1099: false, contact: "orders@spectraeva.com",     city: "Chino, CA",       ytd: 1884200, buys: "Coloured EVA sheet" },
+    { name: "Polymer Source",   terms: "Net 45", is1099: false, contact: "ap@polymersource.com",            city: "Dalton, GA",      ytd: 2740800, buys: "PE resin" },
+    { name: "Poolcraft Products", terms: "Net 30", is1099: false, contact: "tammy@poolcraft.com", city: "Lakewood, NJ",  ytd: 318600,  buys: "Pool hardware, dropship" },
+    { name: "Aquabot Systems",    terms: "Net 30", is1099: false, contact: "dealers@aquabot.com",   city: "Norcross, GA",    ytd: 486200,  buys: "Dolphin spare parts, dropship" },
+    { name: "M. Alvarez Fabrication", terms: "Due on receipt", is1099: true, contact: "alvarezfab@gmail.com", city: "Elizabeth, NJ", ytd: 942000, buys: "Chair frame fabrication" }
+  ];
+  const vendor = name => VENDORS.find(v => v.name === name);
+
   /* Balances are derived, never stored, so a bill and its credits cannot
      disagree — the same reason PO status comes from line quantities. */
   const billCredits = b => VENDORCREDITS.flatMap(v =>
@@ -946,6 +956,7 @@ tbody tr[data-clickable]:hover { background: var(--accent-soft); }
     { id: "estimates", label: "Estimates",     glyph: "◈", count: () => ESTIMATES.length },
     { id: "invoices",  label: "Invoices",      glyph: "▤", count: () => INVOICES.length },
     { id: "customers", label: "Customers",     glyph: "◑", count: () => CUSTOMERS.length },
+    { id: "vendors",   label: "Vendors",       glyph: "◒", count: () => VENDORS.length },
     { id: "items",     label: "Items",         glyph: "▦", count: () => ITEMS.length },
     { id: "pos",       label: "Purchase orders",glyph: "▥", count: () => POS.length },
     { id: "bills",     label: "Bills",         glyph: "▧", count: () => BILLS.length },
@@ -1159,7 +1170,7 @@ tbody tr[data-clickable]:hover { background: var(--accent-soft); }
   }
 
   /* ─── state ─────────────────────────────────────────────────────────── */
-  const state = { view: "today", arg: null, online: true, pending: 1, syncAge: 4, fs: 1 };
+  const state = { view: "today", arg: null, online: true, pending: 1, syncAge: 4, fs: 1, receive: null };
 
   const $  = s => document.querySelector(s);
   const el = (t, c, h) => { const n = document.createElement(t); if (c) n.className = c; if (h != null) n.innerHTML = h; return n; };
@@ -1205,11 +1216,13 @@ tbody tr[data-clickable]:hover { background: var(--accent-soft); }
       rail.appendChild(b);
     });
     rail.appendChild(el("div", "rail-head lbl", "Reports"));
-    [["Profit & loss", "▧"], ["A/R aging", "▨"], ["Inventory value", "▩"]].forEach(([label, glyph]) => {
-      const b = el("button", "rail-item", `<span class="ri-glyph" aria-hidden="true">${glyph}</span><span>${label}</span>`);
-      b.onclick = () => toast(label + " — not in this prototype");
-      rail.appendChild(b);
-    });
+    [["Profit & loss", "▧", "pnl"], ["A/R aging", "▨", "aging"], ["Inventory value", "▩", null]]
+      .forEach(([label, glyph, view]) => {
+        const b = el("button", "rail-item", `<span class="ri-glyph" aria-hidden="true">${glyph}</span><span>${label}</span>`);
+        b.setAttribute("aria-current", String(state.view === view));
+        b.onclick = () => view ? go(view) : toast(label + " — not in this prototype");
+        rail.appendChild(b);
+      });
   }
 
   /* ─── views ─────────────────────────────────────────────────────────── */
@@ -1509,6 +1522,7 @@ tbody tr[data-clickable]:hover { background: var(--accent-soft); }
       const rows = INVOICES.filter(i => i.cust === c.id);
       return head(c.short, `${esc(c.city)} · ${esc(c.terms)} · every transaction since 2012`,
         `<button class="btn" data-go="customers">← Back</button>
+         <button class="btn" data-receivefrom="${c.id}">Receive payment</button>
          <button class="btn btn-primary">New invoice</button>`) + `
       <div class="pad">
         <div class="strip">
@@ -1880,7 +1894,8 @@ tbody tr[data-clickable]:hover { background: var(--accent-soft); }
     },
 
     payments() {
-      return head("Payments received", `${PAYMENTS.length} applied to invoices`) + `
+      return head("Payments received", `${PAYMENTS.length} applied to invoices`,
+        `<button class="btn btn-primary" data-receivefrom="">Receive payment</button>`) + `
       <div class="pad">
         <div class="grid-wrap"><div class="grid-scroll"><table>
           <thead><tr><th>No.</th><th>Date</th><th>Customer</th><th>Applied to</th><th class="r">Amount</th><th>Method</th></tr></thead>
@@ -1894,6 +1909,290 @@ tbody tr[data-clickable]:hover { background: var(--accent-soft); }
               <td class="dim">${esc(pm.method)}</td>
             </tr>`).join("")}</tbody>
         </table></div></div>
+      </div>`;
+    },
+
+    vendors() {
+      const owed = n => BILLS.filter(b => b.vendor === n).reduce((a, b) => a + billBalance(b), 0);
+      const credit = n => VENDORCREDITS.filter(v => v.vendor === n).reduce((a, v) => a + vcRemaining(v), 0);
+      return head("Vendors", `${VENDORS.length} on file · ${VENDORS.filter(v => v.is1099).length} tracked for 1099-NEC`) + `
+      <div class="pad">
+        <div class="grid-wrap"><div class="grid-scroll"><table>
+          <thead><tr><th>Vendor</th><th>Location</th><th>What you buy</th><th>Terms</th><th>1099</th><th class="r">Open bills</th><th class="r">Unapplied credit</th><th class="r">Spend YTD</th></tr></thead>
+          <tbody>${[...VENDORS].sort((a, b) => owed(b.name) - owed(a.name)).map(v => `
+            <tr data-clickable data-vendor="${esc(v.name)}">
+              <td>${esc(v.name)}</td>
+              <td class="dim">${esc(v.city)}</td>
+              <td class="trunc dim">${esc(v.buys)}</td>
+              <td class="dim">${esc(v.terms)}</td>
+              <td>${v.is1099 ? '<span class="tag acc">1099-NEC</span>' : '<span class="dim">—</span>'}</td>
+              <td class="r num">${owed(v.name) ? plain(owed(v.name)) : '<span class="dim">—</span>'}</td>
+              <td class="r num" style="color:${credit(v.name) ? "var(--ok)" : "var(--ink-dim)"}">${credit(v.name) ? plain(credit(v.name)) : "—"}</td>
+              <td class="r num dim">${plain(v.ytd)}</td>
+            </tr>`).join("")}</tbody>
+        </table></div></div>
+      </div>`;
+    },
+
+    vendor(name) {
+      const v = vendor(name) || VENDORS[0];
+      const pos = POS.filter(o => o.vendor === v.name);
+      const bills = BILLS.filter(b => b.vendor === v.name);
+      const creds = VENDORCREDITS.filter(c => c.vendor === v.name);
+      const owed = bills.reduce((a, b) => a + billBalance(b), 0);
+      const credit = creds.reduce((a, c) => a + vcRemaining(c), 0);
+      return head(v.name, `${esc(v.city)} · ${esc(v.terms)}`,
+        `<button class="btn" data-go="vendors">← Back</button>
+         <button class="btn btn-primary">New purchase order</button>`) + `
+      <div class="pad">
+        <div class="strip">
+          <div class="strip-cell"><div class="lbl">Open bills</div><div class="strip-val ${owed ? "warn" : "pos"}">${money(owed)}</div><div class="strip-note">${bills.filter(b => billBalance(b) > 0).length} unpaid</div></div>
+          <div class="strip-cell"><div class="lbl">Unapplied credit</div><div class="strip-val ${credit ? "pos" : ""}">${money(credit)}</div><div class="strip-note">${credit ? "apply before paying" : "none outstanding"}</div></div>
+          <div class="strip-cell"><div class="lbl">Open POs</div><div class="strip-val">${money(pos.filter(o => poReceipt(o).status !== "Received").reduce((a, o) => a + o.total, 0))}</div><div class="strip-note">${pos.filter(o => poReceipt(o).status !== "Received").length} outstanding</div></div>
+          <div class="strip-cell"><div class="lbl">Spend YTD</div><div class="strip-val">${money(v.ytd)}</div><div class="strip-note">${esc(v.buys)}</div></div>
+          <div class="strip-cell"><div class="lbl">1099-NEC</div><div class="strip-val" style="font-size:calc(15px * var(--fs))">${v.is1099 ? "Tracked" : "Not tracked"}</div><div class="strip-note">${esc(v.contact)}</div></div>
+        </div>
+
+        <div class="panel" style="margin-bottom:14px">
+          <div class="panel-head"><span class="lbl">Purchase orders</span></div>
+          <div class="grid-scroll"><table>
+            <thead><tr><th>No.</th><th>Date</th><th class="r">Total</th><th class="r">Received</th><th style="width:110px">Progress</th><th>Status</th></tr></thead>
+            <tbody>${pos.length ? pos.map(o => { const rc = poReceipt(o); return `
+              <tr data-clickable data-po="${o.no}">
+                <td class="mono">${o.no}</td><td class="mono dim">${o.date}</td>
+                <td class="r num">${plain(o.total)}</td>
+                <td class="r num dim">${rc.received} / ${rc.ordered}</td>
+                <td><div class="bar-track"><div class="bar-fill" style="width:${rc.pct}%;background:${rc.pct === 100 ? "var(--ok)" : rc.pct ? "var(--warn)" : "var(--surface-3)"}"></div></div></td>
+                <td>${rc.status === "Received" ? '<span class="tag ok">received</span>' : rc.status === "Partial" ? '<span class="tag warn">partial</span>' : '<span class="tag">open</span>'}</td>
+              </tr>`; }).join("") : '<tr><td colspan="6" class="dim">No purchase orders</td></tr>'}</tbody>
+          </table></div>
+        </div>
+
+        <div class="split">
+          <div class="panel">
+            <div class="panel-head"><span class="lbl">Bills</span></div>
+            <div class="grid-scroll"><table>
+              <thead><tr><th>No.</th><th>Date</th><th class="r">Total</th><th class="r">Balance</th><th>Status</th></tr></thead>
+              <tbody>${bills.length ? bills.map(b => `
+                <tr data-clickable data-bill="${b.no}">
+                  <td class="mono">${b.no}</td><td class="mono dim">${b.date}</td>
+                  <td class="r num">${plain(b.total)}</td>
+                  <td class="r num">${billBalance(b) ? plain(billBalance(b)) : '<span class="dim">—</span>'}</td>
+                  <td>${billStatus(b) === "Paid" ? '<span class="tag ok">paid</span>' : billStatus(b) === "Partial" ? '<span class="tag warn">partial</span>' : '<span class="tag">open</span>'}</td>
+                </tr>`).join("") : '<tr><td colspan="5" class="dim">No bills</td></tr>'}</tbody>
+            </table></div>
+          </div>
+          <div class="panel">
+            <div class="panel-head"><span class="lbl">Credits</span></div>
+            <div class="panel-body" style="padding:2px 12px 10px">
+              ${creds.length ? creds.map(c => `
+                <button class="link-row" data-go="credits">
+                  <span class="link-glyph" aria-hidden="true">◐</span>
+                  <span class="link-main"><b>${c.no} — ${plain(vcRemaining(c))} available</b>
+                    <div class="link-sub">${esc(c.reason)}</div></span>
+                  <span class="dim" aria-hidden="true">›</span>
+                </button>`).join("") : '<p class="hint" style="margin:8px 0">No credits from this vendor.</p>'}
+            </div>
+          </div>
+        </div>
+      </div>`;
+    },
+
+    item(sku) {
+      const it = item(sku) || ITEMS[0];
+      const margin = it.price ? (it.price - it.cost) / it.price : 0;
+      /* Where-used: every document carrying this item. This is the question a
+         SKU page actually has to answer. */
+      const onInvoices = INVOICES.filter(i => (i.lines || []).some(l => l.sku === it.sku));
+      const onEstimates = ESTIMATES.filter(e => (e.lines || []).some(l => l.sku === it.sku));
+      const sold = onInvoices.reduce((a, i) =>
+        a + (i.lines || []).filter(l => l.sku === it.sku).reduce((x, l) => x + l.qty, 0), 0);
+      const revenue = onInvoices.reduce((a, i) =>
+        a + (i.lines || []).filter(l => l.sku === it.sku).reduce((x, l) => x + l.qty * l.rate, 0), 0);
+      return head(it.sku, esc(it.desc),
+        `<button class="btn" data-go="items">← Back</button>`) + `
+      <div class="pad">
+        <div class="strip">
+          <div class="strip-cell"><div class="lbl">Price</div><div class="strip-val">${money(it.price)}</div><div class="strip-note">${it.type.toLowerCase()}</div></div>
+          <div class="strip-cell"><div class="lbl">Cost</div><div class="strip-val">${money(it.cost)}</div><div class="strip-note">last landed</div></div>
+          <div class="strip-cell"><div class="lbl">Gross margin</div><div class="strip-val ${margin > .5 ? "pos" : margin > .3 ? "" : "warn"}">${Math.round(margin * 100)}%</div><div class="strip-note">${money(it.price - it.cost)} per unit</div></div>
+          <div class="strip-cell"><div class="lbl">On hand</div><div class="strip-val">${it.hand == null ? "—" : it.hand}</div><div class="strip-note">${it.hand == null ? "not stocked" : "units"}</div></div>
+          <div class="strip-cell"><div class="lbl">Sold this year</div><div class="strip-val">${sold}</div><div class="strip-note">${money(revenue)} revenue</div></div>
+        </div>
+        <div class="grid-wrap"><div class="grid-scroll"><table>
+          <thead><tr><th>Document</th><th>Date</th><th>Party</th><th class="r">Qty</th><th class="r">Rate</th><th class="r">Amount</th></tr></thead>
+          <tbody>${
+            onInvoices.flatMap(i => (i.lines || []).filter(l => l.sku === it.sku).map(l => `
+              <tr data-clickable data-inv="${i.no}">
+                <td><span class="tag">invoice</span> <span class="mono">${i.no}</span></td>
+                <td class="mono dim">${i.date}</td>
+                <td class="trunc">${esc(cust(i.cust).short)}</td>
+                <td class="r num">${l.qty}</td><td class="r num">${plain(l.rate)}</td>
+                <td class="r num">${plain(l.qty * l.rate)}</td>
+              </tr>`)).join("")
+            + onEstimates.flatMap(e => (e.lines || []).filter(l => l.sku === it.sku).map(l => `
+              <tr data-clickable data-est="${e.no}">
+                <td><span class="tag acc">estimate</span> <span class="mono">${e.no}</span></td>
+                <td class="mono dim">${e.date}</td>
+                <td class="trunc">${esc(cust(e.cust).short)}</td>
+                <td class="r num">${l.qty}</td><td class="r num">${plain(l.rate)}</td>
+                <td class="r num">${plain(l.qty * l.rate)}</td>
+              </tr>`)).join("")
+            || '<tr><td colspan="6" class="dim">Not on any document yet</td></tr>'}</tbody>
+        </table></div></div>
+      </div>`;
+    },
+
+    pnl() {
+      /* Revenue and COGS per class — the report the class dimension exists to
+         make possible. Computed from documents, never from a stored total. */
+      const rows = CLASSES.map(c => {
+        const invs = INVOICES.filter(i => i.cls === c.id);
+        let rev = 0, cogs = 0;
+        invs.forEach(i => (i.lines || []).forEach(l => {
+          const it = item(l.sku); if (!it) return;
+          rev += l.qty * l.rate;
+          cogs += l.qty * it.cost;
+        }));
+        return { c, rev, cogs, gp: rev - cogs, margin: rev ? (rev - cogs) / rev : 0, count: invs.length };
+      }).filter(r => r.rev > 0).sort((a, b) => b.rev - a.rev);
+
+      const tRev = rows.reduce((a, r) => a + r.rev, 0);
+      const tCogs = rows.reduce((a, r) => a + r.cogs, 0);
+      const tGp = tRev - tCogs;
+
+      return head("Profit & loss by product line", "Accrual basis · 2026 to date · computed from documents") + `
+      <div class="pad">
+        <div class="strip">
+          <div class="strip-cell"><div class="lbl">Revenue</div><div class="strip-val">${money(tRev)}</div><div class="strip-note">${INVOICES.length} invoices</div></div>
+          <div class="strip-cell"><div class="lbl">Cost of goods</div><div class="strip-val">${money(tCogs)}</div><div class="strip-note">at last landed cost</div></div>
+          <div class="strip-cell"><div class="lbl">Gross profit</div><div class="strip-val pos">${money(tGp)}</div><div class="strip-note">before operating expense</div></div>
+          <div class="strip-cell"><div class="lbl">Gross margin</div><div class="strip-val ${tRev && tGp / tRev > .4 ? "pos" : "warn"}">${tRev ? Math.round(tGp / tRev * 100) : 0}%</div><div class="strip-note">blended across lines</div></div>
+        </div>
+        <div class="grid-wrap"><div class="grid-scroll"><table>
+          <thead><tr><th>Product line</th><th class="r">Invoices</th><th class="r">Revenue</th><th class="r">% of revenue</th><th class="r">COGS</th><th class="r">Gross profit</th><th class="r">Margin</th><th style="width:132px"></th></tr></thead>
+          <tbody>${rows.map(r => `
+            <tr>
+              <td><span class="swatch" style="background:${r.c.color}"></span>${esc(r.c.name)}</td>
+              <td class="r num dim">${r.count}</td>
+              <td class="r num">${plain(r.rev)}</td>
+              <td class="r num dim">${tRev ? Math.round(r.rev / tRev * 100) : 0}%</td>
+              <td class="r num dim">${plain(r.cogs)}</td>
+              <td class="r num">${plain(r.gp)}</td>
+              <td class="r num" style="color:${r.margin > .5 ? "var(--ok)" : r.margin > .3 ? "var(--ink)" : "var(--warn)"}">${Math.round(r.margin * 100)}%</td>
+              <td><div class="bar-track"><div class="bar-fill" style="width:${Math.round(r.margin * 100)}%;background:${r.c.color}"></div></div></td>
+            </tr>`).join("")}
+            <tr style="border-top:1px solid var(--line)">
+              <td style="font-weight:600">Total</td>
+              <td class="r num dim">${rows.reduce((a, r) => a + r.count, 0)}</td>
+              <td class="r num" style="font-weight:600">${plain(tRev)}</td>
+              <td class="r num dim">100%</td>
+              <td class="r num dim">${plain(tCogs)}</td>
+              <td class="r num" style="font-weight:600">${plain(tGp)}</td>
+              <td class="r num" style="font-weight:600">${tRev ? Math.round(tGp / tRev * 100) : 0}%</td>
+              <td></td>
+            </tr>
+          </tbody>
+        </table></div></div>
+        <p class="hint">Bars are gross margin, not revenue — a line can be large and thin, or small and fat, and the two questions are different.</p>
+      </div>`;
+    },
+
+    aging(custId) {
+      const open = INVOICES.filter(i => i.bal > 0);
+      const bucketOf = i => i.age <= 30 ? 0 : i.age <= 60 ? 1 : i.age <= 90 ? 2 : 3;
+      const names = ["Current", "31–60", "61–90", "90+"];
+      const byCust = CUSTOMERS.map(c => {
+        const rows = open.filter(i => i.cust === c.id);
+        const b = [0, 0, 0, 0];
+        rows.forEach(i => { b[bucketOf(i)] += i.bal; });
+        return { c, b, total: b.reduce((x, y) => x + y, 0) };
+      }).filter(r => r.total > 0).sort((a, b) => b.total - a.total);
+      const totals = [0, 1, 2, 3].map(n => byCust.reduce((a, r) => a + r.b[n], 0));
+      const grand = totals.reduce((a, b) => a + b, 0);
+
+      return head("A/R aging", `As of 20 August 2026 · accrual basis · ${open.length} open invoices`) + `
+      <div class="pad">
+        <div class="strip">
+          ${names.map((n, i) => `<div class="strip-cell"><div class="lbl">${n}</div>
+            <div class="strip-val ${i === 0 ? "pos" : i === 3 ? "neg" : "warn"}">${money(totals[i])}</div>
+            <div class="strip-note">${grand ? Math.round(totals[i] / grand * 100) : 0}% of total</div></div>`).join("")}
+          <div class="strip-cell"><div class="lbl">Total due</div><div class="strip-val">${money(grand)}</div><div class="strip-note">${byCust.length} customers</div></div>
+        </div>
+        <div class="grid-wrap"><div class="grid-scroll"><table>
+          <thead><tr><th>Customer</th>${names.map(n => `<th class="r">${n}</th>`).join("")}<th class="r">Total</th><th>Terms</th></tr></thead>
+          <tbody>${byCust.map(r => `
+            <tr data-clickable data-cust="${r.c.id}">
+              <td class="trunc">${esc(r.c.short)}</td>
+              ${r.b.map((v, i) => `<td class="r num" style="color:${!v ? "var(--ink-dim)" : i === 3 ? "var(--crit)" : i === 0 ? "var(--ink)" : "var(--warn)"}">${v ? plain(v) : "—"}</td>`).join("")}
+              <td class="r num" style="font-weight:500">${plain(r.total)}</td>
+              <td class="dim">${esc(r.c.terms)}</td>
+            </tr>`).join("")}
+            <tr style="border-top:1px solid var(--line)">
+              <td style="font-weight:600">Total</td>
+              ${totals.map(v => `<td class="r num" style="font-weight:600">${plain(v)}</td>`).join("")}
+              <td class="r num" style="font-weight:600">${plain(grand)}</td><td></td>
+            </tr></tbody>
+        </table></div></div>
+      </div>`;
+    },
+
+    /* Workflow 5 from the brief: one cheque against several invoices. The
+       money is applied oldest first, which is what you would do by hand, and
+       any remainder is shown rather than silently absorbed. */
+    receive(custId) {
+      const openCount = c => INVOICES.filter(i => i.cust === c.id && i.bal > 0).length;
+      const withOpen = CUSTOMERS.filter(c => openCount(c) > 0)
+                                .sort((a, b) => openCount(b) - openCount(a));
+      const c = cust(custId) || withOpen[0] || CUSTOMERS[0];
+      const open = INVOICES.filter(i => i.cust === c.id && i.bal > 0).sort((a, b) => b.age - a.age);
+      const due = open.reduce((a, i) => a + i.bal, 0);
+      const entered = state.receive == null ? due : state.receive;
+
+      let left = entered;
+      const applied = open.map(i => {
+        const take = Math.min(left, i.bal);
+        left -= take;
+        return { i, take };
+      });
+      const unapplied = left;
+
+      return head("Receive payment", `${esc(c.short)} · ${open.length} open invoices`,
+        `<button class="btn" data-go="customers">← Customers</button>
+         <button class="btn btn-primary" data-record="${c.id}" ${entered <= 0 ? "disabled" : ""}>Record ${plain(entered)}</button>`) + `
+      <div class="pad">
+        <div class="strip">
+          <div class="strip-cell"><div class="lbl">Open balance</div><div class="strip-val">${money(due)}</div><div class="strip-note">${esc(c.terms)}</div></div>
+          <div class="strip-cell"><div class="lbl">Applying</div><div class="strip-val">${money(entered - unapplied)}</div><div class="strip-note">across ${applied.filter(a => a.take > 0).length} invoices</div></div>
+          <div class="strip-cell"><div class="lbl">Unapplied</div><div class="strip-val ${unapplied ? "warn" : ""}">${money(unapplied)}</div><div class="strip-note">${unapplied ? "would sit as a credit" : "fully applied"}</div></div>
+          <div class="strip-cell"><div class="lbl">Left owing</div><div class="strip-val ${due - (entered - unapplied) ? "warn" : "pos"}">${money(Math.max(0, due - (entered - unapplied)))}</div><div class="strip-note">after this payment</div></div>
+        </div>
+
+        <div class="line-add" style="border:1px solid var(--line);border-radius:7px;margin-bottom:14px">
+          <span class="lbl" style="flex:none">Customer</span>
+          <select id="payCust" style="height:calc(26px * var(--fs));border:1px solid var(--line);border-radius:5px;background:var(--surface);padding:0 8px">
+            ${withOpen.map(x => `<option value="${x.id}" ${x.id === c.id ? "selected" : ""}>${esc(x.short)}</option>`).join("")}
+          </select>
+          <span class="lbl" style="flex:none">Amount</span>
+          <input id="payAmt" inputmode="decimal" value="${(entered / 100).toFixed(2)}" style="max-width:140px">
+          <button class="btn" data-fill="${due}">Full balance</button>
+          <span class="dim" style="font-size:calc(11px * var(--fs))">applied oldest first</span>
+        </div>
+
+        <div class="grid-wrap"><div class="grid-scroll"><table>
+          <thead><tr><th>Invoice</th><th>Date</th><th class="r">Age</th><th>Customer PO</th><th class="r">Balance</th><th class="r">Applying</th><th class="r">Left</th></tr></thead>
+          <tbody>${applied.map(({ i, take }) => `
+            <tr data-clickable data-inv="${i.no}" style="${take ? "" : "opacity:.55"}">
+              <td class="mono">${i.no}</td>
+              <td class="mono dim">${i.date}</td>
+              <td class="r num ${i.age > 30 ? "" : "dim"}" style="${i.age > 60 ? "color:var(--crit)" : i.age > 30 ? "color:var(--warn)" : ""}">${i.age}d</td>
+              <td class="mono dim">${i.custPO ? esc(i.custPO) : "—"}</td>
+              <td class="r num">${plain(i.bal)}</td>
+              <td class="r num" style="color:${take ? "var(--ok)" : "var(--ink-dim)"}">${take ? plain(take) : "—"}</td>
+              <td class="r num">${i.bal - take ? plain(i.bal - take) : '<span class="dim">paid</span>'}</td>
+            </tr>`).join("")}</tbody>
+        </table></div></div>
+        <p class="hint">Oldest invoices are cleared first. Anything left over is held as an unapplied credit rather than being spread around, because guessing which invoice a customer meant to pay is how disputes start.</p>
       </div>`;
     },
 
@@ -1987,7 +2286,8 @@ tbody tr[data-clickable]:hover { background: var(--accent-soft); }
     document.querySelectorAll("[data-go]").forEach(b => b.onclick = () => go(b.dataset.go));
     document.querySelectorAll("[data-inv]").forEach(r => r.onclick = () => go("invoice", r.dataset.inv));
     document.querySelectorAll("[data-cust]").forEach(r => r.onclick = e => { e.stopPropagation(); go("customer", r.dataset.cust); });
-    document.querySelectorAll("[data-item]").forEach(r => r.onclick = () => toast("Item detail — not in this prototype"));
+    document.querySelectorAll("[data-item]").forEach(r => r.onclick = () => go("item", r.dataset.item));
+    document.querySelectorAll("[data-vendor]").forEach(r => r.onclick = () => go("vendor", r.dataset.vendor));
     document.querySelectorAll("[data-est]").forEach(r => r.onclick = () => go("estimate", r.dataset.est));
     document.querySelectorAll("[data-po]").forEach(r => r.onclick = e => { e.stopPropagation(); go("po", r.dataset.po); });
 
@@ -2039,6 +2339,22 @@ tbody tr[data-clickable]:hover { background: var(--accent-soft); }
       updateChrome(); go("failures");
     });
 
+    const payCust = $("#payCust");
+    if (payCust) payCust.onchange = () => { state.receive = null; go("receive", payCust.value); };
+    const payAmt = $("#payAmt");
+    if (payAmt) payAmt.onchange = () => {
+      const v = Math.round(parseFloat(payAmt.value.replace(/[^0-9.]/g, "")) * 100);
+      state.receive = Number.isFinite(v) ? Math.max(0, v) : 0;
+      go("receive", state.arg);
+    };
+    document.querySelectorAll("[data-fill]").forEach(b => b.onclick = () => {
+      state.receive = Number(b.dataset.fill); go("receive", state.arg);
+    });
+    document.querySelectorAll("[data-record]").forEach(b => b.onclick = () => recordPayment(b.dataset.record));
+    document.querySelectorAll("[data-receivefrom]").forEach(b => b.onclick = () => {
+      state.receive = null; go("receive", b.dataset.receivefrom);
+    });
+
     const sku = $("#skuIn");
     if (sku) sku.onkeydown = e => {
       if (e.key !== "Enter") return;
@@ -2087,6 +2403,34 @@ tbody tr[data-clickable]:hover { background: var(--accent-soft); }
     const after = estProgress(e);
     toast(`Invoice ${next} for ${plain(amount)} — estimate ${no} now ${after.pct}% billed`, readMs() + " ms");
     go("invoice", next);
+  }
+
+  function recordPayment(custId) {
+    const c = cust(custId);
+    const open = INVOICES.filter(i => i.cust === c.id && i.bal > 0).sort((a, b) => b.age - a.age);
+    let left = state.receive == null ? open.reduce((a, i) => a + i.bal, 0) : state.receive;
+    if (left <= 0) return;
+
+    const total = left;
+    const next = `PMT-${Math.max(...PAYMENTS.map(p => Number(p.no.replace(/\D/g, "")))) + 1}`;
+    let touched = 0;
+    open.forEach(i => {
+      const take = Math.min(left, i.bal);
+      if (take <= 0) return;
+      i.bal -= take;
+      i.status = i.bal === 0 ? "Paid" : "Part";
+      i.sync = "pending";
+      left -= take;
+      touched++;
+    });
+    PAYMENTS.unshift({ no: next, date: "2026-08-20", cust: c.id,
+                       inv: open[0] ? open[0].no : "", amount: total - left, method: "Check" });
+    c.bal = INVOICES.filter(i => i.cust === c.id).reduce((a, i) => a + i.bal, 0);
+    state.receive = null;
+    state.pending++;
+    updateChrome();
+    toast(`${next} — ${plain(total - left)} across ${touched} invoice${touched === 1 ? "" : "s"}${left ? `, ${plain(left)} unapplied` : ""}`, readMs() + " ms");
+    go("payments");
   }
 
   /* Applying a vendor credit reduces what you owe on a specific bill. It is
