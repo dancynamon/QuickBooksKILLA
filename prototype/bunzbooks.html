@@ -423,6 +423,39 @@ tbody tr[data-clickable]:hover { background: var(--accent-soft); }
 
 .swatch { display: inline-block; width: 7px; height: 7px; border-radius: 2px; margin-right: 6px; vertical-align: baseline; }
 
+/* ─── stage filters and stepper ─────────────────────────────────────── */
+.chips { display: flex; gap: 7px; flex-wrap: wrap; margin-bottom: 14px; }
+.chip {
+  display: flex; align-items: center; gap: 7px;
+  padding: 6px 11px;
+  border: 1px solid var(--line); border-radius: 6px;
+  background: var(--surface);
+  transition: border-color .12s, background .12s;
+}
+.chip:hover { border-color: var(--accent-line); }
+.chip[aria-pressed="true"] { border-color: var(--accent); background: var(--accent-soft); }
+.chip .dot { width: 8px; height: 8px; border-radius: 2px; flex: none; }
+.chip .n { font-family: var(--mono); font-variant-numeric: tabular-nums; font-weight: 500; }
+.chip .cap { font-size: calc(12px * var(--fs)); color: var(--ink-2); }
+
+.stepper { display: flex; align-items: stretch; gap: 0; flex-wrap: wrap; padding: 10px 16px;
+  background: var(--surface); border-bottom: 1px solid var(--line); }
+.step {
+  display: flex; flex-direction: column; gap: 1px;
+  padding: 6px 14px 6px 20px;
+  border: 1px solid var(--line); border-left: none;
+  background: var(--surface-2); min-width: calc(104px * var(--fs));
+  position: relative; text-align: left;
+}
+.step:first-child { border-left: 1px solid var(--line); border-radius: 6px 0 0 6px; padding-left: 12px; }
+.step:last-child { border-radius: 0 6px 6px 0; }
+.step.done { background: var(--ok-soft); border-color: color-mix(in srgb, var(--ok) 30%, transparent); }
+.step.here { background: var(--accent-soft); border-color: var(--accent); }
+.step .s-lbl { font-family: var(--cond); font-size: calc(10px * var(--fs)); font-weight: 600;
+  letter-spacing: .09em; text-transform: uppercase; color: var(--ink-3); }
+.step.here .s-lbl { color: var(--accent); }
+.step .s-val { font-size: calc(12.5px * var(--fs)); font-weight: 500; }
+
 /* ─── document chain ────────────────────────────────────────────────── */
 .chain {
   display: flex; align-items: stretch; gap: 7px; flex-wrap: wrap;
@@ -897,6 +930,101 @@ tbody tr[data-clickable]:hover { background: var(--accent-soft); }
       applied: [] }
   ];
 
+  /* Orders are committed work, not a document type. Stage is where the job
+     physically is; payment is a separate axis, because a Shopify order arrives
+     paid and a wholesale PO arrives on terms. QuickBooks models those as two
+     different forms; here they are one record with two states. */
+  const STAGES = [
+    { id: "tocut",  label: "To cut",  color: "var(--crit)" },
+    { id: "cut",    label: "Cut",     color: "var(--warn)" },
+    { id: "packed", label: "Packed",  color: "var(--accent)" },
+    { id: "shipped",label: "Shipped", color: "var(--ok)" }
+  ];
+  const stageIndex = id => STAGES.findIndex(s2 => s2.id === id);
+
+  const SOURCES = {
+    shopify:   { label: "Shopify",   glyph: "◎" },
+    amazon:    { label: "Amazon",    glyph: "◇" },
+    wholesale: { label: "Wholesale", glyph: "▤" },
+    phone:     { label: "Phone",     glyph: "☏" }
+  };
+
+  const ORDERS = [
+    { no: "SO-2041", date: "2026-08-19", promised: "2026-08-27", cust: "c1", cls: "foam",
+      source: "shopify", ref: "#1047", custPO: "", total: 198625, paid: 198625, stage: "tocut",
+      material: "Blue XLPE", sqft: 148, note: "Custom Blue Harbor logo, 1-colour white",
+      lines: [ { sku: "XRT-40-SFSP", qty: 35, rate: 5675 } ], invoice: null },
+
+    { no: "SO-2040", date: "2026-08-18", promised: "2026-08-25", cust: "c6", cls: "foam",
+      source: "wholesale", ref: "", custPO: "KA-2026-4502", total: 539400, paid: 0, stage: "cut",
+      material: "Blue XLPE", sqft: 432, note: "6 mats — nest 3 per sheet",
+      lines: [ { sku: "PM-6X12-BLU", qty: 6, rate: 89900 } ], invoice: null },
+
+    { no: "SO-2039", date: "2026-08-17", promised: "2026-08-22", cust: "c3", cls: "foam",
+      source: "phone", ref: "", custPO: "", total: 62500, paid: 0, stage: "packed",
+      material: "Yellow EVA", sqft: 96, note: "Ready for John — 2 cartons",
+      lines: [ { sku: "AM-SC-KB", qty: 50, rate: 1250 } ], invoice: null },
+
+    { no: "SO-2038", date: "2026-08-12", promised: "2026-08-18", cust: "c4", cls: "sign",
+      source: "shopify", ref: "#1039", custPO: "HAF-8871", total: 39834, paid: 39834, stage: "shipped",
+      material: "Aluminium", sqft: 18, note: "Shipped UPS Ground",
+      lines: [ { sku: "SIGN-NJ-POOL", qty: 3, rate: 12400 } ], invoice: "21232" },
+
+    { no: "SO-2037", date: "2026-08-20", promised: "2026-09-03", cust: "c9", cls: "foam",
+      source: "wholesale", ref: "", custPO: "", total: 213625, paid: 0, stage: "tocut",
+      material: "Red XLPE", sqft: 148, note: "Awaiting artwork approval — do not cut",
+      lines: [ { sku: "XRT-40-SFSP", qty: 35, rate: 5675 } ], invoice: null },
+
+    { no: "SO-2036", date: "2026-08-20", promised: "2026-09-10", cust: "c8", cls: "chair",
+      source: "phone", ref: "", custPO: "", total: 137836, paid: 0, stage: "tocut",
+      material: "Powder-coat frame", sqft: 0, note: "Frame from J. Restrepo, 3 cartons",
+      lines: [ { sku: "LG-CHAIR-60", qty: 1, rate: 124500 } ], invoice: null },
+
+    { no: "SO-2035", date: "2026-08-15", promised: "2026-08-21", cust: "c2", cls: "sign",
+      source: "amazon", ref: "114-7726035", custPO: "", total: 24800, paid: 24800, stage: "packed",
+      material: "Aluminium", sqft: 12, note: "Amazon FBM — label by 21st",
+      lines: [ { sku: "SIGN-NJ-POOL", qty: 2, rate: 12400 } ], invoice: null }
+  ];
+
+  const orderStage = o => STAGES.find(s2 => s2.id === o.stage);
+  const orderPaidState = o =>
+    o.paid >= o.total ? "paid" : o.paid > 0 ? "part" : "terms";
+
+  /* Customer credits — the mirror of vendor credits, on the money-in side. */
+  const CUSTOMERCREDITS = [
+    { no: "CM-118", date: "2026-08-17", cust: "c4", total: 12400,
+      reason: "One sign arrived scratched — replaced, credit for the original",
+      applied: [] },
+    { no: "CM-115", date: "2026-08-04", cust: "c2", total: 29900,
+      reason: "Short shipment on chair order — one unit never sent",
+      applied: [ { inv: "21230", amount: 29900, date: "2026-08-09" } ] }
+  ];
+  const ccApplied   = c => (c.applied || []).reduce((a, x) => a + x.amount, 0);
+  const ccRemaining = c => c.total - ccApplied(c);
+
+  /* Non-PO spend. Deliberately thin: this is the stuff that does not deserve
+     a purchase order and should take ten seconds to record. */
+  const EXPENSES = [
+    { no: "EXP-3312", date: "2026-08-19", payee: "Shell",              account: "Vehicle fuel",       cls: null,    amount: 8412,  method: "Amex ••4021" },
+    { no: "EXP-3311", date: "2026-08-18", payee: "Grainger",           account: "Shop supplies",      cls: "foam",  amount: 24788, method: "Amex ••4021" },
+    { no: "EXP-3310", date: "2026-08-15", payee: "NJ Motor Vehicle",   account: "Licences and fees",  cls: null,    amount: 15000, method: "Checking ••8842" },
+    { no: "EXP-3309", date: "2026-08-14", payee: "Waste Management",   account: "Refuse removal",     cls: null,    amount: 31200, method: "Checking ••8842" },
+    { no: "EXP-3308", date: "2026-08-12", payee: "Uline",              account: "Packaging",          cls: "foam",  amount: 47690, method: "Amex ••4021" }
+  ];
+
+  /* Attachments hang off any document. In this shop that means vendor
+     invoices, delivery photos and approved artwork — the artwork especially,
+     because a proof nobody can find is a job that gets cut twice. */
+  const ATTACHMENTS = [
+    { doc: "SO-2041", name: "blueharbor-logo-approved.ai",  kind: "artwork", size: "1.4 MB", date: "2026-08-19" },
+    { doc: "SO-2041", name: "proof-xrt40-white.pdf",        kind: "proof",   size: "480 KB", date: "2026-08-19" },
+    { doc: "SO-2037", name: "tidewater-logo-DRAFT.png",      kind: "artwork", size: "220 KB", date: "2026-08-20" },
+    { doc: "BILL-2288", name: "eva-colors-inv-11902.pdf",   kind: "invoice", size: "96 KB",  date: "2026-08-10" },
+    { doc: "PO-4469", name: "packing-slip-EC-11902.jpg",    kind: "photo",   size: "2.1 MB", date: "2026-08-14" },
+    { doc: "21234",   name: "blueharbor-po-4471882.pdf", kind: "customer PO", size: "140 KB", date: "2026-08-15" }
+  ];
+  const attachmentsFor = doc => ATTACHMENTS.filter(a => a.doc === doc);
+
   const VENDORS = [
     { name: "Continental Foam",    terms: "Net 30", is1099: false, contact: "tammy@continentalfoam.com",  city: "Fairfield, NJ",   ytd: 4218400, buys: "XLPE and EVA foam sheet" },
     { name: "Spectra EVA",        terms: "Net 30", is1099: false, contact: "orders@spectraeva.com",     city: "Chino, CA",       ytd: 1884200, buys: "Coloured EVA sheet" },
@@ -954,12 +1082,14 @@ tbody tr[data-clickable]:hover { background: var(--accent-soft); }
   const NAV = [
     { id: "today",     label: "Today",         glyph: "◆" },
     { id: "estimates", label: "Estimates",     glyph: "◈", count: () => ESTIMATES.length },
+    { id: "orders",    label: "Orders",        glyph: "▤", count: () => ORDERS.filter(o => o.stage !== "shipped").length },
     { id: "invoices",  label: "Invoices",      glyph: "▤", count: () => INVOICES.length },
     { id: "customers", label: "Customers",     glyph: "◑", count: () => CUSTOMERS.length },
     { id: "vendors",   label: "Vendors",       glyph: "◒", count: () => VENDORS.length },
     { id: "items",     label: "Items",         glyph: "▦", count: () => ITEMS.length },
     { id: "pos",       label: "Purchase orders",glyph: "▥", count: () => POS.length },
     { id: "bills",     label: "Bills",         glyph: "▧", count: () => BILLS.length },
+    { id: "expenses",  label: "Expenses",      glyph: "▨", count: () => EXPENSES.length },
     { id: "credits",   label: "Vendor credits",glyph: "◐", count: () => VENDORCREDITS.length },
     { id: "payments",  label: "Payments",      glyph: "◍", count: () => PAYMENTS.length },
     { id: "failures",  label: "Needs you",     glyph: "▲", count: () => FAILURES.length, alert: true }
@@ -1096,6 +1226,37 @@ tbody tr[data-clickable]:hover { background: var(--accent-soft); }
       act: () => go("po", o.no)
     }));
 
+    ORDERS.forEach(o => rows.push({
+      kind: "order", no: o.no, glyph: "▤",
+      title: `${o.no} — ${cust(o.cust).short}`,
+      meta: plain(o.total),
+      keys: [
+        key(o.no, "order number", 0),
+        key(o.no.replace(/\D/g, ""), "order number", 1),
+        o.custPO && key(o.custPO, "customer PO", 4),
+        o.ref && key(o.ref.replace("#", ""), SOURCES[o.source].label + " reference", 8),
+        key(plain(o.total).replace(/,/g, ""), "order value", 16)
+      ].filter(Boolean),
+      act: () => go("order", o.no)
+    }));
+
+    EXPENSES.forEach(e => rows.push({
+      kind: "expense", no: e.no, glyph: "▨",
+      title: `${e.no} — ${e.payee}`, meta: plain(e.amount),
+      keys: [ key(e.no.replace(/\D/g, ""), "expense number", 0),
+              key(plain(e.amount).replace(/,/g, ""), "amount", 16) ],
+      act: () => go("expenses")
+    }));
+
+    CUSTOMERCREDITS.forEach(c => rows.push({
+      kind: "custcredit", no: c.no, glyph: "◑",
+      title: `${c.no} — ${cust(c.cust).short}`, meta: plain(c.total),
+      keys: [ key(c.no, "credit memo", 0),
+              key(c.no.replace(/\D/g, ""), "credit memo", 1),
+              key(plain(c.total).replace(/,/g, ""), "credit amount", 16) ],
+      act: () => go("custcredits")
+    }));
+
     VENDORCREDITS.forEach(v => rows.push({
       kind: "credit", no: v.no, glyph: "◐",
       title: `${v.no} — ${v.vendor}`,
@@ -1216,7 +1377,9 @@ tbody tr[data-clickable]:hover { background: var(--accent-soft); }
       rail.appendChild(b);
     });
     rail.appendChild(el("div", "rail-head lbl", "Reports"));
-    [["Profit & loss", "▧", "pnl"], ["A/R aging", "▨", "aging"], ["Inventory value", "▩", null]]
+    [["Profit & loss", "▧", "pnl"], ["A/R aging", "▨", "aging"],
+     ["Money out", "▤", "payables"], ["Customer credits", "◑", "custcredits"],
+     ["Inventory value", "▩", null]]
       .forEach(([label, glyph, view]) => {
         const b = el("button", "rail-item", `<span class="ri-glyph" aria-hidden="true">${glyph}</span><span>${label}</span>`);
         b.setAttribute("aria-current", String(state.view === view));
@@ -2196,6 +2359,229 @@ tbody tr[data-clickable]:hover { background: var(--accent-soft); }
       </div>`;
     },
 
+    orders(filter) {
+      const active = filter || "all";
+      const shown = active === "all" ? ORDERS : ORDERS.filter(o => o.stage === active);
+      const count = id => ORDERS.filter(o => o.stage === id).length;
+      const value = id => ORDERS.filter(o => o.stage === id).reduce((a, o) => a + o.total, 0);
+      const late = o => o.stage !== "shipped" && o.promised < "2026-08-20";
+
+      return head("Orders", "Committed work, by where it physically is",
+        `<button class="btn btn-primary">New order</button>`) + `
+      <div class="pad">
+        <div class="chips">
+          <button class="chip" aria-pressed="${active === "all"}" data-stage="all">
+            <span class="n">${ORDERS.length}</span><span class="cap">All</span></button>
+          ${STAGES.map(st => `
+            <button class="chip" aria-pressed="${active === st.id}" data-stage="${st.id}">
+              <span class="dot" style="background:${st.color}"></span>
+              <span class="n">${count(st.id)}</span>
+              <span class="cap">${st.label} · ${plain(value(st.id))}</span>
+            </button>`).join("")}
+        </div>
+
+        <div class="grid-wrap"><div class="grid-scroll"><table>
+          <thead><tr>
+            <th>Order</th><th>Promised</th><th>Customer</th><th>From</th>
+            <th>What</th><th>Material</th><th class="r">Sq ft</th>
+            <th class="r">Value</th><th>Money</th><th>Stage</th>
+          </tr></thead>
+          <tbody>${shown.map(o => `
+            <tr data-clickable data-order="${o.no}">
+              <td class="mono">${o.no}</td>
+              <td class="mono ${late(o) ? "" : "dim"}" style="${late(o) ? "color:var(--crit)" : ""}">${o.promised}${late(o) ? " ⚑" : ""}</td>
+              <td class="trunc">${esc(cust(o.cust).short)}</td>
+              <td class="dim"><span aria-hidden="true">${SOURCES[o.source].glyph}</span> ${SOURCES[o.source].label}${o.ref ? ` <span class="mono">${esc(o.ref)}</span>` : ""}</td>
+              <td class="trunc dim">${(o.lines || []).map(l => `${l.qty} × ${l.sku}`).join(", ")}</td>
+              <td><span class="swatch" style="background:${cls(o.cls).color}"></span>${esc(o.material)}</td>
+              <td class="r num dim">${o.sqft || "—"}</td>
+              <td class="r num">${plain(o.total)}</td>
+              <td>${orderPaidState(o) === "paid" ? '<span class="tag ok">paid</span>'
+                   : orderPaidState(o) === "part" ? '<span class="tag warn">part</span>'
+                   : `<span class="tag">${esc(cust(o.cust).terms)}</span>`}</td>
+              <td><span class="tag" style="color:${orderStage(o).color};border-color:${orderStage(o).color}66">${orderStage(o).label.toLowerCase()}</span></td>
+            </tr>`).join("")}</tbody>
+        </table></div></div>
+        <p class="hint">Stage is where the job physically is. Money is a separate column because a
+        Shopify order arrives paid and a wholesale order arrives on terms — the same record, two
+        different states. A red promised date has already passed.</p>
+      </div>`;
+    },
+
+    order(no) {
+      const o = ORDERS.find(x => x.no === no) || ORDERS[0];
+      const c = cust(o.cust);
+      const here = stageIndex(o.stage);
+      const files = attachmentsFor(o.no);
+      const nextStage = here < STAGES.length - 1 ? STAGES[here + 1] : null;
+
+      return head(o.no, `${esc(c.short)} · promised ${o.promised}`,
+        `<button class="btn" data-go="orders">← Back</button>
+         ${nextStage ? `<button class="btn btn-primary" data-advance="${o.no}">Mark ${nextStage.label.toLowerCase()}</button>` : ""}
+         ${o.stage === "shipped" && !o.invoice ? `<button class="btn btn-primary" data-billorder="${o.no}">Invoice it</button>` : ""}
+         ${o.invoice ? `<button class="btn" data-inv="${o.invoice}">Invoice ${o.invoice} →</button>` : ""}`) + `
+      <div class="stepper">
+        ${STAGES.map((st, n) => `
+          <div class="step ${n < here ? "done" : n === here ? "here" : ""}">
+            <span class="s-lbl">${st.label}</span>
+            <span class="s-val">${n < here ? "done" : n === here ? "current" : "pending"}</span>
+          </div>`).join("")}
+      </div>
+      <div class="pad">
+        <div class="split">
+          <div class="panel">
+            <div class="doc-head">
+              <div class="field"><span class="lbl">Customer</span><span class="field-val">${esc(c.short)}</span></div>
+              <div class="field"><span class="lbl">Came from</span><span class="field-val">${SOURCES[o.source].label}${o.ref ? ` · <span class="mono">${esc(o.ref)}</span>` : ""}</span></div>
+              <div class="field"><span class="lbl">Customer PO</span><span class="field-val mono">${o.custPO ? esc(o.custPO) : "—"}</span></div>
+              <div class="field"><span class="lbl">Promised</span><span class="field-val mono" style="${o.promised < "2026-08-20" && o.stage !== "shipped" ? "color:var(--crit)" : ""}">${o.promised}</span></div>
+              <div class="field"><span class="lbl">Material</span><span class="field-val"><span class="swatch" style="background:${cls(o.cls).color}"></span>${esc(o.material)}${o.sqft ? ` · ${o.sqft} sq ft` : ""}</span></div>
+              <div class="field"><span class="lbl">Money</span><span class="field-val">${plain(o.total)} · ${orderPaidState(o) === "paid" ? "paid at source" : orderPaidState(o) === "part" ? "part paid" : esc(c.terms)}</span></div>
+            </div>
+            ${o.note ? `<div class="offline-bar" style="background:var(--surface-2);border-color:var(--line);color:var(--ink-2)">
+              <span class="lbl" style="flex:none">Shop note</span> ${esc(o.note)}</div>` : ""}
+            <div class="grid-scroll"><table>
+              <thead><tr><th style="width:34px">#</th><th>Item</th><th>Description</th><th class="r">Qty</th><th class="r">Rate</th><th class="r">Amount</th></tr></thead>
+              <tbody>${(o.lines || []).map((l, n) => {
+                const it = item(l.sku);
+                return `<tr><td class="mono dim">${n + 1}</td><td class="mono">${esc(l.sku)}</td>
+                  <td class="trunc dim">${esc(it ? it.desc : "")}</td>
+                  <td class="r num">${l.qty}</td><td class="r num">${plain(l.rate)}</td>
+                  <td class="r num">${plain(l.qty * l.rate)}</td></tr>`; }).join("")}</tbody>
+            </table></div>
+            <div class="totals"><dl>
+              <div class="grand" style="display:contents"><dt>Order value</dt><dd>${plain(o.total)}</dd></div>
+            </dl></div>
+          </div>
+          <div>
+            <div class="panel" style="margin-bottom:14px">
+              <div class="panel-head"><span class="lbl">Files</span>
+                <span class="spacer" style="flex:1"></span>
+                <span class="lbl">${files.length}</span></div>
+              <div class="panel-body" style="padding:2px 12px 10px">
+                ${files.length ? files.map(f => `
+                  <div class="link-row" style="cursor:default">
+                    <span class="link-glyph" aria-hidden="true">${f.kind === "artwork" ? "✎" : f.kind === "proof" ? "◱" : "▣"}</span>
+                    <span class="link-main"><b>${esc(f.name)}</b>
+                      <div class="link-sub">${esc(f.kind)} · ${f.size} · ${f.date}</div></span>
+                  </div>`).join("")
+                : '<p class="hint" style="margin:8px 0">No files. Artwork and proofs belong here.</p>'}
+                ${o.stage === "tocut" && !files.some(f => f.kind === "proof")
+                  ? `<div class="fail-bar warn" style="margin:8px -12px -10px;border-top:1px solid var(--line)">
+                       <span class="tag warn">hold</span>
+                       <span style="font-size:calc(12px * var(--fs))">No approved proof on file — do not cut.</span>
+                     </div>` : ""}
+              </div>
+            </div>
+            <div class="panel">
+              <div class="panel-head"><span class="lbl">${esc(c.short)}</span></div>
+              <div class="panel-body">
+                <dl class="kv">
+                  <dt>Location</dt><dd>${esc(c.city)}</dd>
+                  <dt>Terms</dt><dd>${esc(c.terms)}</dd>
+                  <dt>Open balance</dt><dd class="num">${plain(c.bal)}</dd>
+                </dl>
+                <button class="btn" style="margin-top:10px;width:100%" data-cust="${c.id}">Full history</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>`;
+    },
+
+    payables() {
+      /* "What do I owe and when", not an aging table you have to interpret. */
+      const rows = BILLS.filter(b => billBalance(b) > 0).map(b => {
+        const credit = VENDORCREDITS.filter(v => v.vendor === b.vendor)
+                                    .reduce((a, v) => a + vcRemaining(v), 0);
+        const days = Math.round((new Date(b.due) - new Date("2026-08-20")) / 86400000);
+        return { b, credit, days, net: Math.max(0, billBalance(b) - credit) };
+      }).sort((a, b) => a.days - b.days);
+
+      const within = n => rows.filter(r => r.days <= n).reduce((a, r) => a + r.net, 0);
+      const totalCredit = VENDORCREDITS.reduce((a, v) => a + vcRemaining(v), 0);
+
+      return head("Money out", "What you owe, when it is due, and what you already hold against it") + `
+      <div class="pad">
+        <div class="strip">
+          <div class="strip-cell"><div class="lbl">Overdue</div><div class="strip-val ${within(-1) ? "neg" : ""}">${money(rows.filter(r => r.days < 0).reduce((a, r) => a + r.net, 0))}</div><div class="strip-note">past the due date</div></div>
+          <div class="strip-cell"><div class="lbl">This week</div><div class="strip-val warn">${money(within(7) - rows.filter(r => r.days < 0).reduce((a, r) => a + r.net, 0))}</div><div class="strip-note">next 7 days</div></div>
+          <div class="strip-cell"><div class="lbl">This month</div><div class="strip-val">${money(within(31))}</div><div class="strip-note">next 31 days</div></div>
+          <div class="strip-cell"><div class="lbl">Credit in hand</div><div class="strip-val pos">${money(totalCredit)}</div><div class="strip-note">apply before paying</div></div>
+          <div class="strip-cell"><div class="lbl">Net to pay</div><div class="strip-val">${money(rows.reduce((a, r) => a + r.net, 0))}</div><div class="strip-note">after credits</div></div>
+        </div>
+        <div class="grid-wrap"><div class="grid-scroll"><table>
+          <thead><tr><th>Due</th><th class="r">In</th><th>Vendor</th><th>Bill</th><th class="r">Balance</th><th class="r">Credit held</th><th class="r">Net to pay</th><th></th></tr></thead>
+          <tbody>${rows.length ? rows.map(r => `
+            <tr data-clickable data-bill="${r.b.no}">
+              <td class="mono ${r.days < 0 ? "" : "dim"}" style="${r.days < 0 ? "color:var(--crit)" : ""}">${r.b.due}</td>
+              <td class="r num" style="color:${r.days < 0 ? "var(--crit)" : r.days <= 7 ? "var(--warn)" : "var(--ink-dim)"}">${r.days < 0 ? `${-r.days}d late` : `${r.days}d`}</td>
+              <td>${esc(r.b.vendor)}</td>
+              <td class="mono dim">${r.b.no}</td>
+              <td class="r num">${plain(billBalance(r.b))}</td>
+              <td class="r num" style="color:${r.credit ? "var(--ok)" : "var(--ink-dim)"}">${r.credit ? "−" + plain(r.credit) : "—"}</td>
+              <td class="r num" style="font-weight:500">${plain(r.net)}</td>
+              <td>${r.credit ? '<span class="tag ok">credit available</span>' : ""}</td>
+            </tr>`).join("") : '<tr><td colspan="8" class="dim">Nothing outstanding.</td></tr>'}</tbody>
+        </table></div></div>
+        <p class="hint">Net to pay already deducts credit you are holding from that vendor. Paying the
+        balance without applying the credit first is how a credit expires unused.</p>
+      </div>`;
+    },
+
+    custcredits() {
+      const unapplied = CUSTOMERCREDITS.reduce((a, c) => a + ccRemaining(c), 0);
+      return head("Customer credits", `${CUSTOMERCREDITS.length} issued · ${money(unapplied)} not yet applied`) + `
+      <div class="pad">
+        <div class="grid-wrap"><div class="grid-scroll"><table>
+          <thead><tr><th>No.</th><th>Date</th><th>Customer</th><th>Reason</th><th class="r">Amount</th><th class="r">Applied</th><th class="r">Available</th><th>Against</th></tr></thead>
+          <tbody>${CUSTOMERCREDITS.map(c => `
+            <tr data-clickable ${c.applied.length ? `data-inv="${c.applied[0].inv}"` : `data-cust="${c.cust}"`}>
+              <td class="mono">${c.no}</td>
+              <td class="mono dim">${c.date}</td>
+              <td class="trunc">${esc(cust(c.cust).short)}</td>
+              <td class="trunc dim">${esc(c.reason)}</td>
+              <td class="r num">${plain(c.total)}</td>
+              <td class="r num dim">${ccApplied(c) ? plain(ccApplied(c)) : "—"}</td>
+              <td class="r num" style="color:${ccRemaining(c) ? "var(--warn)" : "var(--ink-dim)"}">${ccRemaining(c) ? plain(ccRemaining(c)) : "—"}</td>
+              <td>${c.applied.length ? c.applied.map(a => `<span class="tag acc">inv ${a.inv}</span>`).join(" ") : '<span class="tag warn">unapplied</span>'}</td>
+            </tr>`).join("")}</tbody>
+        </table></div></div>
+        <p class="hint">An unapplied customer credit is money you owe back. It shows on their statement
+        whether or not you have applied it, so leaving it here does not hide it.</p>
+      </div>`;
+    },
+
+    expenses() {
+      const total = EXPENSES.reduce((a, e) => a + e.amount, 0);
+      const byMethod = [...new Set(EXPENSES.map(e => e.method))].map(m => ({
+        m, total: EXPENSES.filter(e => e.method === m).reduce((a, e) => a + e.amount, 0)
+      }));
+      return head("Expenses", "Spend that does not deserve a purchase order",
+        `<button class="btn btn-primary">Record expense</button>`) + `
+      <div class="pad">
+        <div class="strip">
+          <div class="strip-cell"><div class="lbl">This month</div><div class="strip-val">${money(total)}</div><div class="strip-note">${EXPENSES.length} entries</div></div>
+          ${byMethod.map(x => `<div class="strip-cell"><div class="lbl">${esc(x.m)}</div><div class="strip-val" style="font-size:calc(17px * var(--fs))">${money(x.total)}</div><div class="strip-note">${EXPENSES.filter(e => e.method === x.m).length} entries</div></div>`).join("")}
+        </div>
+        <div class="grid-wrap"><div class="grid-scroll"><table>
+          <thead><tr><th>No.</th><th>Date</th><th>Paid to</th><th>Account</th><th>Class</th><th>Paid by</th><th class="r">Amount</th></tr></thead>
+          <tbody>${EXPENSES.map(e => `
+            <tr data-clickable>
+              <td class="mono">${e.no}</td>
+              <td class="mono dim">${e.date}</td>
+              <td>${esc(e.payee)}</td>
+              <td class="dim">${esc(e.account)}</td>
+              <td>${e.cls ? `<span class="swatch" style="background:${cls(e.cls).color}"></span><span class="dim">${cls(e.cls).name}</span>` : '<span class="dim">unallocated</span>'}</td>
+              <td class="dim">${esc(e.method)}</td>
+              <td class="r num">${plain(e.amount)}</td>
+            </tr>`).join("")}</tbody>
+        </table></div></div>
+        <p class="hint">Class is optional here on purpose — fuel and licence fees are not a product
+        line, and forcing a class onto them only makes the margin report lie.</p>
+      </div>`;
+    },
+
     failures() {
       return head("Needs you", "Writes QuickBooks would not take. Nothing was dropped and nothing was merged behind your back.") + `
       <div class="pad">
@@ -2288,6 +2674,10 @@ tbody tr[data-clickable]:hover { background: var(--accent-soft); }
     document.querySelectorAll("[data-cust]").forEach(r => r.onclick = e => { e.stopPropagation(); go("customer", r.dataset.cust); });
     document.querySelectorAll("[data-item]").forEach(r => r.onclick = () => go("item", r.dataset.item));
     document.querySelectorAll("[data-vendor]").forEach(r => r.onclick = () => go("vendor", r.dataset.vendor));
+    document.querySelectorAll("[data-order]").forEach(r => r.onclick = () => go("order", r.dataset.order));
+    document.querySelectorAll("[data-stage]").forEach(b => b.onclick = () => go("orders", b.dataset.stage === "all" ? null : b.dataset.stage));
+    document.querySelectorAll("[data-advance]").forEach(b => b.onclick = () => advanceOrder(b.dataset.advance));
+    document.querySelectorAll("[data-billorder]").forEach(b => b.onclick = () => invoiceOrder(b.dataset.billorder));
     document.querySelectorAll("[data-est]").forEach(r => r.onclick = () => go("estimate", r.dataset.est));
     document.querySelectorAll("[data-po]").forEach(r => r.onclick = e => { e.stopPropagation(); go("po", r.dataset.po); });
 
@@ -2402,6 +2792,47 @@ tbody tr[data-clickable]:hover { background: var(--accent-soft); }
     updateChrome();
     const after = estProgress(e);
     toast(`Invoice ${next} for ${plain(amount)} — estimate ${no} now ${after.pct}% billed`, readMs() + " ms");
+    go("invoice", next);
+  }
+
+  /* Advancing a stage is the shop floor telling the books what happened, not
+     the other way round. Nothing financial moves until it ships. */
+  function advanceOrder(no) {
+    const o = ORDERS.find(x => x.no === no);
+    if (!o) return;
+    const n = stageIndex(o.stage);
+    if (n >= STAGES.length - 1) return;
+
+    /* An order with no approved proof should not be cut. The app refuses
+       rather than warns, because a warning you can click through is not a
+       control. */
+    if (o.stage === "tocut" && !attachmentsFor(o.no).some(f => f.kind === "proof")) {
+      toast(`${no} has no approved proof — cannot cut`, null, true);
+      return;
+    }
+
+    o.stage = STAGES[n + 1].id;
+    state.pending++;
+    updateChrome();
+    toast(`${no} → ${STAGES[n + 1].label.toLowerCase()}`, readMs() + " ms");
+    go("order", no);
+  }
+
+  function invoiceOrder(no) {
+    const o = ORDERS.find(x => x.no === no);
+    if (!o || o.invoice) return;
+    const next = String(Math.max(...INVOICES.map(i => Number(i.no))) + 1);
+    INVOICES.unshift({
+      no: next, date: "2026-08-20", cust: o.cust, cls: o.cls,
+      total: o.total, bal: o.paid >= o.total ? 0 : o.total - o.paid,
+      age: 0, status: o.paid >= o.total ? "Paid" : "Open", sync: "pending",
+      custPO: o.custPO, shopify: o.source === "shopify" ? o.ref : undefined,
+      lines: (o.lines || []).map(l => ({ ...l }))
+    });
+    o.invoice = next;
+    state.pending++;
+    updateChrome();
+    toast(`${no} invoiced as ${next}`, readMs() + " ms");
     go("invoice", next);
   }
 
@@ -2611,7 +3042,8 @@ tbody tr[data-clickable]:hover { background: var(--accent-soft); }
 
   const SEC_OF = {
     invoice: "Invoices", estimate: "Estimates", po: "Purchase orders",
-    bill: "Bills", credit: "Vendor credits", payment: "Payments",
+    order: "Orders", bill: "Bills", credit: "Vendor credits",
+    custcredit: "Customer credits", expense: "Expenses", payment: "Payments",
     customer: "Customers", item: "Items"
   };
 
