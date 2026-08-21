@@ -1,0 +1,392 @@
+<title>BunzBooks Build Plan</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans+Condensed:wght@600;700&family=IBM+Plex+Sans:wght@400;450;500;600;700&display=swap">
+
+<style>
+:root {
+  --ground:    #EEF3F6;
+  --surface:   #FFFFFF;
+  --surface-2: #E4EBF0;
+  --line:      #CBD8E1;
+  --line-soft: #DFE7ED;
+  --ink:       #0B1720;
+  --ink-2:     #3D5666;
+  --ink-3:     #64798A;
+  --ink-dim:   #4E6675;
+  --accent:    #C8481F;
+  --accent-soft: rgba(200, 72, 31, .10);
+  --accent-line: rgba(200, 72, 31, .34);
+  --ok:        #197552;   --ok-soft:   rgba(25, 117, 82, .12);
+  --warn:      #9A5D0C;   --warn-soft: rgba(154, 93, 12, .13);
+  --crit:      #B22F22;   --crit-soft: rgba(178, 47, 34, .12);
+  --bun-top:  #E39B3A; --bun-seed: #FFF1D6; --bun-fill: #8C4A28; --bun-heel: #D2872B;
+
+  --sans: "IBM Plex Sans", ui-sans-serif, system-ui, -apple-system, sans-serif;
+  --cond: "IBM Plex Sans Condensed", "IBM Plex Sans", ui-sans-serif, system-ui, sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --ground:    #0A1118;
+    --surface:   #0F1A22;
+    --surface-2: #15232D;
+    --line:      #21353F;
+    --line-soft: #182833;
+    --ink:       #E9F1F6;
+    --ink-2:     #A8BECB;
+    --ink-3:     #7A91A1;
+    --ink-dim:   #9CB2C0;
+    --accent:    #FF7A45;
+    --accent-soft: rgba(255, 122, 69, .13);
+    --accent-line: rgba(255, 122, 69, .40);
+    --ok:   #3DC694; --ok-soft:   rgba(61, 198, 148, .13);
+    --warn: #E3A340; --warn-soft: rgba(227, 163, 64, .13);
+    --crit: #F4695B; --crit-soft: rgba(244, 105, 91, .13);
+    --bun-top: #F0A94A; --bun-seed: #FFF6E4; --bun-fill: #A85A31; --bun-heel: #DE9236;
+  }
+}
+:root[data-theme="dark"] {
+  --ground:    #0A1118;
+  --surface:   #0F1A22;
+  --surface-2: #15232D;
+  --line:      #21353F;
+  --line-soft: #182833;
+  --ink:       #E9F1F6;
+  --ink-2:     #A8BECB;
+  --ink-3:     #7A91A1;
+  --ink-dim:   #9CB2C0;
+  --accent:    #FF7A45;
+  --accent-soft: rgba(255, 122, 69, .13);
+  --accent-line: rgba(255, 122, 69, .40);
+  --ok:   #3DC694; --ok-soft:   rgba(61, 198, 148, .13);
+  --warn: #E3A340; --warn-soft: rgba(227, 163, 64, .13);
+  --crit: #F4695B; --crit-soft: rgba(244, 105, 91, .13);
+  --bun-top: #F0A94A; --bun-seed: #FFF6E4; --bun-fill: #A85A31; --bun-heel: #DE9236;
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--ground);
+  color: var(--ink);
+  font-family: var(--sans);
+  font-weight: 450;
+  font-size: 15px;
+  line-height: 1.62;
+}
+.wrap { max-width: 1080px; margin: 0 auto; padding: 40px 22px 80px; }
+
+.masthead { display: flex; align-items: center; gap: 11px; margin-bottom: 26px; }
+.bun { width: 30px; height: 28px; flex: none; }
+.masthead-name { font-weight: 600; font-size: 16px; letter-spacing: -.01em; }
+.masthead-name span { color: var(--ink-3); font-weight: 450; }
+
+h1 {
+  font-size: clamp(28px, 4.4vw, 40px);
+  line-height: 1.1; letter-spacing: -.028em;
+  margin: 0 0 10px; text-wrap: balance;
+}
+.deck { font-size: 17px; color: var(--ink-2); max-width: 66ch; margin: 0 0 8px; }
+.stamp { font-family: var(--mono); font-size: 12px; color: var(--ink-3); }
+
+h2 {
+  font-size: 21px; letter-spacing: -.018em; margin: 46px 0 6px;
+  padding-top: 20px; border-top: 1px solid var(--line); text-wrap: balance;
+}
+h3 { font-size: 15.5px; margin: 26px 0 6px; letter-spacing: -.008em; }
+p { margin: 0 0 12px; max-width: 70ch; }
+a { color: var(--accent); text-decoration-thickness: 1px; text-underline-offset: 2px; }
+
+.lbl {
+  font-family: var(--cond); font-size: 11px; font-weight: 700;
+  letter-spacing: .11em; text-transform: uppercase; color: var(--ink-3);
+}
+
+.callout {
+  border: 1px solid var(--line); border-left: 3px solid var(--accent);
+  border-radius: 7px; background: var(--surface);
+  padding: 13px 16px; margin: 18px 0;
+}
+.callout.warn { border-left-color: var(--warn); }
+.callout.ok { border-left-color: var(--ok); }
+.callout p:last-child { margin-bottom: 0; }
+
+.tablewrap {
+  border: 1px solid var(--line); border-radius: 8px;
+  background: var(--surface); overflow: hidden; margin: 16px 0 8px;
+}
+.scroll { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; font-size: 13.5px; }
+thead th {
+  background: var(--surface-2); color: var(--ink-2);
+  font-family: var(--cond); font-size: 11px; font-weight: 700;
+  letter-spacing: .09em; text-transform: uppercase;
+  text-align: left; padding: 8px 11px; white-space: nowrap;
+  border-bottom: 1px solid var(--line);
+}
+tbody td { padding: 8px 11px; border-bottom: 1px solid var(--line-soft); vertical-align: top; }
+tbody tr:last-child td { border-bottom: none; }
+tbody tr:hover { background: var(--accent-soft); }
+.r { text-align: right; }
+.num { font-family: var(--mono); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.dim { color: var(--ink-dim); }
+.nowrap { white-space: nowrap; }
+
+.tag {
+  display: inline-block; padding: 1px 6px; border-radius: 3px;
+  font-family: var(--cond); font-size: 11px; font-weight: 700;
+  letter-spacing: .05em; border: 1px solid var(--line);
+  background: var(--surface-2); color: var(--ink-2); white-space: nowrap;
+}
+.tag.have { color: var(--ok); background: var(--ok-soft); border-color: color-mix(in srgb, var(--ok) 32%, transparent); }
+.tag.part { color: var(--warn); background: var(--warn-soft); border-color: color-mix(in srgb, var(--warn) 34%, transparent); }
+.tag.none { color: var(--ink-3); }
+.tag.adv  { color: var(--accent); background: var(--accent-soft); border-color: var(--accent-line); }
+.tag.skip { color: var(--crit); background: var(--crit-soft); border-color: color-mix(in srgb, var(--crit) 34%, transparent); }
+
+.size {
+  display: inline-block; width: 22px; text-align: center;
+  font-family: var(--mono); font-size: 12px; font-weight: 600;
+  border-radius: 3px; padding: 0 3px;
+}
+.size.S  { color: var(--ok);   background: var(--ok-soft); }
+.size.M  { color: var(--warn); background: var(--warn-soft); }
+.size.L  { color: var(--accent); background: var(--accent-soft); }
+.size.XL { color: var(--crit); background: var(--crit-soft); }
+
+.grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 12px; margin: 16px 0; }
+.card { border: 1px solid var(--line); border-radius: 8px; background: var(--surface); padding: 13px 15px; }
+.card .big { font-family: var(--mono); font-size: 24px; font-weight: 500; letter-spacing: -.02em; margin: 3px 0 1px; }
+.card .note { font-size: 13px; color: var(--ink-dim); }
+
+ul { margin: 0 0 12px; padding-left: 20px; max-width: 70ch; }
+li { margin-bottom: 5px; }
+li::marker { color: var(--ink-3); }
+
+footer { margin-top: 46px; padding-top: 18px; border-top: 1px solid var(--line); color: var(--ink-3); font-size: 13px; }
+</style>
+
+<div class="wrap">
+
+  <div class="masthead">
+    <svg class="bun" viewBox="0 0 26 24" aria-hidden="true">
+      <path d="M2.4 11.6C2.4 5.9 7.1 2.2 13 2.2s10.6 3.7 10.6 9.4a1.5 1.5 0 0 1-1.5 1.5H3.9a1.5 1.5 0 0 1-1.5-1.5Z" fill="var(--bun-top)"/>
+      <ellipse cx="8.2" cy="8.1" rx="1.35" ry=".78" fill="var(--bun-seed)" transform="rotate(-22 8.2 8.1)"/>
+      <ellipse cx="13" cy="6.1" rx="1.35" ry=".78" fill="var(--bun-seed)" transform="rotate(6 13 6.1)"/>
+      <ellipse cx="17.8" cy="8.1" rx="1.35" ry=".78" fill="var(--bun-seed)" transform="rotate(22 17.8 8.1)"/>
+      <rect x="1.7" y="13.6" width="22.6" height="3.5" rx="1.75" fill="var(--bun-fill)"/>
+      <path d="M3.2 18.2h19.6a1.3 1.3 0 0 1 1.3 1.3c0 1.4-1.1 2.4-2.5 2.4H4.4c-1.4 0-2.5-1-2.5-2.4a1.3 1.3 0 0 1 1.3-1.3Z" fill="var(--bun-heel)"/>
+    </svg>
+    <div class="masthead-name">Bunz<span>Books</span></div>
+  </div>
+
+  <h1>What QuickBooks does, and what it costs to rebuild</h1>
+  <p class="deck">Every feature in QuickBooks Online Plus and Advanced, what BunzBooks already covers,
+  and a build estimate for the rest — separated into prototype cost and real-application cost,
+  because they differ by roughly an order of magnitude.</p>
+  <p class="stamp">Aquamentor, Inc. · realm 1234567890123456 · compiled 20 August 2026</p>
+
+  <h2>Which subscription you have</h2>
+
+  <p><strong>The QuickBooks API does not expose your subscription tier</strong>, so I can't read it
+  directly. What your book demonstrably has: class tracking, inventory with on-hand quantities,
+  custom fields on sales forms, and two users. Every one of those is available at
+  <strong>Plus</strong>.</p>
+
+  <p>The features that would prove <strong>Advanced</strong> — batch invoicing, custom user roles,
+  workflow automation, revenue recognition, fixed-asset depreciation, Spreadsheet Sync — leave no
+  trace I can detect from the outside.</p>
+
+  <div class="callout">
+    <p><strong>Confirm it in ten seconds:</strong> gear icon → <em>Account and Settings</em> →
+    <em>Billing &amp; Subscription</em>. Tell me which it says and I'll mark the tables accordingly.
+    Everything below is annotated per tier, so the plan holds either way.</p>
+  </div>
+
+  <div class="callout warn">
+    <p><strong>Two things changed in QuickBooks during 2026 that affect this plan.</strong>
+    Sales Orders are now native to Plus and Advanced, along with Item Receipt, Moving Average Cost
+    valuation, and <em>Sales Order → Purchase Order linking</em> — which is your dropship workflow,
+    built in. And as of August 2026, Workforce Elite payroll and Bill Pay Elite are bundled into
+    Advanced at no extra cost. Both are reasons to check what you're already paying for before
+    rebuilding it.</p>
+  </div>
+
+  <h2>How to read the estimates</h2>
+
+  <p>Two numbers per feature, because they measure different work:</p>
+
+  <ul>
+    <li><strong>Prototype</strong> — building it in BunzBooks: dummy data, a view, the interactions.
+    Enough to argue with the design.</li>
+    <li><strong>Production</strong> — building it for real: Rust domain types, SQLite schema and
+    migration, QuickBooks API mapping, outbox integration for writes, tests, and the React UI.</li>
+  </ul>
+
+  <p>Sizes are <span class="size S">S</span> <span class="size M">M</span>
+  <span class="size L">L</span> <span class="size XL">XL</span>. The token figures are
+  <em>output</em> tokens and come from what this session actually spent — the Rust M0 foundations
+  (4,279 lines and 128 tests) ran about 70k, the first BunzBooks build about 40k, and each
+  feature added since has landed between 8k and 30k. Input tokens run several times higher and
+  depend on how much of the codebase gets re-read each turn.</p>
+
+  <div class="grid2">
+    <div class="card"><span class="lbl">Prototype feature</span><div class="big">8–30k</div><div class="note">measured across nine features this session</div></div>
+    <div class="card"><span class="lbl">Production feature</span><div class="big">40–250k</div><div class="note">roughly 4–6× the prototype, from the M0 build</div></div>
+    <div class="card"><span class="lbl">Everything not yet built</span><div class="big">~1.4M</div><div class="note">production, all tiers, excluding items marked skip</div></div>
+    <div class="card"><span class="lbl">The subset I'd actually build</span><div class="big">~420k</div><div class="note">see the closing recommendation</div></div>
+  </div>
+
+  <div class="callout warn">
+    <p><strong>Treat these as order-of-magnitude, not quotes.</strong> They assume the design is
+    settled before code starts — which is why DESIGN.md exists. Review cycles, changed requirements,
+    and debugging against live QuickBooks responses are the variables, and any one of them can
+    double a line. The pattern from this session is that <em>deciding</em> what to build costs
+    less than a third of building it, and skipping that decision costs more than both.</p>
+  </div>
+
+  <h2>Sales and accounts receivable</h2>
+
+  <div class="tablewrap"><div class="scroll"><table>
+    <thead><tr><th>Feature</th><th>Plan</th><th>BunzBooks</th><th class="r">Proto</th><th class="r">Prod</th><th>Note</th></tr></thead>
+    <tbody>
+      <tr><td>Estimates / quotes</td><td><span class="tag">Plus</span></td><td><span class="tag have">built</span></td><td class="r num">—</td><td class="r num">80k</td><td class="dim">Accept status, expiry, customer PO</td></tr>
+      <tr><td>Progress invoicing</td><td><span class="tag">Plus</span></td><td><span class="tag have">built</span></td><td class="r num">—</td><td class="r num">70k</td><td class="dim">Stage billing against one estimate</td></tr>
+      <tr><td>Invoices</td><td><span class="tag">All</span></td><td><span class="tag have">built</span></td><td class="r num">—</td><td class="r num">140k</td><td class="dim">Editor, posting, tax, class per line</td></tr>
+      <tr><td>Receive payment, multi-invoice</td><td><span class="tag">All</span></td><td><span class="tag have">built</span></td><td class="r num">—</td><td class="r num">70k</td><td class="dim">Oldest-first application</td></tr>
+      <tr><td><strong>Sales orders</strong></td><td><span class="tag">Plus</span></td><td><span class="tag none">no</span></td><td class="r num"><span class="size M">M</span> 15k</td><td class="r num">90k</td><td>Your actual flow: estimate → SO → invoice</td></tr>
+      <tr><td><strong>SO → PO linking</strong></td><td><span class="tag">Plus</span></td><td><span class="tag part">partial</span></td><td class="r num"><span class="size S">S</span> 8k</td><td class="r num">50k</td><td>Dropship link exists on invoices, not SOs</td></tr>
+      <tr><td>Credit memos and refunds</td><td><span class="tag">All</span></td><td><span class="tag none">no</span></td><td class="r num"><span class="size S">S</span> 10k</td><td class="r num">60k</td><td class="dim">Mirror of vendor credits, customer side</td></tr>
+      <tr><td>Sales receipts</td><td><span class="tag">All</span></td><td><span class="tag none">no</span></td><td class="r num"><span class="size S">S</span> 6k</td><td class="r num">40k</td><td class="dim">Paid-at-point-of-sale, no AR leg</td></tr>
+      <tr><td>Customer statements</td><td><span class="tag">All</span></td><td><span class="tag none">no</span></td><td class="r num"><span class="size S">S</span> 8k</td><td class="r num">50k</td><td class="dim">Open-item and balance-forward</td></tr>
+      <tr><td>Recurring invoices</td><td><span class="tag">Essentials</span></td><td><span class="tag none">no</span></td><td class="r num"><span class="size M">M</span> 12k</td><td class="r num">90k</td><td class="dim">Scheduler plus template model</td></tr>
+      <tr><td>Delayed charges and credits</td><td><span class="tag">Plus</span></td><td><span class="tag none">no</span></td><td class="r num"><span class="size S">S</span> 8k</td><td class="r num">45k</td><td class="dim">Non-posting until invoiced</td></tr>
+      <tr><td>Invoice payment links</td><td><span class="tag">All</span></td><td><span class="tag skip">skip</span></td><td class="r num">—</td><td class="r num">—</td><td>Payment processing stays with Intuit</td></tr>
+      <tr><td>Batch invoicing</td><td><span class="tag adv">Advanced</span></td><td><span class="tag none">no</span></td><td class="r num"><span class="size M">M</span> 14k</td><td class="r num">80k</td><td class="dim">Worth it only at volume you don't have</td></tr>
+    </tbody>
+  </table></div></div>
+
+  <h2>Purchasing and accounts payable</h2>
+
+  <div class="tablewrap"><div class="scroll"><table>
+    <thead><tr><th>Feature</th><th>Plan</th><th>BunzBooks</th><th class="r">Proto</th><th class="r">Prod</th><th>Note</th></tr></thead>
+    <tbody>
+      <tr><td>Purchase orders</td><td><span class="tag">Plus</span></td><td><span class="tag have">built</span></td><td class="r num">—</td><td class="r num">90k</td><td class="dim">Lines, receipts, vendor, class</td></tr>
+      <tr><td>Partial receipt / item receipt</td><td><span class="tag">Plus</span></td><td><span class="tag have">built</span></td><td class="r num">—</td><td class="r num">70k</td><td class="dim">Ordered against received per line</td></tr>
+      <tr><td>Bills and bill payments</td><td><span class="tag">Essentials</span></td><td><span class="tag have">built</span></td><td class="r num">—</td><td class="r num">100k</td><td class="dim">Derived balances</td></tr>
+      <tr><td>Vendor credits</td><td><span class="tag">Essentials</span></td><td><span class="tag have">built</span></td><td class="r num">—</td><td class="r num">60k</td><td class="dim">Applied explicitly, never automatically</td></tr>
+      <tr><td>Expenses and cheques</td><td><span class="tag">All</span></td><td><span class="tag none">no</span></td><td class="r num"><span class="size S">S</span> 8k</td><td class="r num">60k</td><td class="dim">Non-PO spend</td></tr>
+      <tr><td>Vendor 1099-NEC tracking</td><td><span class="tag">Essentials</span></td><td><span class="tag part">flagged</span></td><td class="r num"><span class="size S">S</span> 6k</td><td class="r num">70k</td><td>Flag exists; year-end totals and filing do not</td></tr>
+      <tr><td>Bill Pay</td><td><span class="tag adv">Advanced</span></td><td><span class="tag skip">skip</span></td><td class="r num">—</td><td class="r num">—</td><td>Money movement stays with Intuit</td></tr>
+      <tr><td>Batch expense entry</td><td><span class="tag adv">Advanced</span></td><td><span class="tag none">no</span></td><td class="r num"><span class="size S">S</span> 8k</td><td class="r num">50k</td><td class="dim"></td></tr>
+    </tbody>
+  </table></div></div>
+
+  <h2>Inventory and manufacturing</h2>
+
+  <p>The area where QuickBooks fits you worst, and therefore where a replacement earns the most.
+  You are a manufacturer; QuickBooks Online assumes you are a reseller.</p>
+
+  <div class="tablewrap"><div class="scroll"><table>
+    <thead><tr><th>Feature</th><th>Plan</th><th>BunzBooks</th><th class="r">Proto</th><th class="r">Prod</th><th>Note</th></tr></thead>
+    <tbody>
+      <tr><td>Inventory items and quantities</td><td><span class="tag">Plus</span></td><td><span class="tag have">built</span></td><td class="r num">—</td><td class="r num">80k</td><td class="dim">On-hand, cost, price, margin</td></tr>
+      <tr><td>Moving average cost</td><td><span class="tag">Plus</span></td><td><span class="tag none">no</span></td><td class="r num"><span class="size S">S</span> 6k</td><td class="r num">110k</td><td class="dim">Weighted average, FIFO behind a trait</td></tr>
+      <tr><td><strong>Assemblies / bill of materials</strong></td><td><span class="tag skip">none</span></td><td><span class="tag none">no</span></td><td class="r num"><span class="size M">M</span> 18k</td><td class="r num">200k</td><td>QuickBooks Online has no BOM at any tier</td></tr>
+      <tr><td><strong>Build transactions</strong></td><td><span class="tag skip">none</span></td><td><span class="tag none">no</span></td><td class="r num"><span class="size M">M</span> 14k</td><td class="r num">150k</td><td>Consume components, produce finished goods</td></tr>
+      <tr><td><strong>Landed cost by board-foot</strong></td><td><span class="tag skip">none</span></td><td><span class="tag none">no</span></td><td class="r num"><span class="size M">M</span> 12k</td><td class="r num">120k</td><td>Freight allocated by physical measure</td></tr>
+      <tr><td><strong>Scrap and yield loss</strong></td><td><span class="tag skip">none</span></td><td><span class="tag none">no</span></td><td class="r num"><span class="size S">S</span> 8k</td><td class="r num">80k</td><td>Cut-part waste against a variance account</td></tr>
+      <tr><td>Inventory valuation report</td><td><span class="tag">Plus</span></td><td><span class="tag none">no</span></td><td class="r num"><span class="size S">S</span> 8k</td><td class="r num">50k</td><td class="dim">Last stub in the reports rail</td></tr>
+      <tr><td>Reorder points</td><td><span class="tag">Plus</span></td><td><span class="tag none">no</span></td><td class="r num"><span class="size S">S</span> 6k</td><td class="r num">40k</td><td class="dim">Now auto-triggers POs in QuickBooks</td></tr>
+      <tr><td>Multi-location inventory</td><td><span class="tag skip">none</span></td><td><span class="tag none">no</span></td><td class="r num"><span class="size M">M</span> 14k</td><td class="r num">120k</td><td class="dim">Only if you split stock across sites</td></tr>
+    </tbody>
+  </table></div></div>
+
+  <h2>Banking and reconciliation</h2>
+
+  <div class="tablewrap"><div class="scroll"><table>
+    <thead><tr><th>Feature</th><th>Plan</th><th>BunzBooks</th><th class="r">Proto</th><th class="r">Prod</th><th>Note</th></tr></thead>
+    <tbody>
+      <tr><td>Bank feed connections</td><td><span class="tag">All</span></td><td><span class="tag skip">skip</span></td><td class="r num">—</td><td class="r num">—</td><td>Needs an aggregator; Intuit keeps this</td></tr>
+      <tr><td>CSV / OFX import</td><td><span class="tag">All</span></td><td><span class="tag none">no</span></td><td class="r num"><span class="size S">S</span> 8k</td><td class="r num">80k</td><td class="dim">The realistic substitute for a feed</td></tr>
+      <tr><td>Matching rules engine</td><td><span class="tag">All</span></td><td><span class="tag none">no</span></td><td class="r num"><span class="size M">M</span> 14k</td><td class="r num">130k</td><td class="dim">Auto-match deposits to invoices</td></tr>
+      <tr><td>Bank reconciliation</td><td><span class="tag">All</span></td><td><span class="tag none">no</span></td><td class="r num"><span class="size M">M</span> 15k</td><td class="r num">120k</td><td class="dim">Statement to book, with a lock</td></tr>
+      <tr><td>Undeposited funds / deposits</td><td><span class="tag">All</span></td><td><span class="tag none">no</span></td><td class="r num"><span class="size S">S</span> 8k</td><td class="r num">60k</td><td class="dim">Group payments into one deposit</td></tr>
+    </tbody>
+  </table></div></div>
+
+  <h2>Reporting</h2>
+
+  <div class="tablewrap"><div class="scroll"><table>
+    <thead><tr><th>Feature</th><th>Plan</th><th>BunzBooks</th><th class="r">Proto</th><th class="r">Prod</th><th>Note</th></tr></thead>
+    <tbody>
+      <tr><td>P&amp;L by class</td><td><span class="tag">Plus</span></td><td><span class="tag have">built</span></td><td class="r num">—</td><td class="r num">70k</td><td class="dim">Revenue, COGS, margin per line</td></tr>
+      <tr><td>A/R aging</td><td><span class="tag">All</span></td><td><span class="tag have">built</span></td><td class="r num">—</td><td class="r num">50k</td><td class="dim">Summary and by customer</td></tr>
+      <tr><td>A/P aging</td><td><span class="tag">All</span></td><td><span class="tag none">no</span></td><td class="r num"><span class="size S">S</span> 6k</td><td class="r num">40k</td><td class="dim">Mirror of A/R, vendor side</td></tr>
+      <tr><td>Balance sheet</td><td><span class="tag">All</span></td><td><span class="tag none">no</span></td><td class="r num"><span class="size S">S</span> 8k</td><td class="r num">90k</td><td class="dim">Needs the real ledger first</td></tr>
+      <tr><td>Trial balance and GL detail</td><td><span class="tag">All</span></td><td><span class="tag none">no</span></td><td class="r num"><span class="size S">S</span> 8k</td><td class="r num">80k</td><td class="dim">The reconciliation harness depends on it</td></tr>
+      <tr><td>Statement of cash flows</td><td><span class="tag">All</span></td><td><span class="tag none">no</span></td><td class="r num"><span class="size S">S</span> 8k</td><td class="r num">90k</td><td class="dim">Indirect method</td></tr>
+      <tr><td><strong>Cash vs accrual basis toggle</strong></td><td><span class="tag">All</span></td><td><span class="tag none">no</span></td><td class="r num"><span class="size M">M</span> 12k</td><td class="r num">180k</td><td>A parameter on every report, not a filter</td></tr>
+      <tr><td>Sales by customer / item</td><td><span class="tag">All</span></td><td><span class="tag part">partial</span></td><td class="r num"><span class="size S">S</span> 6k</td><td class="r num">40k</td><td class="dim">Item page has the data already</td></tr>
+      <tr><td>Custom report builder</td><td><span class="tag adv">Advanced</span></td><td><span class="tag none">no</span></td><td class="r num"><span class="size L">L</span> 25k</td><td class="r num">280k</td><td class="dim">Large, and rarely the bottleneck</td></tr>
+      <tr><td>Spreadsheet Sync</td><td><span class="tag adv">Advanced</span></td><td><span class="tag none">no</span></td><td class="r num"><span class="size S">S</span> 6k</td><td class="r num">60k</td><td class="dim">CSV export covers most of the need</td></tr>
+    </tbody>
+  </table></div></div>
+
+  <h2>Tax, compliance and admin</h2>
+
+  <div class="tablewrap"><div class="scroll"><table>
+    <thead><tr><th>Feature</th><th>Plan</th><th>BunzBooks</th><th class="r">Proto</th><th class="r">Prod</th><th>Note</th></tr></thead>
+    <tbody>
+      <tr><td>Sales tax, destination-based</td><td><span class="tag">All</span></td><td><span class="tag part">partial</span></td><td class="r num"><span class="size M">M</span> 12k</td><td class="r num">160k</td><td>NJ rate applied; no rate engine or nexus</td></tr>
+      <tr><td>Effective-dated tax rates</td><td><span class="tag">All</span></td><td><span class="tag none">no</span></td><td class="r num"><span class="size S">S</span> 6k</td><td class="r num">70k</td><td class="dim">Historical reprint at the rate in force</td></tr>
+      <tr><td>Exemption certificates</td><td><span class="tag">All</span></td><td><span class="tag part">partial</span></td><td class="r num"><span class="size S">S</span> 5k</td><td class="r num">50k</td><td class="dim">Treatment shown; documents not stored</td></tr>
+      <tr><td>Multi-currency</td><td><span class="tag">Essentials</span></td><td><span class="tag skip">skip</span></td><td class="r num">—</td><td class="r num">—</td><td>Ruled out of scope in the brief</td></tr>
+      <tr><td>Attachments on records</td><td><span class="tag">All</span></td><td><span class="tag none">no</span></td><td class="r num"><span class="size S">S</span> 8k</td><td class="r num">90k</td><td class="dim">Vendor invoices, POD photos, artwork</td></tr>
+      <tr><td>Audit log</td><td><span class="tag">Plus</span></td><td><span class="tag part">partial</span></td><td class="r num"><span class="size S">S</span> 6k</td><td class="r num">50k</td><td class="dim">Write audit exists in the Rust design</td></tr>
+      <tr><td>Period close and locking</td><td><span class="tag">Plus</span></td><td><span class="tag none">no</span></td><td class="r num"><span class="size S">S</span> 6k</td><td class="r num">70k</td><td>Needs your fiscal-year answer first</td></tr>
+      <tr><td>Multi-user with roles</td><td><span class="tag">Essentials</span></td><td><span class="tag none">no</span></td><td class="r num"><span class="size M">M</span> 12k</td><td class="r num">220k</td><td>Two-user sync is the hard part, not roles</td></tr>
+      <tr><td>Custom user permissions</td><td><span class="tag adv">Advanced</span></td><td><span class="tag none">no</span></td><td class="r num"><span class="size S">S</span> 8k</td><td class="r num">90k</td><td class="dim">Overkill for two people</td></tr>
+      <tr><td>Workflow automation</td><td><span class="tag adv">Advanced</span></td><td><span class="tag none">no</span></td><td class="r num"><span class="size M">M</span> 15k</td><td class="r num">160k</td><td class="dim">Your skills already do much of this</td></tr>
+      <tr><td>Revenue recognition</td><td><span class="tag adv">Advanced</span></td><td><span class="tag skip">skip</span></td><td class="r num">—</td><td class="r num">—</td><td>No subscription revenue to defer</td></tr>
+      <tr><td>Fixed asset depreciation</td><td><span class="tag adv">Advanced</span></td><td><span class="tag none">no</span></td><td class="r num"><span class="size S">S</span> 8k</td><td class="r num">90k</td><td class="dim">You have CNC equipment; your CPA may cover it</td></tr>
+      <tr><td>Payroll</td><td><span class="tag adv">bundled</span></td><td><span class="tag skip">skip</span></td><td class="r num">—</td><td class="r num">—</td><td>You use SurePayroll; ruled out in the brief</td></tr>
+    </tbody>
+  </table></div></div>
+
+  <h2>What I'd actually build, and in what order</h2>
+
+  <p>Rebuilding QuickBooks feature-for-feature is about 1.4M output tokens of production work and
+  would produce a worse QuickBooks. The value is in the places QuickBooks fits you badly, plus the
+  handful of things you touch every day.</p>
+
+  <h3>1 — Finish the fast front-end <span class="num dim">≈ 190k</span></h3>
+  <p>Sales orders, credit memos, sales receipts, A/P aging, expenses, attachments. This is
+  <code>qbo-local</code>: QuickBooks stays the book of record and you stop waiting on it. Highest
+  return per token in the whole table, because it removes daily friction without any accounting risk.</p>
+
+  <h3>2 — Manufacturing, which QuickBooks simply lacks <span class="num dim">≈ 550k</span></h3>
+  <p>Assemblies, build transactions, landed cost by board-foot, scrap and yield. There is no tier of
+  QuickBooks Online that does these — not Plus, not Advanced. Every one is currently a spreadsheet
+  or your head. This is the part where a custom system is not a preference but the only option.</p>
+
+  <h3>3 — The ledger, if you still want it <span class="num dim">≈ 700k+</span></h3>
+  <p>Double-entry core, posting rules, cash-versus-accrual, full history import, three months of
+  parallel reconciliation. The largest and riskiest block, and the one your own brief softened —
+  "start off QuickBooks-like, then build what makes sense for me." I would not start it until the
+  first two are earning their keep.</p>
+
+  <div class="callout ok">
+    <p><strong>Before any of it: check what you already pay for.</strong> Sales orders, SO→PO
+    linking, item receipts and moving-average cost all went native in 2026. If you are on Plus or
+    Advanced, several rows above are features you own and aren't using — and using them costs
+    nothing.</p>
+  </div>
+
+  <footer>
+    Sizes and token figures are estimates grounded in this session's measured output, not quotes.
+    Tier assignments follow published comparisons; confirm against your own
+    <em>Billing &amp; Subscription</em> page before spending anything on them.
+  </footer>
+</div>
