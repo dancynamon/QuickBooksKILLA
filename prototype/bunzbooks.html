@@ -840,9 +840,9 @@ tbody tr[data-clickable]:hover { background: var(--accent-soft); }
   ];
 
   const POS = [
-    { no: "PO-4471", date: "2026-08-14", vendor: "Continental Foam",    cls: "foam", total: 1284000, bill: null,       forInvoice: null,
-      lines: [ { sku: "FOAM-XLPE-BLU", desc: "XLPE sheet 2lb, blue, 4×8×2", qty: 12, recd: 0, rate: 68000 },
-               { sku: "FOAM-XLPE-RED", desc: "XLPE sheet 2lb, red, 4×8×2",  qty: 6,  recd: 0, rate: 78000 } ],
+    { no: "PO-4471", date: "2026-08-14", vendor: "Continental Foam",    cls: "foam", total: 422400,  bill: null,       forInvoice: null,
+      lines: [ { sku: "FOAM-XLPE-BLU", desc: "XLPE sheet 2lb, blue, 4×8×2", qty: 12, recd: 0, rate: 22800 },
+               { sku: "FOAM-XLPE-RED", desc: "XLPE sheet 2lb, red, 4×8×2",  qty: 6,  recd: 0, rate: 24800 } ],
       receipts: [] },
     { no: "PO-4470", date: "2026-08-12", vendor: "Poolcraft Products", cls: "drop", total: 8420,    bill: "BILL-2291", forInvoice: "21234",
       lines: [ { sku: "1 RH 001", desc: "Ring buoy holder — stainless steel", qty: 6, recd: 6, rate: 940 },
@@ -1025,6 +1025,261 @@ tbody tr[data-clickable]:hover { background: var(--accent-soft); }
   ];
   const attachmentsFor = doc => ATTACHMENTS.filter(a => a.doc === doc);
 
+  /* ─── manufacturing ──────────────────────────────────────────────────
+     Aquamentor buys foam by the sheet and sells shapes cut out of it. The
+     whole costing chain is: what a sheet landed at → what a board-foot of it
+     costs → how many board-feet a part consumes once nesting waste is counted
+     → what the finished product costs. QuickBooks makes you type a cost onto
+     an item and hope. Here the number is computed, so moving a foam price
+     re-prices every product that uses it.                                  */
+
+  const MATERIALS = [
+    { sku: "FOAM-XLPE-BLU", desc: 'XLPE 2lb sheet, blue, 4×8×2"',    vendor: "Continental Foam", bfPerSheet: 64, basePerSheet: 22800, freightPerSheet: 1080 },
+    { sku: "FOAM-XLPE-RED", desc: 'XLPE 2lb sheet, red, 4×8×2"',     vendor: "Continental Foam", bfPerSheet: 64, basePerSheet: 24800, freightPerSheet: 1080 },
+    { sku: "EVA-38-BLU",    desc: 'EVA 38kg sheet, blue, 4×8×1"',    vendor: "Spectra EVA",     bfPerSheet: 32, basePerSheet: 23140, freightPerSheet: 1180 },
+    { sku: "EVA-38-YEL",    desc: 'EVA 38kg sheet, yellow, 4×8×1"',  vendor: "Spectra EVA",     bfPerSheet: 32, basePerSheet: 23140, freightPerSheet: 1180 }
+  ];
+  const material = sku => MATERIALS.find(m => m.sku === sku);
+  const landedPerSheet = m => m.basePerSheet + m.freightPerSheet;
+  /* Cents per board-foot, carried at four decimals so a 6.5 bf part does not
+     inherit a rounding error from the sheet. */
+  const landedPerBf = m => landedPerSheet(m) / m.bfPerSheet;
+
+  /* Labour is one blended shop rate. Splitting it by operator is precision
+     this business does not have and would not use. */
+  const SHOP_RATE_PER_HOUR = 4800;
+
+  const RECIPES = [
+    { sku: "XRT-40-SFSP", yield: 0.78, laborMin: 6,
+      note: "Round blank from rectangular sheet — nesting yield is the big cost lever",
+      components: [ { material: "FOAM-XLPE-BLU", bf: 2.1 } ],
+      parts: [ { name: "6ft towline, spliced", cost: 220 },
+               { name: "Adjustable buckle harness", cost: 310 },
+               { name: "Brass hardware set", cost: 90 },
+               { name: "Screen print, 1 colour", cost: 110 } ] },
+
+    { sku: "XRT-50-STD", yield: 0.78, laborMin: 6,
+      note: "Same blank geometry as the 40, longer",
+      components: [ { material: "FOAM-XLPE-RED", bf: 2.6 } ],
+      parts: [ { name: "6ft towline, spliced", cost: 220 },
+               { name: "Adjustable buckle harness", cost: 310 },
+               { name: "Brass hardware set", cost: 90 } ] },
+
+    { sku: "PM-6X12-BLU", yield: 0.94, laborMin: 25,
+      note: "Rectangular cut — very little waste, mostly machine time",
+      components: [ { material: "FOAM-XLPE-BLU", bf: 88 } ],
+      parts: [ { name: "Heat-weld edge seal", cost: 1800 },
+               { name: "D-ring anchor set", cost: 2400 } ] },
+
+    { sku: "AM-SC-KB", yield: 0.88, laborMin: 1.5,
+      note: "Nested four-up per sheet",
+      components: [ { material: "EVA-38-BLU", bf: 0.35 } ],
+      parts: [ { name: "Edge radius and sand", cost: 40 } ] }
+  ];
+  const recipe = sku => RECIPES.find(r => r.sku === sku);
+
+  /* Yield divides rather than subtracts, which is the honest way round: to
+     ship 6.5 board-feet of finished part at 78% nesting yield you must buy
+     8.33 board-feet of sheet, and you paid for all of it. */
+  function recipeCost(r) {
+    const materialCost = r.components.reduce((a, c) => {
+      const m = material(c.material);
+      return a + (m ? (c.bf / r.yield) * landedPerBf(m) : 0);
+    }, 0);
+    const scrapCost = r.components.reduce((a, c) => {
+      const m = material(c.material);
+      return a + (m ? (c.bf / r.yield - c.bf) * landedPerBf(m) : 0);
+    }, 0);
+    const partsCost = r.parts.reduce((a, x) => a + x.cost, 0);
+    const laborCost = r.laborMin / 60 * SHOP_RATE_PER_HOUR;
+    const total = materialCost + partsCost + laborCost;
+    const it = item(r.sku);
+    const price = it ? it.price : 0;
+    return {
+      materialCost: Math.round(materialCost),
+      scrapCost: Math.round(scrapCost),
+      partsCost, laborCost: Math.round(laborCost),
+      total: Math.round(total), price,
+      margin: price ? (price - total) / price : 0
+    };
+  }
+
+  const BUILDS = [
+    { no: "BLD-0912", date: "2026-08-19", sku: "XRT-40-SFSP", qty: 35, order: "SO-2041",
+      bfExpected: 94.2, bfActual: 101.6, sheets: 2, operator: "John" },
+    { no: "BLD-0911", date: "2026-08-18", sku: "PM-6X12-BLU", qty: 6,  order: "SO-2040",
+      bfExpected: 561.7, bfActual: 556.0, sheets: 9, operator: "John" },
+    { no: "BLD-0910", date: "2026-08-16", sku: "AM-SC-KB",    qty: 50, order: "SO-2039",
+      bfExpected: 19.9, bfActual: 22.4, sheets: 1, operator: "Dan" },
+    { no: "BLD-0909", date: "2026-08-11", sku: "XRT-50-STD",  qty: 18, order: null,
+      bfExpected: 60.0, bfActual: 60.8, sheets: 1, operator: "John" }
+  ];
+
+  /* Variance against the recipe, in board-feet and in money. A build that
+     consistently runs over is either a bad recipe or a bad nest, and the
+     difference matters. */
+  function buildVariance(b) {
+    const r = recipe(b.sku);
+    const m = r ? material(r.components[0].material) : null;
+    const bf = b.bfActual - b.bfExpected;
+    return { bf, pct: b.bfExpected ? bf / b.bfExpected : 0,
+             cost: Math.round(bf * (m ? landedPerBf(m) : 0)) };
+  }
+
+  /* ─── the ledger ─────────────────────────────────────────────────────
+     Documents are how you describe what happened; the ledger is what actually
+     happened. Every entry below is generated from a document by one function,
+     so there is no way to post something the documents do not justify.      */
+
+  const ACCOUNTS = [
+    { no: "1100", name: "Checking",                   type: "Asset" },
+    { no: "1200", name: "Accounts receivable",        type: "Asset" },
+    { no: "1300", name: "Inventory — raw materials",  type: "Asset" },
+    { no: "1310", name: "Inventory — finished goods", type: "Asset" },
+    { no: "2000", name: "Accounts payable",           type: "Liability" },
+    { no: "2200", name: "Sales tax payable",          type: "Liability" },
+    { no: "3900", name: "Retained earnings",          type: "Equity" },
+    { no: "4100", name: "Sales income",               type: "Income" },
+    { no: "5000", name: "Cost of goods sold",         type: "COGS" },
+    { no: "5100", name: "Manufacturing variance",     type: "COGS" },
+    /* An "applied" account is a contra by nature — it only ever carries a
+       credit balance. Without the flag the trial balance would flag it as
+       wrong every single time, and a warning that is always on is noise. */
+    { no: "5300", name: "Parts and labour applied",   type: "COGS", contra: true },
+    { no: "6100", name: "Shop supplies and packaging",type: "Expense" },
+    { no: "6200", name: "Vehicle and fuel",           type: "Expense" },
+    { no: "6900", name: "Other operating expense",    type: "Expense" }
+  ];
+  const account = no => ACCOUNTS.find(a => a.no === no);
+  /* Normal balance follows from the type. Contra accounts would need their own
+     flag; this book has none yet, and pretending otherwise would be the kind
+     of quiet wrong answer that only shows up at year end. */
+  const normalSide = a => {
+    const base = ["Asset", "COGS", "Expense"].includes(a.type) ? "Dr" : "Cr";
+    return a.contra ? (base === "Dr" ? "Cr" : "Dr") : base;
+  };
+
+  const EXPENSE_ACCOUNT = {
+    "Shop supplies": "6100", "Packaging": "6100",
+    "Vehicle fuel": "6200",
+    "Licences and fees": "6900", "Refuse removal": "6900"
+  };
+
+  /* The posting-rules table. This is accounting policy, not engineering
+     judgement — it is written out in full so it can be argued with. */
+  const POSTING_RULES = [
+    { doc: "Invoice", note: "Revenue when shipped, and the inventory that left with it",
+      lines: [ { acct: "1200", side: "Dr", basis: "Invoice total including tax" },
+               { acct: "4100", side: "Cr", basis: "Net of tax, tagged with the class" },
+               { acct: "2200", side: "Cr", basis: "Sales tax collected, if taxable" },
+               { acct: "5000", side: "Dr", basis: "Cost of the goods shipped" },
+               { acct: "1310", side: "Cr", basis: "Finished goods relieved at unit cost" } ] },
+    { doc: "Customer payment", note: "Money in; no revenue, that already happened",
+      lines: [ { acct: "1100", side: "Dr", basis: "Amount received" },
+               { acct: "1200", side: "Cr", basis: "Applied against invoices, oldest first" } ] },
+    { doc: "Vendor bill", note: "The liability, and where the spend lands",
+      lines: [ { acct: "1300", side: "Dr", basis: "Raw material bills — capitalised, not expensed" },
+               { acct: "2000", side: "Cr", basis: "Bill total" } ] },
+    { doc: "Bill payment", note: "Settling the liability",
+      lines: [ { acct: "2000", side: "Dr", basis: "Amount paid" },
+               { acct: "1100", side: "Cr", basis: "From the account it was paid out of" } ] },
+    { doc: "Vendor credit", note: "Reduces what you owe, and the cost of what you bought",
+      lines: [ { acct: "2000", side: "Dr", basis: "Credit applied to a bill" },
+               { acct: "1300", side: "Cr", basis: "Material cost reduced — the sheets really did cost less" } ] },
+    { doc: "Expense", note: "Non-PO spend, straight to the account",
+      lines: [ { acct: "61xx–69xx", side: "Dr", basis: "By expense account, class optional" },
+               { acct: "1100", side: "Cr", basis: "From the card or account used" } ] },
+    { doc: "Build", note: "Raw foam becomes finished goods; the difference is variance",
+      lines: [ { acct: "1310", side: "Dr", basis: "Quantity built at build-sheet unit cost" },
+               { acct: "1300", side: "Cr", basis: "Board-feet actually consumed, at landed cost" },
+               { acct: "5300", side: "Cr", basis: "Parts and labour applied at standard" },
+               { acct: "5100", side: "Dr/Cr", basis: "The plug — over-consumption is a debit, a good nest is a credit" } ] }
+  ];
+
+  /* The single posting path. Everything in the ledger comes through here, so
+     an unbalanced entry is impossible by construction rather than by test. */
+  function journal() {
+    const entries = [];
+    const push = (date, src, memo, lines) => {
+      const dr = lines.reduce((a, l) => a + (l.dr || 0), 0);
+      const cr = lines.reduce((a, l) => a + (l.cr || 0), 0);
+      entries.push({ date, src, memo, lines, dr, cr, balanced: dr === cr });
+    };
+
+    INVOICES.forEach(i => {
+      const c = cust(i.cust);
+      const taxable = c.tax.startsWith("Taxable");
+      const sub = (i.lines || []).reduce((a, l) => a + l.qty * l.rate, 0);
+      const tax = taxable ? Math.round(sub * 0.06625) : 0;
+      const cogs = (i.lines || []).reduce((a, l) => {
+        const it = item(l.sku);
+        return a + (it && it.type === "Inventory" ? l.qty * it.cost : 0);
+      }, 0);
+      const lines = [ { acct: "1200", dr: sub + tax }, { acct: "4100", cr: sub } ];
+      if (tax) lines.push({ acct: "2200", cr: tax });
+      if (cogs) lines.push({ acct: "5000", dr: cogs }, { acct: "1310", cr: cogs });
+      push(i.date, `Invoice ${i.no}`, c.short, lines);
+    });
+
+    PAYMENTS.forEach(pm => push(pm.date, `Payment ${pm.no}`, cust(pm.cust).short,
+      [ { acct: "1100", dr: pm.amount }, { acct: "1200", cr: pm.amount } ]));
+
+    BILLS.forEach(b => push(b.date, `Bill ${b.no}`, b.vendor,
+      [ { acct: "1300", dr: b.total }, { acct: "2000", cr: b.total } ]));
+
+    BILLPAYMENTS.forEach(x => push(x.date, `Bill payment ${x.no}`, x.vendor,
+      [ { acct: "2000", dr: x.amount }, { acct: "1100", cr: x.amount } ]));
+
+    VENDORCREDITS.forEach(v => (v.applied || []).forEach(a =>
+      push(a.date, `Vendor credit ${v.no}`, `${v.vendor} → ${a.bill}`,
+        [ { acct: "2000", dr: a.amount }, { acct: "1300", cr: a.amount } ])));
+
+    EXPENSES.forEach(e => push(e.date, `Expense ${e.no}`, `${e.payee} · ${e.account}`,
+      [ { acct: EXPENSE_ACCOUNT[e.account] || "6900", dr: e.amount },
+        { acct: "1100", cr: e.amount } ]));
+
+    BUILDS.forEach(b => {
+      const r = recipe(b.sku);
+      if (!r) return;
+      const c = recipeCost(r);
+      const m = material(r.components[0].material);
+      const finished = b.qty * c.total;
+      const rawUsed = Math.round(b.bfActual * (m ? landedPerBf(m) : 0));
+      const applied = b.qty * (c.partsCost + c.laborCost);
+      const variance = finished - rawUsed - applied;
+      const lines = [ { acct: "1310", dr: finished },
+                      { acct: "1300", cr: rawUsed },
+                      { acct: "5300", cr: applied } ];
+      /* A negative variance means the build consumed more than the sheet
+         allowed for, which is a cost — a debit. */
+      if (variance > 0) lines.push({ acct: "5100", cr: variance });
+      else if (variance < 0) lines.push({ acct: "5100", dr: -variance });
+      push(b.date, `Build ${b.no}`, `${b.qty} × ${b.sku}`, lines);
+    });
+
+    return entries.sort((a, b) => b.date.localeCompare(a.date));
+  }
+
+  function trialBalance() {
+    const entries = journal();
+    const map = new Map(ACCOUNTS.map(a => [a.no, { a, dr: 0, cr: 0 }]));
+    entries.forEach(e => e.lines.forEach(l => {
+      const row = map.get(l.acct);
+      if (!row) return;
+      row.dr += l.dr || 0;
+      row.cr += l.cr || 0;
+    }));
+    const rows = [...map.values()].filter(r => r.dr || r.cr).map(r => {
+      const net = r.dr - r.cr;
+      return { ...r, net,
+               side: normalSide(r.a),
+               shown: normalSide(r.a) === "Dr" ? net : -net };
+    });
+    return { rows,
+             dr: rows.reduce((a, r) => a + r.dr, 0),
+             cr: rows.reduce((a, r) => a + r.cr, 0) };
+  }
+
   const VENDORS = [
     { name: "Continental Foam",    terms: "Net 30", is1099: false, contact: "tammy@continentalfoam.com",  city: "Fairfield, NJ",   ytd: 4218400, buys: "XLPE and EVA foam sheet" },
     { name: "Spectra EVA",        terms: "Net 30", is1099: false, contact: "orders@spectraeva.com",     city: "Chino, CA",       ytd: 1884200, buys: "Coloured EVA sheet" },
@@ -1087,11 +1342,14 @@ tbody tr[data-clickable]:hover { background: var(--accent-soft); }
     { id: "customers", label: "Customers",     glyph: "◑", count: () => CUSTOMERS.length },
     { id: "vendors",   label: "Vendors",       glyph: "◒", count: () => VENDORS.length },
     { id: "items",     label: "Items",         glyph: "▦", count: () => ITEMS.length },
+    { id: "recipes",   label: "Build sheets",  glyph: "◧", count: () => RECIPES.length },
+    { id: "builds",    label: "Builds",        glyph: "⬡", count: () => BUILDS.length },
     { id: "pos",       label: "Purchase orders",glyph: "▥", count: () => POS.length },
     { id: "bills",     label: "Bills",         glyph: "▧", count: () => BILLS.length },
     { id: "expenses",  label: "Expenses",      glyph: "▨", count: () => EXPENSES.length },
     { id: "credits",   label: "Vendor credits",glyph: "◐", count: () => VENDORCREDITS.length },
     { id: "payments",  label: "Payments",      glyph: "◍", count: () => PAYMENTS.length },
+    { id: "ledger",    label: "Ledger",        glyph: "≡", count: () => journal().length },
     { id: "failures",  label: "Needs you",     glyph: "▲", count: () => FAILURES.length, alert: true }
   ];
 
@@ -1379,7 +1637,7 @@ tbody tr[data-clickable]:hover { background: var(--accent-soft); }
     rail.appendChild(el("div", "rail-head lbl", "Reports"));
     [["Profit & loss", "▧", "pnl"], ["A/R aging", "▨", "aging"],
      ["Money out", "▤", "payables"], ["Customer credits", "◑", "custcredits"],
-     ["Inventory value", "▩", null]]
+     ["Landed cost", "◭", "costing"], ["Inventory value", "▩", null]]
       .forEach(([label, glyph, view]) => {
         const b = el("button", "rail-item", `<span class="ri-glyph" aria-hidden="true">${glyph}</span><span>${label}</span>`);
         b.setAttribute("aria-current", String(state.view === view));
@@ -2582,6 +2840,341 @@ tbody tr[data-clickable]:hover { background: var(--accent-soft); }
       </div>`;
     },
 
+    recipes() {
+      const rows = RECIPES.map(r => ({ r, c: recipeCost(r) }));
+      return head("Build sheets", "What each product is made of, and what that actually costs") + `
+      <div class="pad">
+        <div class="strip">
+          <div class="strip-cell"><div class="lbl">Products costed</div><div class="strip-val">${RECIPES.length}</div><div class="strip-note">from sheet to finished good</div></div>
+          <div class="strip-cell"><div class="lbl">Blended margin</div><div class="strip-val pos">${Math.round(rows.reduce((a, x) => a + x.c.margin, 0) / rows.length * 100)}%</div><div class="strip-note">unweighted across products</div></div>
+          <div class="strip-cell"><div class="lbl">Cost lost to waste</div><div class="strip-val warn">${money(rows.reduce((a, x) => a + x.c.scrapCost, 0))}</div><div class="strip-note">per one of each, at current yields</div></div>
+          <div class="strip-cell"><div class="lbl">Shop rate</div><div class="strip-val">${money(SHOP_RATE_PER_HOUR)}</div><div class="strip-note">per hour, blended</div></div>
+        </div>
+        <div class="grid-wrap"><div class="grid-scroll"><table>
+          <thead><tr><th>SKU</th><th>Product</th><th class="r">Yield</th><th class="r">Material</th><th class="r">Waste</th><th class="r">Parts</th><th class="r">Labour</th><th class="r">Unit cost</th><th class="r">Price</th><th class="r">Margin</th></tr></thead>
+          <tbody>${rows.map(({ r, c }) => `
+            <tr data-clickable data-recipe="${esc(r.sku)}">
+              <td class="mono">${esc(r.sku)}</td>
+              <td class="trunc dim">${esc((item(r.sku) || {}).desc || "")}</td>
+              <td class="r num" style="color:${r.yield < .8 ? "var(--crit)" : r.yield < .9 ? "var(--warn)" : "var(--ok)"}">${Math.round(r.yield * 100)}%</td>
+              <td class="r num">${plain(c.materialCost)}</td>
+              <td class="r num" style="color:var(--warn)">${plain(c.scrapCost)}</td>
+              <td class="r num dim">${plain(c.partsCost)}</td>
+              <td class="r num dim">${plain(c.laborCost)}</td>
+              <td class="r num" style="font-weight:500">${plain(c.total)}</td>
+              <td class="r num dim">${plain(c.price)}</td>
+              <td class="r num" style="color:${c.margin > .5 ? "var(--ok)" : c.margin > .3 ? "var(--ink)" : "var(--crit)"}">${Math.round(c.margin * 100)}%</td>
+            </tr>`).join("")}</tbody>
+        </table></div></div>
+        <p class="hint">Waste is a column, not a footnote. At 78% nesting yield a rescue tube throws
+        away nearly a third of the foam it is charged for, and that is the single biggest lever on
+        its margin — bigger than the towline, the harness and the labour combined.</p>
+      </div>`;
+    },
+
+    recipe(sku) {
+      const r = recipe(sku) || RECIPES[0];
+      const c = recipeCost(r);
+      const it = item(r.sku);
+      const builds = BUILDS.filter(b => b.sku === r.sku);
+
+      /* What happens to margin if foam moves. The question Dan asks every
+         time Continental Foam sends a price letter. */
+      const sensitivity = [-10, 0, 10, 20].map(pct => {
+        const mat = r.components.reduce((a, x) => {
+          const m = material(x.material);
+          return a + (m ? (x.bf / r.yield) * landedPerBf(m) * (1 + pct / 100) : 0);
+        }, 0);
+        const total = mat + c.partsCost + c.laborCost;
+        return { pct, total: Math.round(total), margin: c.price ? (c.price - total) / c.price : 0 };
+      });
+
+      /* And what a better nest would be worth. */
+      const yieldGain = [0, 5, 10].map(pts => {
+        const y = Math.min(0.99, r.yield + pts / 100);
+        const mat = r.components.reduce((a, x) => {
+          const m = material(x.material);
+          return a + (m ? (x.bf / y) * landedPerBf(m) : 0);
+        }, 0);
+        const total = mat + c.partsCost + c.laborCost;
+        return { y, total: Math.round(total), saved: c.total - Math.round(total) };
+      });
+
+      return head(r.sku, esc((it || {}).desc || ""),
+        `<button class="btn" data-go="recipes">← Back</button>
+         <button class="btn" data-item="${esc(r.sku)}">Item page</button>`) + `
+      <div class="pad">
+        <div class="strip">
+          <div class="strip-cell"><div class="lbl">Unit cost</div><div class="strip-val">${money(c.total)}</div><div class="strip-note">computed, not entered</div></div>
+          <div class="strip-cell"><div class="lbl">Sell price</div><div class="strip-val">${money(c.price)}</div><div class="strip-note">current list</div></div>
+          <div class="strip-cell"><div class="lbl">Gross margin</div><div class="strip-val ${c.margin > .5 ? "pos" : c.margin > .3 ? "" : "neg"}">${Math.round(c.margin * 100)}%</div><div class="strip-note">${money(c.price - c.total)} per unit</div></div>
+          <div class="strip-cell"><div class="lbl">Nesting yield</div><div class="strip-val ${r.yield < .8 ? "neg" : "warn"}">${Math.round(r.yield * 100)}%</div><div class="strip-note">${money(c.scrapCost)} of waste per unit</div></div>
+        </div>
+
+        <div class="split">
+          <div>
+            <div class="panel" style="margin-bottom:14px">
+              <div class="panel-head"><span class="lbl">What goes into one</span>
+                <span class="spacer" style="flex:1"></span>
+                <span class="dim" style="font-size:calc(11px * var(--fs))">${esc(r.note)}</span></div>
+              <div class="grid-scroll"><table>
+                <thead><tr><th>Component</th><th>Source</th><th class="r">Needed</th><th class="r">Bought</th><th class="r">Rate</th><th class="r">Cost</th></tr></thead>
+                <tbody>
+                  ${r.components.map(x => {
+                    const m = material(x.material);
+                    if (!m) return "";
+                    const bought = x.bf / r.yield;
+                    return `<tr>
+                      <td class="mono">${esc(m.sku)}</td>
+                      <td class="trunc dim">${esc(m.vendor)}</td>
+                      <td class="r num">${x.bf.toFixed(1)} bf</td>
+                      <td class="r num" style="color:var(--warn)">${bought.toFixed(2)} bf</td>
+                      <td class="r num dim">${plain(Math.round(landedPerBf(m)))}/bf</td>
+                      <td class="r num">${plain(Math.round(bought * landedPerBf(m)))}</td>
+                    </tr>`; }).join("")}
+                  ${r.parts.map(x => `<tr>
+                      <td>${esc(x.name)}</td><td class="dim">bought part</td>
+                      <td class="r num dim">1</td><td class="r num dim">1</td>
+                      <td class="r num dim">${plain(x.cost)}</td>
+                      <td class="r num">${plain(x.cost)}</td>
+                    </tr>`).join("")}
+                  <tr>
+                    <td>Shop labour</td><td class="dim">${r.laborMin} min at ${plain(SHOP_RATE_PER_HOUR)}/hr</td>
+                    <td class="r num dim">—</td><td class="r num dim">—</td><td class="r num dim">—</td>
+                    <td class="r num">${plain(c.laborCost)}</td>
+                  </tr>
+                  <tr style="border-top:1px solid var(--line)">
+                    <td style="font-weight:600">Unit cost</td><td></td><td></td><td></td><td></td>
+                    <td class="r num" style="font-weight:600">${plain(c.total)}</td>
+                  </tr>
+                </tbody>
+              </table></div>
+              <div class="panel-body" style="border-top:1px solid var(--line)">
+                <p class="hint" style="margin:0">“Needed” is what ends up in the product. “Bought” is
+                what you must buy to get it at ${Math.round(r.yield * 100)}% nesting yield — the gap
+                is offcut, and you paid full price for it.</p>
+              </div>
+            </div>
+
+            ${builds.length ? `<div class="panel">
+              <div class="panel-head"><span class="lbl">Builds of this product</span></div>
+              <div class="grid-scroll"><table>
+                <thead><tr><th>No.</th><th>Date</th><th class="r">Qty</th><th class="r">Expected</th><th class="r">Actual</th><th class="r">Variance</th><th>Operator</th></tr></thead>
+                <tbody>${builds.map(b => { const v = buildVariance(b); return `
+                  <tr data-clickable data-go="builds">
+                    <td class="mono">${b.no}</td><td class="mono dim">${b.date}</td>
+                    <td class="r num">${b.qty}</td>
+                    <td class="r num dim">${b.bfExpected.toFixed(1)}</td>
+                    <td class="r num">${b.bfActual.toFixed(1)}</td>
+                    <td class="r num" style="color:${v.bf > 0 ? "var(--crit)" : "var(--ok)"}">${v.bf > 0 ? "+" : ""}${v.bf.toFixed(1)} bf · ${plain(v.cost)}</td>
+                    <td class="dim">${esc(b.operator)}</td>
+                  </tr>`; }).join("")}</tbody>
+              </table></div>
+            </div>` : ""}
+          </div>
+
+          <div>
+            <div class="panel" style="margin-bottom:14px">
+              <div class="panel-head"><span class="lbl">If foam moves</span></div>
+              <div class="grid-scroll"><table>
+                <thead><tr><th>Change</th><th class="r">Unit cost</th><th class="r">Margin</th></tr></thead>
+                <tbody>${sensitivity.map(x => `
+                  <tr style="${x.pct === 0 ? "background:var(--accent-soft)" : ""}">
+                    <td class="num">${x.pct > 0 ? "+" : ""}${x.pct}%</td>
+                    <td class="r num">${plain(x.total)}</td>
+                    <td class="r num" style="color:${x.margin > .5 ? "var(--ok)" : x.margin > .3 ? "var(--ink)" : "var(--crit)"}">${Math.round(x.margin * 100)}%</td>
+                  </tr>`).join("")}</tbody>
+              </table></div>
+            </div>
+
+            <div class="panel">
+              <div class="panel-head"><span class="lbl">If the nest improves</span></div>
+              <div class="grid-scroll"><table>
+                <thead><tr><th>Yield</th><th class="r">Unit cost</th><th class="r">Saved</th></tr></thead>
+                <tbody>${yieldGain.map(x => `
+                  <tr style="${x.saved === 0 ? "background:var(--accent-soft)" : ""}">
+                    <td class="num">${Math.round(x.y * 100)}%</td>
+                    <td class="r num">${plain(x.total)}</td>
+                    <td class="r num" style="color:${x.saved ? "var(--ok)" : "var(--ink-dim)"}">${x.saved ? plain(x.saved) : "—"}</td>
+                  </tr>`).join("")}</tbody>
+              </table></div>
+              <div class="panel-body" style="border-top:1px solid var(--line)">
+                <p class="hint" style="margin:0">Five points of yield on this part is worth more than
+                a five percent foam discount. Worth knowing which call to make.</p>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>`;
+    },
+
+    builds() {
+      const rows = BUILDS.map(b => ({ b, v: buildVariance(b) }));
+      const overrun = rows.reduce((a, x) => a + Math.max(0, x.v.cost), 0);
+      return head("Builds", "What was actually cut, against what the build sheet said",
+        `<button class="btn btn-primary">Record build</button>`) + `
+      <div class="pad">
+        <div class="strip">
+          <div class="strip-cell"><div class="lbl">Builds</div><div class="strip-val">${BUILDS.length}</div><div class="strip-note">this month</div></div>
+          <div class="strip-cell"><div class="lbl">Foam consumed</div><div class="strip-val">${BUILDS.reduce((a, b) => a + b.bfActual, 0).toFixed(0)}<span style="font-size:calc(14px * var(--fs));color:var(--ink-3)"> bf</span></div><div class="strip-note">${BUILDS.reduce((a, b) => a + b.sheets, 0)} sheets</div></div>
+          <div class="strip-cell"><div class="lbl">Overrun</div><div class="strip-val ${overrun ? "neg" : "pos"}">${money(overrun)}</div><div class="strip-note">above the build sheet</div></div>
+          <div class="strip-cell"><div class="lbl">Worst variance</div><div class="strip-val warn">${Math.round(Math.max(...rows.map(x => x.v.pct)) * 100)}%</div><div class="strip-note">${esc(rows.reduce((a, x) => x.v.pct > a.v.pct ? x : a).b.sku)}</div></div>
+        </div>
+        <div class="grid-wrap"><div class="grid-scroll"><table>
+          <thead><tr><th>No.</th><th>Date</th><th>Product</th><th class="r">Qty</th><th>For</th><th class="r">Sheets</th><th class="r">Expected</th><th class="r">Actual</th><th class="r">Variance</th><th class="r">Cost of variance</th><th>By</th></tr></thead>
+          <tbody>${rows.map(({ b, v }) => `
+            <tr data-clickable data-recipe="${esc(b.sku)}">
+              <td class="mono">${b.no}</td>
+              <td class="mono dim">${b.date}</td>
+              <td class="mono">${esc(b.sku)}</td>
+              <td class="r num">${b.qty}</td>
+              <td>${b.order ? `<span class="tag acc">${b.order}</span>` : '<span class="dim">to stock</span>'}</td>
+              <td class="r num dim">${b.sheets}</td>
+              <td class="r num dim">${b.bfExpected.toFixed(1)}</td>
+              <td class="r num">${b.bfActual.toFixed(1)}</td>
+              <td class="r num" style="color:${v.bf > 0 ? "var(--crit)" : "var(--ok)"}">${v.bf > 0 ? "+" : ""}${v.bf.toFixed(1)} bf</td>
+              <td class="r num" style="color:${v.cost > 0 ? "var(--crit)" : "var(--ok)"}">${v.cost > 0 ? "+" : ""}${plain(v.cost)}</td>
+              <td class="dim">${esc(b.operator)}</td>
+            </tr>`).join("")}</tbody>
+        </table></div></div>
+        <p class="hint">A build that runs over is either a bad nest or a wrong build sheet, and those
+        need different fixes. One overrun is noise; the same product over every time is a recipe that
+        is lying to you.</p>
+      </div>`;
+    },
+
+    costing() {
+      return head("Landed cost", "What a sheet really costs once freight is on it") + `
+      <div class="pad">
+        <div class="grid-wrap" style="margin-bottom:14px"><div class="grid-scroll"><table>
+          <thead><tr><th>Material</th><th>Vendor</th><th class="r">Sheet</th><th class="r">Freight</th><th class="r">Landed</th><th class="r">Board-feet</th><th class="r">Per bf</th><th>Feeds</th></tr></thead>
+          <tbody>${MATERIALS.map(m => {
+            const uses = RECIPES.filter(r => r.components.some(c => c.material === m.sku));
+            return `<tr>
+              <td class="mono">${esc(m.sku)}</td>
+              <td class="dim">${esc(m.vendor)}</td>
+              <td class="r num dim">${plain(m.basePerSheet)}</td>
+              <td class="r num dim">${plain(m.freightPerSheet)}</td>
+              <td class="r num">${plain(landedPerSheet(m))}</td>
+              <td class="r num dim">${m.bfPerSheet}</td>
+              <td class="r num" style="font-weight:500">${plain(Math.round(landedPerBf(m)))}</td>
+              <td>${uses.length ? uses.map(u => `<span class="tag acc">${esc(u.sku)}</span>`).join(" ") : '<span class="dim">nothing yet</span>'}</td>
+            </tr>`; }).join("")}</tbody>
+        </table></div></div>
+        <div class="callout" style="border:1px solid var(--line);border-left:3px solid var(--accent);border-radius:7px;background:var(--surface);padding:12px 15px">
+          <p style="margin:0;font-size:calc(13px * var(--fs))"><strong>Freight is allocated by board-foot, not by line count.</strong>
+          A pallet carrying twelve blue sheets and six red ones does not split its freight in half —
+          it splits by how much foam each colour represents. Allocating by line would quietly make
+          the cheaper material look dearer than it is, and every margin downstream would inherit
+          that error.</p>
+        </div>
+      </div>`;
+    },
+
+    ledger() {
+      const entries = journal();
+      const unbalanced = entries.filter(e => !e.balanced);
+      return head("Ledger", `${entries.length} entries · every one generated from a document`,
+        `<button class="btn" data-go="postingrules">Posting rules</button>
+         <button class="btn" data-go="trial">Trial balance</button>`) + `
+      <div class="pad">
+        <div class="strip">
+          <div class="strip-cell"><div class="lbl">Entries</div><div class="strip-val">${entries.length}</div><div class="strip-note">from documents, none hand-posted</div></div>
+          <div class="strip-cell"><div class="lbl">Total debits</div><div class="strip-val">${money(entries.reduce((a, e) => a + e.dr, 0))}</div><div class="strip-note">across all entries</div></div>
+          <div class="strip-cell"><div class="lbl">Total credits</div><div class="strip-val">${money(entries.reduce((a, e) => a + e.cr, 0))}</div><div class="strip-note">must equal debits</div></div>
+          <div class="strip-cell"><div class="lbl">Out of balance</div><div class="strip-val ${unbalanced.length ? "neg" : "pos"}">${unbalanced.length}</div><div class="strip-note">${unbalanced.length ? "investigate immediately" : "as it must be"}</div></div>
+        </div>
+        <div class="grid-wrap"><div class="grid-scroll"><table>
+          <thead><tr><th>Date</th><th>Source</th><th>Memo</th><th>Account</th><th class="r">Debit</th><th class="r">Credit</th></tr></thead>
+          <tbody>${entries.slice(0, 26).flatMap(e => e.lines.map((l, n) => `
+            <tr style="${n === 0 ? "border-top:1px solid var(--line)" : ""}">
+              <td class="mono dim">${n === 0 ? e.date : ""}</td>
+              <td>${n === 0 ? `<span class="mono">${esc(e.src)}</span>` : ""}</td>
+              <td class="trunc dim">${n === 0 ? esc(e.memo) : ""}</td>
+              <td><span class="mono dim">${l.acct}</span> ${esc((account(l.acct) || {}).name || "")}</td>
+              <td class="r num">${l.dr ? plain(l.dr) : '<span class="dim">—</span>'}</td>
+              <td class="r num">${l.cr ? plain(l.cr) : '<span class="dim">—</span>'}</td>
+            </tr>`)).join("")}</tbody>
+        </table></div></div>
+        <p class="hint">Showing the most recent 26 entries. There is no “new journal entry” button on
+        purpose — an entry that no document justifies is how a book stops meaning anything.</p>
+      </div>`;
+    },
+
+    trial() {
+      const tb = trialBalance();
+      const balanced = tb.dr === tb.cr;
+      return head("Trial balance", "As of 20 August 2026 · accrual basis",
+        `<button class="btn" data-go="ledger">← Ledger</button>`) + `
+      <div class="pad">
+        <div class="strip">
+          <div class="strip-cell"><div class="lbl">Total debits</div><div class="strip-val">${money(tb.dr)}</div><div class="strip-note">${tb.rows.length} accounts with activity</div></div>
+          <div class="strip-cell"><div class="lbl">Total credits</div><div class="strip-val">${money(tb.cr)}</div><div class="strip-note">from the same entries</div></div>
+          <div class="strip-cell"><div class="lbl">Difference</div><div class="strip-val ${balanced ? "pos" : "neg"}">${money(tb.dr - tb.cr)}</div><div class="strip-note">${balanced ? "in balance" : "out of balance — stop"}</div></div>
+        </div>
+        <div class="grid-wrap"><div class="grid-scroll"><table>
+          <thead><tr><th>Acct</th><th>Account</th><th>Type</th><th class="r">Debits</th><th class="r">Credits</th><th class="r">Balance</th><th>Side</th></tr></thead>
+          <tbody>${tb.rows.map(r => `
+            <tr>
+              <td class="mono dim">${r.a.no}</td>
+              <td>${esc(r.a.name)}</td>
+              <td class="dim">${r.a.type}</td>
+              <td class="r num dim">${r.dr ? plain(r.dr) : "—"}</td>
+              <td class="r num dim">${r.cr ? plain(r.cr) : "—"}</td>
+              <td class="r num" style="font-weight:500;color:${r.shown < 0 ? "var(--crit)" : "var(--ink)"}">${plain(Math.abs(r.shown))}</td>
+              <td><span class="tag ${r.shown < 0 ? "crit" : ""}">${r.shown < 0 ? "contra " + r.side.toLowerCase() : r.side.toLowerCase()}</span></td>
+            </tr>`).join("")}
+            <tr style="border-top:1px solid var(--line)">
+              <td></td><td style="font-weight:600">Total</td><td></td>
+              <td class="r num" style="font-weight:600">${plain(tb.dr)}</td>
+              <td class="r num" style="font-weight:600">${plain(tb.cr)}</td>
+              <td class="r num" style="font-weight:600;color:${balanced ? "var(--ok)" : "var(--crit)"}">${balanced ? "in balance" : plain(tb.dr - tb.cr)}</td>
+              <td></td>
+            </tr></tbody>
+        </table></div></div>
+        <p class="hint"><strong>Why two inventory accounts read contra.</strong> This dataset has no
+        opening balances — it starts mid-year, so goods shipped and built before the window relieve
+        inventory that was never brought in. A real book opens with the closing balances of the year
+        before and both accounts sit on the correct side. Everywhere else, a contra balance means a
+        posting rule is pointing at the wrong account and is worth reading before it reaches a
+        statement.</p>
+      </div>`;
+    },
+
+    postingrules() {
+      return head("Posting rules", "How each document becomes debits and credits",
+        `<button class="btn" data-go="ledger">← Ledger</button>`) + `
+      <div class="pad">
+        <div class="callout" style="border:1px solid var(--line);border-left:3px solid var(--accent);border-radius:7px;background:var(--surface);padding:12px 15px;margin-bottom:16px">
+          <p style="margin:0;font-size:calc(13px * var(--fs))">This table is accounting policy, not
+          engineering judgement, and it is the part that needs a real review. Every entry in the
+          ledger is generated from these rules by one function — so if a rule here is wrong, it is
+          wrong everywhere and consistently, which is at least easier to find than wrong occasionally.</p>
+        </div>
+        ${POSTING_RULES.map(rule => `
+          <div class="panel" style="margin-bottom:12px">
+            <div class="panel-head"><span class="lbl">${esc(rule.doc)}</span>
+              <span class="spacer" style="flex:1"></span>
+              <span class="dim" style="font-size:calc(11.5px * var(--fs))">${esc(rule.note)}</span></div>
+            <div class="grid-scroll"><table>
+              <thead><tr><th style="width:64px">Acct</th><th>Account</th><th style="width:64px">Side</th><th>Amount</th></tr></thead>
+              <tbody>${rule.lines.map(l => `
+                <tr>
+                  <td class="mono dim">${esc(l.acct)}</td>
+                  <td>${esc((account(l.acct) || {}).name || "By expense account")}</td>
+                  <td><span class="tag ${l.side === "Dr" ? "" : l.side === "Cr" ? "acc" : "warn"}">${esc(l.side)}</span></td>
+                  <td class="dim">${esc(l.basis)}</td>
+                </tr>`).join("")}</tbody>
+            </table></div>
+          </div>`).join("")}
+        <p class="hint">Three of these encode decisions I made rather than read off a document, and
+        they are the ones to challenge first: raw material bills capitalise to inventory rather than
+        expensing; a vendor credit reduces material cost rather than posting to other income; and
+        build variance is a plug against manufacturing variance rather than being spread back over
+        unit cost.</p>
+      </div>`;
+    },
+
     failures() {
       return head("Needs you", "Writes QuickBooks would not take. Nothing was dropped and nothing was merged behind your back.") + `
       <div class="pad">
@@ -2675,6 +3268,7 @@ tbody tr[data-clickable]:hover { background: var(--accent-soft); }
     document.querySelectorAll("[data-item]").forEach(r => r.onclick = () => go("item", r.dataset.item));
     document.querySelectorAll("[data-vendor]").forEach(r => r.onclick = () => go("vendor", r.dataset.vendor));
     document.querySelectorAll("[data-order]").forEach(r => r.onclick = () => go("order", r.dataset.order));
+    document.querySelectorAll("[data-recipe]").forEach(r => r.onclick = e => { e.stopPropagation(); go("recipe", r.dataset.recipe); });
     document.querySelectorAll("[data-stage]").forEach(b => b.onclick = () => go("orders", b.dataset.stage === "all" ? null : b.dataset.stage));
     document.querySelectorAll("[data-advance]").forEach(b => b.onclick = () => advanceOrder(b.dataset.advance));
     document.querySelectorAll("[data-billorder]").forEach(b => b.onclick = () => invoiceOrder(b.dataset.billorder));

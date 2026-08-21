@@ -124,3 +124,40 @@ every invoice and estimate the SKU appears on. A SKU page that cannot answer
 customer and bucket. Both computed from documents rather than stored totals.
 The P&L bars are gross margin, not revenue: a line can be large and thin or
 small and fat, and those are different questions.
+
+## Manufacturing
+
+The block no tier of QuickBooks Online answers. The design idea is that
+**cost flows from the sheet to the finished product automatically**, so moving
+a foam price re-prices every product that uses it.
+
+- **Landed cost** — a sheet's true cost is base plus freight, and freight is
+  allocated by board-foot rather than by line count. Splitting a mixed pallet
+  evenly would quietly make the cheaper material look dearer, and every margin
+  downstream would inherit that error.
+- **Build sheets** — components, bought parts and labour rolled into a unit
+  cost. Yield *divides* rather than subtracts: to ship 2.1 board-feet of part
+  at 78% nesting yield you must buy 2.69, and you paid for all of it. Waste is
+  a column, not a footnote.
+- **Sensitivity** — what a foam price move does to margin, and what better
+  nesting is worth. On a rescue tube, five points of yield beats a five percent
+  foam discount.
+- **Builds** — what was actually cut against what the sheet said, with the
+  variance priced. One overrun is noise; the same product over every time is a
+  recipe that is lying to you.
+
+## The ledger
+
+Documents describe what happened; the ledger is what happened. Every entry is
+generated from a document by one function, so an entry no document justifies is
+not expressible — there is deliberately no "new journal entry" button.
+
+- **Posting rules** are written out as a reviewable table. This is accounting
+  policy rather than engineering judgement, and three rules encode decisions
+  that need challenging: raw material bills capitalise to inventory rather than
+  expensing, a vendor credit reduces material cost rather than posting to other
+  income, and build variance is a plug against manufacturing variance rather
+  than being spread back over unit cost.
+- **Trial balance** balances by construction. Accounts that drift to the wrong
+  side are flagged contra, which is a real signal — except for genuine contra
+  accounts, which carry a flag so the warning is not always on.
