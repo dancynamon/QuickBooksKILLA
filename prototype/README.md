@@ -161,3 +161,30 @@ not expressible — there is deliberately no "new journal entry" button.
 - **Trial balance** balances by construction. Accounts that drift to the wrong
   side are flagged contra, which is a real signal — except for genuine contra
   accounts, which carry a flag so the warning is not always on.
+
+## Live snapshots
+
+The prototype's data is entirely fictional and safe to share. Separately, a
+point-in-time pull of the real Aquamentor book can be generated and published
+as its own private artifact, so the shareable demo and the real figures never
+live in the same page.
+
+Those snapshots are **deliberately not committed**. They contain customer
+names, balances and purchase-order numbers; a private repository is still
+permanent and may later be shared with a contractor. `.gitignore` covers the
+filenames.
+
+To refresh one, ask in a session connected to QuickBooks — the pull and
+republish takes about a minute and keeps the artifact's URL.
+
+Three ways to stay current, in order of effort:
+
+1. **Ask for a refresh** — manual, about a minute, good for a weekly look.
+2. **Scheduled refresh** — the same pull on a routine, so it is current when
+   opened. Still a snapshot.
+3. **Real sync** — `qbo-local`, the Rust application. The only option where the
+   data is genuinely live rather than as-of.
+
+A published page cannot poll QuickBooks itself: the artifact runtime can call
+claude.ai connectors, but a session-level MCP server does not qualify, and a
+page declaring connector access cannot be shared at all.
