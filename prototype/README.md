@@ -4,7 +4,7 @@ A visual prototype of the app `qbo-local` is being built toward. Named BunzBooks
 with a sesame-bun wordmark. Single
 self-contained HTML file, no build step, no dependencies: open it in a browser.
 
-**All data is fictional**, though shaped after the real Aquamentor book —
+**All data is fictional**, though shaped after the real Harborworks book —
 aquatic safety equipment, foam fabrication, CNC and UV job work, and the class
 dimension (`DESIGN.md` §2.4) running through every document and line.
 
