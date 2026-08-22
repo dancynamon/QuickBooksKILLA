@@ -50,23 +50,23 @@ Sources: [Intuit CDC blog](https://blogs.intuit.com/2023/08/24/building-smarter-
 [Satva rate limits](https://satvasolutions.com/blog/quickbooks-online-api-limitations-guide) ·
 [Truto integration guide](https://truto.one/blog/how-to-integrate-with-the-quickbooks-online-api-2026-guide/)
 
-### Measured scale (Aquamentor, live, 16 Aug 2026)
+### Measured scale
 
-| | |
-|---|---|
-| Oldest invoice | 22 Mar 2012 (#9665) |
-| Newest invoice | 15 Aug 2026 (#21234) |
-| Invoices | ~9,200 over 14.5 years |
-| Highest internal txn id | 94,450 (all transaction types share one sequence) |
+Measured against the live book in August 2026: roughly nine thousand invoices
+going back to 2012, and tens of thousands of documents once every transaction
+type is counted. At a few KB of raw JSON each that is a few hundred MB for
+complete history — small enough that mirroring everything is the cheap option,
+which is why §3.1 does.
 
-Total documents across all types is in the tens of thousands. At a few KB of raw
-JSON each this is a few hundred MB for complete history — small enough that
-mirroring everything is the cheap option, which is why §3.1 does.
+Exact counts, document numbers and internal ids are deliberately not recorded
+here. Re-measure against the live book when the number actually matters; the
+sizing decision holds at this precision.
 
-WaterLine CNC was not measured and is not being sized — Dan's call, 16 Aug 2026.
-Aquamentor is the larger and older book, so it is the binding constraint on
-sync time and disk anyway; WaterLine syncs through the same code path with its
-own realm-scoped budget and needs no separate design accommodation.
+The second realm was not measured and is not being sized — Dan's call, 16 Aug
+2026. The primary book is the larger and older of the two, so it is the binding
+constraint on sync time and disk anyway; the second syncs through the same code
+path with its own realm-scoped budget and needs no separate design
+accommodation.
 
 ---
 
