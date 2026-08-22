@@ -28,14 +28,11 @@ credentials/
 audit-*.jsonl
 rotation-*.jsonl
 
-# Real book data. Snapshots pulled from live QuickBooks carry customer names,
-# balances and purchase-order numbers. A private repo is still permanent and
-# may later be shared with a contractor; real financial data does not go in it.
-live-snapshot.html
-ar.json
-inv.json
-snapshot-*.html
-*-live-*.json
+# Everything pulled from the live book lives here and none of it is tracked.
+# Snapshots carry customer names, balances and purchase-order numbers; a
+# private repo is still permanent and may later be shared with a contractor.
+# One ignored directory beats a list of filenames someone will forget to add to.
+.local/
 
 # OS
 .DS_Store

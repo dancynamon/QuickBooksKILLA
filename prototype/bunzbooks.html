@@ -675,7 +675,7 @@ tbody tr[data-clickable]:hover { background: var(--accent-soft); }
 
     <button class="co" id="coBtn" title="Switch company">
       <span class="co-dot" id="coDot"></span>
-      <span class="co-name" id="coName">Aquamentor, Inc.</span>
+      <span class="co-name" id="coName">Harborworks, Inc.</span>
       <span class="co-realm" id="coRealm">1234567890123456</span>
       <span class="co-caret" aria-hidden="true">▾</span>
     </button>
@@ -751,7 +751,7 @@ tbody tr[data-clickable]:hover { background: var(--accent-soft); }
   "use strict";
 
   /* ─── data ────────────────────────────────────────────────────────────
-     Dummy data, shaped after the real Aquamentor book: aquatic safety
+     Dummy data, shaped after the real Harborworks book: aquatic safety
      equipment, foam fabrication, and CNC/UV job work.                   */
 
   const money = c => (c / 100).toLocaleString("en-US", { style: "currency", currency: "USD" });
@@ -768,15 +768,15 @@ tbody tr[data-clickable]:hover { background: var(--accent-soft); }
   const cls = id => CLASSES.find(c => c.id === id);
 
   const CUSTOMERS = [
-    { id: "c1", name: "BLUE HARBOR SWIM SCHOOLS", short: "Blue Harbor Swim", terms: "Net 30", bal: 742400, ytd: 8841200, tax: "Exempt — resale", city: "Denver, CO" },
+    { id: "c1", name: "BLUE HARBOR SWIM SCHOOLS", short: "Blue Harbor Swim", terms: "Net 30", bal: 742400, ytd: 8841200, tax: "Exempt — resale", city: "Boulder, CO" },
     { id: "c2", name: "FAIRVIEW COUNTY PARKS & REC.", short: "Fairview County Parks", terms: "Net 30", bal: 189500, ytd: 2214000, tax: "Exempt — government", city: "Ellisburg, NJ" },
-    { id: "c3", name: "LAKESHORE COMMUNITY CENTER", short: "Lakeshore Community", terms: "Net 30", bal: 0, ytd: 1663500, tax: "Exempt — nonprofit", city: "Freehold, NJ" },
-    { id: "c4", name: "RIDGELINE AQUATICS & FITNESS", short: "Ridgeline Aquatics", terms: "Net 15", bal: 318750, ytd: 942300, tax: "Taxable — NJ 6.625%", city: "Hampton, NJ" },
-    { id: "c5", name: "HARBORVIEW SIGNWORKS", short: "Harborview Signs", terms: "Net 30", bal: 445000, ytd: 3120800, tax: "Exempt — resale", city: "Brooklyn, NY" },
-    { id: "c6", name: "NORTHGATE AQUATIC SUPPLY", short: "Northgate Aquatic", terms: "Net 45", bal: 1289900, ytd: 6402100, tax: "Exempt — resale", city: "Zion, IL" },
+    { id: "c3", name: "LAKESHORE COMMUNITY CENTER", short: "Lakeshore Community", terms: "Net 30", bal: 0, ytd: 1663500, tax: "Exempt — nonprofit", city: "Millbrook, NJ" },
+    { id: "c4", name: "RIDGELINE AQUATICS & FITNESS", short: "Ridgeline Aquatics", terms: "Net 15", bal: 318750, ytd: 942300, tax: "Taxable — NJ 6.625%", city: "Ridgefield, NJ" },
+    { id: "c5", name: "HARBORVIEW SIGNWORKS", short: "Harborview Signs", terms: "Net 30", bal: 445000, ytd: 3120800, tax: "Exempt — resale", city: "Yonkers, NY" },
+    { id: "c6", name: "NORTHGATE AQUATIC SUPPLY", short: "Northgate Aquatic", terms: "Net 45", bal: 1289900, ytd: 6402100, tax: "Exempt — resale", city: "Kenosha, WI" },
     { id: "c7", name: "TOWNSHIP OF ELLISBURG REC", short: "Ellisburg Rec", terms: "Net 30", bal: 62400, ytd: 588000, tax: "Exempt — government", city: "Ellisburg, NJ" },
-    { id: "c8", name: "SUMMIT SPORTS OUTFITTERS", short: "Summit Sports", terms: "Net 30", bal: 0, ytd: 412800, tax: "Taxable — NJ 6.625%", city: "Wake Forest, NC" },
-    { id: "c9", name: "TIDEWATER BRAND", short: "Tidewater Brand", terms: "Net 30", bal: 0, ytd: 738400, tax: "Exempt — resale", city: "Kailua, HI" }
+    { id: "c8", name: "SUMMIT SPORTS OUTFITTERS", short: "Summit Sports", terms: "Net 30", bal: 0, ytd: 412800, tax: "Taxable — NJ 6.625%", city: "Cary, NC" },
+    { id: "c9", name: "TIDEWATER BRAND", short: "Tidewater Brand", terms: "Net 30", bal: 0, ytd: 738400, tax: "Exempt — resale", city: "Wailea, HI" }
   ];
   const cust = id => CUSTOMERS.find(c => c.id === id);
 
@@ -853,7 +853,7 @@ tbody tr[data-clickable]:hover { background: var(--accent-soft); }
                { sku: "EVA-38-YEL", desc: "EVA sheet 38kg, yellow", qty: 8,  recd: 0,  rate: 23140 } ],
       receipts: [ { date: "2026-08-14", ref: "EC-11902", note: "Blue only — yellow backordered to 29 Aug" } ] },
     { no: "PO-4468", date: "2026-08-05", vendor: "Aquabot Systems",    cls: "drop", total: 39900,   bill: "BILL-2284", forInvoice: null,
-      lines: [ { sku: "MAY-9995670", desc: "Dolphin drive motor assembly", qty: 1, recd: 1, rate: 39900 } ],
+      lines: [ { sku: "AQB-9995670", desc: "Robotic cleaner drive motor", qty: 1, recd: 1, rate: 39900 } ],
       receipts: [ { date: "2026-08-07", ref: "MT-55118", note: "Complete" } ] },
     { no: "PO-4467", date: "2026-07-31", vendor: "Polymer Source",   cls: "foam", total: 918400,  bill: null,       forInvoice: null,
       lines: [ { sku: "RES-PE-NAT", desc: "PE resin, natural, 55lb bag", qty: 24, recd: 0, rate: 38266 } ],
@@ -1026,7 +1026,7 @@ tbody tr[data-clickable]:hover { background: var(--accent-soft); }
   const attachmentsFor = doc => ATTACHMENTS.filter(a => a.doc === doc);
 
   /* ─── manufacturing ──────────────────────────────────────────────────
-     Aquamentor buys foam by the sheet and sells shapes cut out of it. The
+     Harborworks buys foam by the sheet and sells shapes cut out of it. The
      whole costing chain is: what a sheet landed at → what a board-foot of it
      costs → how many board-feet a part consumes once nesting waste is counted
      → what the finished product costs. QuickBooks makes you type a cost onto
@@ -1306,12 +1306,12 @@ tbody tr[data-clickable]:hover { background: var(--accent-soft); }
   }
 
   const VENDORS = [
-    { name: "Continental Foam",    terms: "Net 30", is1099: false, contact: "tammy@continentalfoam.com",  city: "Fairfield, NJ",   ytd: 4218400, buys: "XLPE and EVA foam sheet" },
-    { name: "Spectra EVA",        terms: "Net 30", is1099: false, contact: "orders@spectraeva.com",     city: "Chino, CA",       ytd: 1884200, buys: "Coloured EVA sheet" },
-    { name: "Polymer Source",   terms: "Net 45", is1099: false, contact: "ap@polymersource.com",            city: "Dalton, GA",      ytd: 2740800, buys: "PE resin" },
-    { name: "Poolcraft Products", terms: "Net 30", is1099: false, contact: "tammy@poolcraft.com", city: "Lakewood, NJ",  ytd: 318600,  buys: "Pool hardware, dropship" },
-    { name: "Aquabot Systems",    terms: "Net 30", is1099: false, contact: "dealers@aquabot.com",   city: "Norcross, GA",    ytd: 486200,  buys: "Dolphin spare parts, dropship" },
-    { name: "M. Alvarez Fabrication", terms: "Due on receipt", is1099: true, contact: "alvarezfab@gmail.com", city: "Elizabeth, NJ", ytd: 942000, buys: "Chair frame fabrication" }
+    { name: "Continental Foam",    terms: "Net 30", is1099: false, contact: "orders@continentalfoam.example",  city: "Fairfield, NJ",   ytd: 4218400, buys: "XLPE and EVA foam sheet" },
+    { name: "Spectra EVA",        terms: "Net 30", is1099: false, contact: "sales@spectraeva.example",     city: "Chino, CA",       ytd: 1884200, buys: "Coloured EVA sheet" },
+    { name: "Polymer Source",   terms: "Net 45", is1099: false, contact: "ap@polymersource.example",            city: "Dalton, GA",      ytd: 2740800, buys: "PE resin" },
+    { name: "Poolcraft Products", terms: "Net 30", is1099: false, contact: "orders@poolcraft.example", city: "Lakewood, NJ",  ytd: 318600,  buys: "Pool hardware, dropship" },
+    { name: "Aquabot Systems",    terms: "Net 30", is1099: false, contact: "dealers@aquabot.example",   city: "Norcross, GA",    ytd: 486200,  buys: "Dolphin spare parts, dropship" },
+    { name: "M. Alvarez Fabrication", terms: "Due on receipt", is1099: true, contact: "shop@alvarezfab.example", city: "Elizabeth, NJ", ytd: 942000, buys: "Chair frame fabrication" }
   ];
   const vendor = name => VENDORS.find(v => v.name === name);
 
@@ -1649,7 +1649,7 @@ tbody tr[data-clickable]:hover { background: var(--accent-soft); }
   function renderRail() {
     const rail = $("#rail");
     rail.innerHTML = "";
-    rail.appendChild(el("div", "rail-head lbl", "Aquamentor"));
+    rail.appendChild(el("div", "rail-head lbl", "Harborworks"));
     NAV.forEach(n => {
       const b = el("button", "rail-item");
       b.setAttribute("aria-current", String(state.view === n.id));
@@ -3714,12 +3714,12 @@ tbody tr[data-clickable]:hover { background: var(--accent-soft); }
   $("#darkBtn").onclick  = () => setTheme("dark", true);
 
   $("#coBtn").onclick = () => {
-    const aqua = $("#coName").textContent.startsWith("Aquamentor");
-    $("#coName").textContent = aqua ? "WaterLine CNC" : "Aquamentor, Inc.";
+    const aqua = $("#coName").textContent.startsWith("Harborworks");
+    $("#coName").textContent = aqua ? "Shoreline CNC" : "Harborworks, Inc.";
     $("#coRealm").textContent = aqua ? "1234567890123457" : "1234567890123456";
     $("#coDot").style.background = aqua ? "var(--ok)" : "var(--accent)";
     $("#sbRows").textContent = aqua ? "6,204" : "41,882";
-    toast(`Switched to ${aqua ? "WaterLine CNC" : "Aquamentor"} — separate books, nothing shared`, readMs() + " ms");
+    toast(`Switched to ${aqua ? "Shoreline CNC" : "Harborworks"} — separate books, nothing shared`, readMs() + " ms");
   };
 
   setInterval(() => {

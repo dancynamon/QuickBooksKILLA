@@ -1,0 +1,140 @@
+<title>Aquamentor Live Snapshot</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans+Condensed:wght@600;700&family=IBM+Plex+Sans:wght@400;450;500;600;700&display=swap">
+<style>
+:root {
+  --ground:#EEF3F6; --surface:#FFFFFF; --surface-2:#E4EBF0; --line:#CBD8E1; --line-soft:#DFE7ED;
+  --ink:#0B1720; --ink-2:#3D5666; --ink-3:#64798A; --ink-dim:#4E6675;
+  --accent:#C8481F; --accent-soft:rgba(200,72,31,.10); --accent-line:rgba(200,72,31,.34);
+  --ok:#197552; --ok-soft:rgba(25,117,82,.12);
+  --warn:#9A5D0C; --warn-soft:rgba(154,93,12,.13);
+  --crit:#B22F22; --crit-soft:rgba(178,47,34,.12);
+  --bun-top:#E39B3A; --bun-seed:#FFF1D6; --bun-fill:#8C4A28; --bun-heel:#D2872B;
+  --sans:"IBM Plex Sans",ui-sans-serif,system-ui,sans-serif;
+  --cond:"IBM Plex Sans Condensed","IBM Plex Sans",ui-sans-serif,system-ui,sans-serif;
+  --mono:"IBM Plex Mono",ui-monospace,Menlo,monospace;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --ground:#0A1118; --surface:#0F1A22; --surface-2:#15232D; --line:#21353F; --line-soft:#182833;
+  --ink:#E9F1F6; --ink-2:#A8BECB; --ink-3:#7A91A1; --ink-dim:#9CB2C0;
+  --accent:#FF7A45; --accent-soft:rgba(255,122,69,.13); --accent-line:rgba(255,122,69,.40);
+  --ok:#3DC694; --ok-soft:rgba(61,198,148,.13);
+  --warn:#E3A340; --warn-soft:rgba(227,163,64,.13);
+  --crit:#F4695B; --crit-soft:rgba(244,105,91,.13);
+  --bun-top:#F0A94A; --bun-seed:#FFF6E4; --bun-fill:#A85A31; --bun-heel:#DE9236;
+} }
+:root[data-theme="dark"] {
+  --ground:#0A1118; --surface:#0F1A22; --surface-2:#15232D; --line:#21353F; --line-soft:#182833;
+  --ink:#E9F1F6; --ink-2:#A8BECB; --ink-3:#7A91A1; --ink-dim:#9CB2C0;
+  --accent:#FF7A45; --accent-soft:rgba(255,122,69,.13); --accent-line:rgba(255,122,69,.40);
+  --ok:#3DC694; --ok-soft:rgba(61,198,148,.13);
+  --warn:#E3A340; --warn-soft:rgba(227,163,64,.13);
+  --crit:#F4695B; --crit-soft:rgba(244,105,91,.13);
+  --bun-top:#F0A94A; --bun-seed:#FFF6E4; --bun-fill:#A85A31; --bun-heel:#DE9236;
+}
+*,*::before,*::after { box-sizing:border-box; }
+body { margin:0; background:var(--ground); color:var(--ink); font-family:var(--sans);
+  font-weight:450; font-size:14.5px; line-height:1.55; }
+.wrap { max-width:1180px; margin:0 auto; padding:34px 20px 70px; }
+.mast { display:flex; align-items:center; gap:10px; margin-bottom:22px; }
+.bun { width:28px; height:26px; flex:none; }
+.mast b { font-weight:600; } .mast span { color:var(--ink-3); }
+h1 { font-size:clamp(26px,4vw,36px); line-height:1.12; letter-spacing:-.026em; margin:0 0 8px; text-wrap:balance; }
+.deck { color:var(--ink-2); max-width:70ch; margin:0 0 6px; font-size:16px; }
+.stamp { font-family:var(--mono); font-size:12px; color:var(--ink-3); }
+h2 { font-size:19px; letter-spacing:-.016em; margin:38px 0 4px; padding-top:18px; border-top:1px solid var(--line); }
+p { margin:0 0 11px; max-width:72ch; }
+.lbl { font-family:var(--cond); font-size:10.5px; font-weight:700; letter-spacing:.11em; text-transform:uppercase; color:var(--ink-3); }
+.strip { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr));
+  border:1px solid var(--line); border-radius:8px; overflow:hidden; background:var(--surface); margin:16px 0; }
+.cell { padding:11px 13px; border-right:1px solid var(--line-soft); }
+.cell:last-child { border-right:none; }
+.val { font-family:var(--mono); font-variant-numeric:tabular-nums; font-size:21px; font-weight:500; letter-spacing:-.02em; margin-top:2px; }
+.val.neg { color:var(--crit); } .val.pos { color:var(--ok); } .val.warn { color:var(--warn); }
+.note { font-size:12px; color:var(--ink-dim); margin-top:1px; }
+.tablewrap { border:1px solid var(--line); border-radius:8px; background:var(--surface); overflow:hidden; margin:14px 0; }
+.scroll { overflow-x:auto; max-height:620px; overflow-y:auto; }
+table { border-collapse:collapse; width:100%; font-size:13px; }
+thead th { position:sticky; top:0; z-index:2; background:var(--surface-2); color:var(--ink-2);
+  font-family:var(--cond); font-size:10.5px; font-weight:700; letter-spacing:.09em; text-transform:uppercase;
+  text-align:left; padding:8px 10px; white-space:nowrap; border-bottom:1px solid var(--line); }
+tbody td { padding:6px 10px; border-bottom:1px solid var(--line-soft); white-space:nowrap; }
+tbody tr:hover { background:var(--accent-soft); }
+.r { text-align:right; } .dim { color:var(--ink-dim); }
+.num { font-family:var(--mono); font-variant-numeric:tabular-nums; }
+.trunc { max-width:270px; overflow:hidden; text-overflow:ellipsis; }
+.tag-ok,.tag-warn,.tag-crit { display:inline-block; padding:1px 6px; border-radius:3px;
+  font-family:var(--cond); font-size:10.5px; font-weight:700; letter-spacing:.05em; border:1px solid; }
+.tag-ok { color:var(--ok); background:var(--ok-soft); border-color:color-mix(in srgb,var(--ok) 32%,transparent); }
+.tag-warn { color:var(--warn); background:var(--warn-soft); border-color:color-mix(in srgb,var(--warn) 34%,transparent); }
+.tag-crit { color:var(--crit); background:var(--crit-soft); border-color:color-mix(in srgb,var(--crit) 34%,transparent); }
+.callout { border:1px solid var(--line); border-left:3px solid var(--accent); border-radius:7px;
+  background:var(--surface); padding:13px 16px; margin:16px 0; }
+.callout.warn { border-left-color:var(--warn); }
+.callout p:last-child { margin-bottom:0; }
+ol { max-width:72ch; padding-left:20px; } li { margin-bottom:7px; }
+footer { margin-top:40px; padding-top:16px; border-top:1px solid var(--line); color:var(--ink-3); font-size:12.5px; }
+</style>
+<div class="wrap">
+  <div class="mast">
+    <svg class="bun" viewBox="0 0 26 24" aria-hidden="true">
+      <path d="M2.4 11.6C2.4 5.9 7.1 2.2 13 2.2s10.6 3.7 10.6 9.4a1.5 1.5 0 0 1-1.5 1.5H3.9a1.5 1.5 0 0 1-1.5-1.5Z" fill="var(--bun-top)"/>
+      <ellipse cx="8.2" cy="8.1" rx="1.35" ry=".78" fill="var(--bun-seed)" transform="rotate(-22 8.2 8.1)"/>
+      <ellipse cx="13" cy="6.1" rx="1.35" ry=".78" fill="var(--bun-seed)" transform="rotate(6 13 6.1)"/>
+      <ellipse cx="17.8" cy="8.1" rx="1.35" ry=".78" fill="var(--bun-seed)" transform="rotate(22 17.8 8.1)"/>
+      <rect x="1.7" y="13.6" width="22.6" height="3.5" rx="1.75" fill="var(--bun-fill)"/>
+      <path d="M3.2 18.2h19.6a1.3 1.3 0 0 1 1.3 1.3c0 1.4-1.1 2.4-2.5 2.4H4.4c-1.4 0-2.5-1-2.5-2.4a1.3 1.3 0 0 1 1.3-1.3Z" fill="var(--bun-heel)"/>
+    </svg>
+    <div><b>Bunz</b><span>Books</span> <span style="margin-left:6px">live snapshot</span></div>
+  </div>
+
+  <h1>Your real book, side by side with QuickBooks</h1>
+  <p class="deck">A point-in-time pull from Aquamentor's live QuickBooks, laid out the way BunzBooks
+  would show it. Open this next to QBO and the same numbers should appear in both.</p>
+  <p class="stamp">Aquamentor, Inc. · realm 1234567890123456 · accrual basis · pulled {{PULLED}}</p>
+
+  <div class="callout warn">
+    <p><strong>This page contains real financial data</strong> — customer names, balances and
+    purchase-order numbers from the live book. The demo prototype is entirely fictional and safe to
+    share; this one is not. Keep it private.</p>
+  </div>
+
+  <h2>Receivables</h2>
+  <div class="strip">
+    <div class="cell"><div class="lbl">Total owed to you</div><div class="val">${{TOTAL}}</div><div class="note">{{CUSTOMERS}} customers carrying a balance</div></div>
+    <div class="cell"><div class="lbl">Current</div><div class="val pos">${{CURRENT}}</div><div class="note">not yet due</div></div>
+    <div class="cell"><div class="lbl">Overdue</div><div class="val neg">${{OVERDUE}}</div><div class="note">{{OVERDUE_PCT}}% across {{LATE_COUNT}} customers</div></div>
+  </div>
+
+  <div class="tablewrap"><div class="scroll"><table>
+    <thead><tr><th>Customer</th><th class="r">Current</th><th class="r">1–30</th><th class="r">31–60</th><th class="r">61–90</th><th class="r">91+</th><th class="r">Total</th><th>State</th></tr></thead>
+    <tbody>{{AR_ROWS}}</tbody>
+  </table></div></div>
+  <p class="dim" style="font-size:13px">Every customer with an open balance, largest first. Scroll inside the table.</p>
+
+  <h2>Recent invoices</h2>
+  <div class="strip">
+    <div class="cell"><div class="lbl">Invoices</div><div class="val">{{INV_COUNT}}</div><div class="note">most recent pulled</div></div>
+    <div class="cell"><div class="lbl">Billed</div><div class="val">${{INV_BILLED}}</div><div class="note">across the period</div></div>
+    <div class="cell"><div class="lbl">Still open</div><div class="val warn">${{INV_OPEN}}</div><div class="note">unpaid balance</div></div>
+    <div class="cell"><div class="lbl">Carrying a customer PO</div><div class="val">{{INV_WITH_PO}}</div><div class="note">searchable in BunzBooks</div></div>
+  </div>
+
+  <div class="tablewrap"><div class="scroll"><table>
+    <thead><tr><th>No.</th><th>Date</th><th>Customer</th><th>Customer PO</th><th class="r">Total</th><th class="r">Balance</th><th>State</th></tr></thead>
+    <tbody>{{INV_ROWS}}</tbody>
+  </table></div></div>
+
+  <h2>Keeping it current</h2>
+  <p>This page is rebuilt by <code>tools/build-snapshot.py</code> from extracts in
+  <code>.local/qbo/</code>. Neither the extracts nor this file are tracked by git —
+  <code>.local/</code> is ignored in full, so real book data never reaches the repository.</p>
+  <p>To refresh, ask Claude in a session connected to QuickBooks. The pull goes through the
+  QuickBooks connector rather than the script, because it needs OAuth credentials the script
+  deliberately does not hold. Once <code>qbo-local</code> can authenticate on its own, it replaces
+  this step and the data stops being a snapshot at all.</p>
+
+  <footer>Figures are as pulled and drift from QuickBooks the moment anything is entered there.
+  Where the two disagree, QuickBooks is right — it is the book of record.</footer>
+</div>

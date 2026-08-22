@@ -162,28 +162,40 @@ not expressible — there is deliberately no "new journal entry" button.
   side are flagged contra, which is a real signal — except for genuine contra
   accounts, which carry a flag so the warning is not always on.
 
-## Live snapshots
+## The data in this prototype is fictional
 
-The prototype's data is entirely fictional and safe to share. Separately, a
-point-in-time pull of the real Aquamentor book can be generated and published
-as its own private artifact, so the shareable demo and the real figures never
-live in the same page.
+Every name, number and identifier is invented. Customers, vendors, the company
+name, the realm id, tracking numbers and customer PO numbers are all made up.
+It is safe to hand to anyone.
 
-Those snapshots are **deliberately not committed**. They contain customer
-names, balances and purchase-order numbers; a private repository is still
-permanent and may later be shared with a contractor. `.gitignore` covers the
-filenames.
+An earlier revision was **not** — it had been seeded with real customer and
+vendor names taken from records used while building it. The amounts were always
+invented, but the names were real. They have been replaced.
 
-To refresh one, ask in a session connected to QuickBooks — the pull and
-republish takes about a minute and keeps the artifact's URL.
+If you add data to this file, invent it. The moment a real name lands here the
+page stops being shareable and nothing in the file will tell you that happened.
+
+## Local snapshots of the real book
+
+Real figures live in `.local/`, which is gitignored in full — one ignored
+directory rather than a list of filenames someone will forget to extend.
+
+```sh
+python3 tools/build-snapshot.py     # .local/qbo/*.json -> .local/snapshot.html
+```
+
+The extracts are refreshed by asking Claude in a session connected to
+QuickBooks; the pull goes through the QuickBooks connector rather than the
+script, because it needs OAuth credentials the script deliberately does not
+hold.
 
 Three ways to stay current, in order of effort:
 
-1. **Ask for a refresh** — manual, about a minute, good for a weekly look.
-2. **Scheduled refresh** — the same pull on a routine, so it is current when
-   opened. Still a snapshot.
-3. **Real sync** — `qbo-local`, the Rust application. The only option where the
-   data is genuinely live rather than as-of.
+1. **Ask for a refresh** — about a minute, good for a weekly look.
+2. **Scheduled refresh** — the same pull on a routine, current when opened.
+   Still a snapshot.
+3. **Real sync** — `qbo-local`. The only option where the data is genuinely
+   live rather than as-of.
 
 A published page cannot poll QuickBooks itself: the artifact runtime can call
 claude.ai connectors, but a session-level MCP server does not qualify, and a
