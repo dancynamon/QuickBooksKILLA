@@ -1131,6 +1131,31 @@ tbody tr[data-clickable]:hover { background: var(--accent-soft); }
      happened. Every entry below is generated from a document by one function,
      so there is no way to post something the documents do not justify.      */
 
+  /* ─── period close ───────────────────────────────────────────────────
+     Fiscal year is the calendar year — Dan, 20 Aug 2026. A closing date locks
+     everything on or before it. Locked means REJECT, not warn: a control you
+     can click through is not a control, it is a speed bump with a log entry.  */
+  const CLOSE = {
+    fiscalYearStart: "01-01",
+    lockedThrough: "2026-06-30",
+    history: [
+      { at: "2026-07-08", by: "Dan", from: "2026-05-31", to: "2026-06-30", note: "June closed after bank reconciliation" },
+      { at: "2026-06-04", by: "Dan", from: "2026-04-30", to: "2026-05-31", note: "May closed" },
+      { at: "2026-05-09", by: "Dan", from: "2026-05-31", to: "2026-04-30", note: "REOPENED — missed a Polymer Source bill, re-closed 12 May", reopen: true },
+      { at: "2026-05-02", by: "Dan", from: "2026-03-31", to: "2026-04-30", note: "April closed" }
+    ]
+  };
+
+  const isLocked = date => date <= CLOSE.lockedThrough;
+
+  /* The single gate. Every action that would write to the ledger asks this
+     first and stops if the answer is no. */
+  function assertPostable(date, what) {
+    if (!isLocked(date)) return true;
+    toast(`${what} refused — ${date} is in a closed period (locked through ${CLOSE.lockedThrough})`, null, true);
+    return false;
+  }
+
   const ACCOUNTS = [
     { no: "1100", name: "Checking",                   type: "Asset" },
     { no: "1200", name: "Accounts receivable",        type: "Asset" },
@@ -1350,6 +1375,7 @@ tbody tr[data-clickable]:hover { background: var(--accent-soft); }
     { id: "credits",   label: "Vendor credits",glyph: "◐", count: () => VENDORCREDITS.length },
     { id: "payments",  label: "Payments",      glyph: "◍", count: () => PAYMENTS.length },
     { id: "ledger",    label: "Ledger",        glyph: "≡", count: () => journal().length },
+    { id: "close",     label: "Period close",  glyph: "⊘" },
     { id: "failures",  label: "Needs you",     glyph: "▲", count: () => FAILURES.length, alert: true }
   ];
 
@@ -3175,6 +3201,67 @@ tbody tr[data-clickable]:hover { background: var(--accent-soft); }
       </div>`;
     },
 
+    close() {
+      const months = ["01","02","03","04","05","06","07","08","09","10","11","12"];
+      const names = ["January","February","March","April","May","June","July","August","September","October","November","December"];
+      const endOf = m => {
+        const days = { "01":"31","02":"28","03":"31","04":"30","05":"31","06":"30",
+                       "07":"31","08":"31","09":"30","10":"31","11":"30","12":"31" };
+        return `2026-${m}-${days[m]}`;
+      };
+      const entries = journal();
+      const inMonth = m => entries.filter(e => e.date.startsWith(`2026-${m}`));
+
+      return head("Period close", `Fiscal year is the calendar year · locked through ${CLOSE.lockedThrough}`,
+        `<button class="btn" data-go="ledger">← Ledger</button>
+         <button class="btn btn-primary" data-close="2026-08-31">Close through 31 August</button>
+         ${CLOSE.lockedThrough !== "2026-06-30" ? `<button class="btn" data-reopen="2026-06-30">Reopen to 30 June</button>` : ""}`) + `
+      <div class="pad">
+        <div class="strip">
+          <div class="strip-cell"><div class="lbl">Fiscal year</div><div class="strip-val" style="font-size:calc(17px * var(--fs))">Calendar</div><div class="strip-note">1 January – 31 December</div></div>
+          <div class="strip-cell"><div class="lbl">Locked through</div><div class="strip-val" style="font-size:calc(17px * var(--fs))">${CLOSE.lockedThrough}</div><div class="strip-note">on or before this date</div></div>
+          <div class="strip-cell"><div class="lbl">Behaviour</div><div class="strip-val neg" style="font-size:calc(17px * var(--fs))">Reject</div><div class="strip-note">not a warning you can pass</div></div>
+          <div class="strip-cell"><div class="lbl">Entries locked</div><div class="strip-val">${entries.filter(e => isLocked(e.date)).length}</div><div class="strip-note">of ${entries.length} in the ledger</div></div>
+        </div>
+
+        <div class="grid-wrap" style="margin-bottom:14px"><div class="grid-scroll"><table>
+          <thead><tr><th>Month</th><th>Ends</th><th class="r">Entries</th><th class="r">Debits</th><th>Status</th></tr></thead>
+          <tbody>${months.map((m, n) => {
+            const rows = inMonth(m);
+            const locked = isLocked(endOf(m));
+            return `<tr>
+              <td>${names[n]} 2026</td>
+              <td class="mono dim">${endOf(m)}</td>
+              <td class="r num ${rows.length ? "" : "dim"}">${rows.length || "—"}</td>
+              <td class="r num dim">${rows.length ? plain(rows.reduce((a, e) => a + e.dr, 0)) : "—"}</td>
+              <td>${locked ? '<span class="tag crit">locked</span>' : '<span class="tag ok">open</span>'}</td>
+            </tr>`; }).join("")}</tbody>
+        </table></div></div>
+
+        <div class="panel">
+          <div class="panel-head"><span class="lbl">Close history</span>
+            <span class="spacer" style="flex:1"></span>
+            <span class="dim" style="font-size:calc(11px * var(--fs))">every move recorded, reopens especially</span></div>
+          <div class="grid-scroll"><table>
+            <thead><tr><th>When</th><th>By</th><th>From</th><th>To</th><th>Note</th></tr></thead>
+            <tbody>${CLOSE.history.map(h => `
+              <tr>
+                <td class="mono dim">${h.at}</td>
+                <td>${esc(h.by)}</td>
+                <td class="mono dim">${h.from}</td>
+                <td class="mono">${h.to}</td>
+                <td class="${h.reopen ? "" : "dim"}" style="${h.reopen ? "color:var(--crit)" : ""}">${h.reopen ? "⚑ " : ""}${esc(h.note)}</td>
+              </tr>`).join("")}</tbody>
+          </table></div>
+        </div>
+
+        <p class="hint"><strong>Try it.</strong> Close through 31 August, then attempt to record a
+        payment or invoice an order — the app refuses rather than warning. Reopening is allowed but
+        never quiet: it writes its own line into the history above, flagged, so a period that was
+        reopened cannot be made to look like one that was never touched.</p>
+      </div>`;
+    },
+
     failures() {
       return head("Needs you", "Writes QuickBooks would not take. Nothing was dropped and nothing was merged behind your back.") + `
       <div class="pad">
@@ -3269,6 +3356,8 @@ tbody tr[data-clickable]:hover { background: var(--accent-soft); }
     document.querySelectorAll("[data-vendor]").forEach(r => r.onclick = () => go("vendor", r.dataset.vendor));
     document.querySelectorAll("[data-order]").forEach(r => r.onclick = () => go("order", r.dataset.order));
     document.querySelectorAll("[data-recipe]").forEach(r => r.onclick = e => { e.stopPropagation(); go("recipe", r.dataset.recipe); });
+    document.querySelectorAll("[data-close]").forEach(b => b.onclick = () => moveClose(b.dataset.close, false));
+    document.querySelectorAll("[data-reopen]").forEach(b => b.onclick = () => moveClose(b.dataset.reopen, true));
     document.querySelectorAll("[data-stage]").forEach(b => b.onclick = () => go("orders", b.dataset.stage === "all" ? null : b.dataset.stage));
     document.querySelectorAll("[data-advance]").forEach(b => b.onclick = () => advanceOrder(b.dataset.advance));
     document.querySelectorAll("[data-billorder]").forEach(b => b.onclick = () => invoiceOrder(b.dataset.billorder));
@@ -3366,6 +3455,7 @@ tbody tr[data-clickable]:hover { background: var(--accent-soft); }
     if (!e) return;
     const pr = estProgress(e);
     if (pr.remaining <= 0) return;
+    if (!assertPostable("2026-08-20", "Invoice")) return;
 
     const amount = mode === "50" ? Math.min(Math.round(e.total * 0.5), pr.remaining) : pr.remaining;
     const pct = Math.round(amount / e.total * 100);
@@ -3415,6 +3505,7 @@ tbody tr[data-clickable]:hover { background: var(--accent-soft); }
   function invoiceOrder(no) {
     const o = ORDERS.find(x => x.no === no);
     if (!o || o.invoice) return;
+    if (!assertPostable("2026-08-20", "Invoice")) return;
     const next = String(Math.max(...INVOICES.map(i => Number(i.no))) + 1);
     INVOICES.unshift({
       no: next, date: "2026-08-20", cust: o.cust, cls: o.cls,
@@ -3430,11 +3521,31 @@ tbody tr[data-clickable]:hover { background: var(--accent-soft); }
     go("invoice", next);
   }
 
+  /* Moving the closing date forward is routine. Moving it backwards is not,
+     and the history says so permanently — a reopened period should never be
+     able to pass for one that was never touched. */
+  function moveClose(to, reopen) {
+    const from = CLOSE.lockedThrough;
+    if (to === from) return;
+    CLOSE.history.unshift({
+      at: "2026-08-20", by: "Dan", from, to,
+      note: reopen ? "REOPENED — deliberate, from the period close screen" : "Closed from the period close screen",
+      reopen
+    });
+    CLOSE.lockedThrough = to;
+    state.pending++;
+    updateChrome();
+    toast(reopen ? `Reopened to ${to} — recorded in the history` : `Locked through ${to}`,
+          readMs() + " ms", reopen);
+    go("close");
+  }
+
   function recordPayment(custId) {
     const c = cust(custId);
     const open = INVOICES.filter(i => i.cust === c.id && i.bal > 0).sort((a, b) => b.age - a.age);
     let left = state.receive == null ? open.reduce((a, i) => a + i.bal, 0) : state.receive;
     if (left <= 0) return;
+    if (!assertPostable("2026-08-20", "Payment")) return;
 
     const total = left;
     const next = `PMT-${Math.max(...PAYMENTS.map(p => Number(p.no.replace(/\D/g, "")))) + 1}`;
@@ -3467,6 +3578,7 @@ tbody tr[data-clickable]:hover { background: var(--accent-soft); }
     if (!v || !b) return;
     const amount = Math.min(vcRemaining(v), billBalance(b));
     if (amount <= 0) return;
+    if (!assertPostable("2026-08-20", "Credit application")) return;
 
     v.applied = (v.applied || []).concat([{ bill: b.no, amount, date: "2026-08-20" }]);
     state.pending++;

@@ -116,3 +116,25 @@ than accepted as complete.
 
 Both ⚠️ items must be confirmed against Intuit's own documentation before the M2
 write path ships.
+
+---
+
+## D7 — Fiscal year and period locking
+
+**Decided (Dan, 20 August 2026):** fiscal year is the **calendar year** for both
+entities. A closed period **rejects** posting outright.
+
+**Why reject rather than warn:** a warning that can be clicked through is not a
+control — it is a speed bump that produces an audit trail of people ignoring it.
+If a period is closed, the correct response to a late transaction is a dated
+entry in an open period, not a quiet backdate into a period the CPA has already
+signed off.
+
+**Consequence:** every action that writes to the ledger passes through one gate
+before it does anything. Reopening a period is permitted, because sometimes a
+bill genuinely arrives late — but it is never quiet. Each reopen writes its own
+flagged line into the close history, so a period that was reopened cannot later
+be made to look like one that was never touched.
+
+These were the last two open items on the ledger side. The remaining open
+questions are the API confidence items in `DESIGN.md` §0 and the class taxonomy.
