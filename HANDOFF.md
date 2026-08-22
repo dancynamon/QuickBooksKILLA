@@ -21,13 +21,20 @@ refresh tokens the client actually uses.
 |---|---|
 | Client ID + Client Secret | From the Intuit developer app |
 | Registered redirect URI | `http://localhost:PORT/callback`, registered on the app; must match exactly |
-| Aquamentor realm id | `1234567890123456` — confirmed live, 16 Aug 2026 |
+| Realm id | Not recorded here — read it from the QBO deep link on any invoice, or from `qbo_headless`. See below. |
 | Sandbox company | Only needed once write paths are built (M2). M0 is read-only and can point at production. |
 
 **Check first:** if `~/code/aquamentor-mcp` / `qbo_headless` is already authorized,
 it may hold a valid refresh token. Reusing it skips the consent flow entirely for
 now. Confirm before building the authorization flow — it may not be on M0's
 critical path.
+
+**Getting the realm id.** It is deliberately not written down in this repository.
+Two ways to read it on the machine that has access: it is the
+`deeplinkcompanyid` parameter on the QBO web link of any invoice, and it is
+already stored wherever `qbo_headless` keeps its authorization. Put it in the
+local config the app reads, not in a tracked file — `.local/` is gitignored in
+full and is the right home for it.
 
 Whatever the source, tokens land in the macOS keychain via the `TokenStore`
 backend in §2.1. Never in the repo, never in a dotfile Dropbox syncs.
@@ -145,8 +152,8 @@ the entities it covers. A cursor advanced outside that transaction can skip
 changes after a crash.
 
 Report actual row counts and wall-clock time. The brief is explicit that these
-are measured and reported, never asserted. Expect roughly roughly nine thousand invoices and
-tens of thousands of documents total for Aquamentor, back to March 2012.
+are measured and reported, never asserted. Expect roughly nine thousand invoices
+and tens of thousands of documents in total, going back to 2012.
 
 ### 2.5 CDC poll loop
 
@@ -164,6 +171,21 @@ up rather than reimplementing:
   exists.
 - `halve_window` returning `None` means the window can't narrow further — fall
   back to a sweep rather than looping.
+
+---
+
+## 2.6 Test fixtures from the real book
+
+Recorded HTTP fixtures are what let the suite run offline, and the honest ones
+come from real responses rather than hand-written guesses. Pull them into
+`.local/fixtures/` — gitignored in full — and keep the committed fixtures
+synthetic.
+
+The rule that matters: **a fixture that reaches `git add` must not contain a
+real customer, vendor, balance or realm id.** Scrub on the way in, not on the
+way out. This repository has already had to be cleaned once, and finding real
+names in a test file after the fact is much more work than inventing them up
+front.
 
 ---
 
