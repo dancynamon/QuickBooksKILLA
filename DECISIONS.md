@@ -68,10 +68,10 @@ a file move plus a manifest line.
 entity types arrive first: masters and documents in M0, peripheral types
 (Attachable, Department, Preferences) after.
 
-**Why:** measured against the live Aquamentor realm — ~roughly nine thousand invoices spanning
-March 2012 to August 2026, with total documents across all types in the tens of
-thousands. That is a few hundred MB of raw JSON and a one-time sync measured in
-minutes. A recent-window replica would save almost nothing and would send lookups
+**Why:** measured against the live realm — roughly nine thousand invoices going
+back to 2012, with total documents across all types in the tens of thousands.
+That is a few hundred MB of raw JSON and a one-time sync measured in minutes.
+(Exact figures deliberately not recorded here; re-measure when needed.) A recent-window replica would save almost nothing and would send lookups
 of older records back to the browser, which defeats the purpose of the project.
 Depth is never staged; breadth is, only so a working sync arrives sooner.
 
