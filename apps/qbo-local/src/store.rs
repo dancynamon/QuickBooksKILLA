@@ -10,7 +10,13 @@ use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
 use thiserror::Error;
 
-use crate::domain::{EntityType, RealmId};
+use ledger_core::Money;
+
+pub mod lineage;
+pub mod search;
+
+use crate::domain::{ContactType, DocumentType, EntityType, RealmId};
+use crate::project::{ParsedDocument, ParsedEntity, Projection};
 
 #[derive(Debug, Error)]
 pub enum StoreError {
@@ -149,6 +155,206 @@ CREATE TABLE quarantine_entities (
     quarantined_at TEXT NOT NULL,
     PRIMARY KEY (realm_id, entity_type, qbo_id)
 ) STRICT;
+"#,
+    },
+    Migration {
+        version: 2,
+        name: "projection tables, document links, and search",
+        sql: r#"
+-- Document columns the UI needs but §3.2's first cut did not carry. These are
+-- projection columns: added here rather than by dropping and rebuilding the
+-- table, so no replica loses its documents during the upgrade.
+ALTER TABLE documents ADD COLUMN contact_type TEXT;   -- 'Customer' | 'Vendor' | NULL
+ALTER TABLE documents ADD COLUMN doc_status   TEXT;   -- TxnStatus / POStatus
+ALTER TABLE documents ADD COLUMN po_number    TEXT;   -- the customer's PO, not ours
+ALTER TABLE documents ADD COLUMN due_date     TEXT;
+ALTER TABLE documents ADD COLUMN private_note TEXT;
+ALTER TABLE documents ADD COLUMN customer_memo TEXT;
+ALTER TABLE documents ADD COLUMN currency     TEXT;
+ALTER TABLE documents ADD COLUMN projected_at TEXT;
+
+-- Typing a document number is the fastest path to a document (§3.3), so it
+-- gets an index rather than a scan.
+CREATE INDEX idx_documents_number ON documents(realm_id, doc_number);
+CREATE INDEX idx_documents_po     ON documents(realm_id, po_number);
+
+-- Customers and vendors share a table because every document points at one or
+-- the other and the UI treats them the same way. Their QBO id spaces are
+-- separate, so contact_type is part of the key.
+CREATE TABLE contacts (
+    realm_id      TEXT NOT NULL REFERENCES realms(realm_id),
+    contact_type  TEXT NOT NULL,
+    qbo_id        TEXT NOT NULL,
+    display_name  TEXT NOT NULL,
+    company_name  TEXT,
+    email         TEXT,
+    phone         TEXT,
+    balance_minor INTEGER,
+    is_active     INTEGER NOT NULL DEFAULT 1,
+    is_deleted    INTEGER NOT NULL DEFAULT 0,
+    projected_at  TEXT NOT NULL,
+    PRIMARY KEY (realm_id, contact_type, qbo_id)
+) STRICT;
+
+CREATE INDEX idx_contacts_name ON contacts(realm_id, display_name);
+
+CREATE TABLE items (
+    realm_id            TEXT NOT NULL REFERENCES realms(realm_id),
+    qbo_id              TEXT NOT NULL,
+    name                TEXT NOT NULL,
+    sku                 TEXT,
+    description         TEXT,
+    item_type           TEXT,
+    -- Prices carry more than two decimals in QBO; amounts do not. Prices stay
+    -- Decimal-as-text, amounts become minor units (§3.2).
+    unit_price          TEXT,
+    purchase_cost       TEXT,
+    qty_on_hand         TEXT,
+    income_account_id   TEXT,
+    expense_account_id  TEXT,
+    asset_account_id    TEXT,
+    is_active           INTEGER NOT NULL DEFAULT 1,
+    is_deleted          INTEGER NOT NULL DEFAULT 0,
+    projected_at        TEXT NOT NULL,
+    PRIMARY KEY (realm_id, qbo_id)
+) STRICT;
+
+CREATE INDEX idx_items_sku ON items(realm_id, sku);
+
+CREATE TABLE accounts (
+    realm_id       TEXT NOT NULL REFERENCES realms(realm_id),
+    qbo_id         TEXT NOT NULL,
+    name           TEXT NOT NULL,
+    acct_num       TEXT,
+    account_type   TEXT,
+    account_subtype TEXT,
+    classification TEXT,
+    balance_minor  INTEGER,
+    is_active      INTEGER NOT NULL DEFAULT 1,
+    is_deleted     INTEGER NOT NULL DEFAULT 0,
+    projected_at   TEXT NOT NULL,
+    PRIMARY KEY (realm_id, qbo_id)
+) STRICT;
+
+CREATE TABLE classes (
+    realm_id             TEXT NOT NULL REFERENCES realms(realm_id),
+    qbo_id               TEXT NOT NULL,
+    name                 TEXT NOT NULL,
+    fully_qualified_name TEXT,
+    parent_id            TEXT,
+    is_active            INTEGER NOT NULL DEFAULT 1,
+    is_deleted           INTEGER NOT NULL DEFAULT 0,
+    projected_at         TEXT NOT NULL,
+    PRIMARY KEY (realm_id, qbo_id)
+) STRICT;
+
+-- QBO's LinkedTxn, flattened. One row per link, in payload order, so an
+-- estimate can find its invoices and a bill payment can find its bills.
+-- `seq` keys the row because a link may hang off the header (line_no NULL) or
+-- off any line, and the same pair can legitimately appear twice.
+CREATE TABLE document_links (
+    realm_id    TEXT NOT NULL REFERENCES realms(realm_id),
+    from_qbo_id TEXT NOT NULL,
+    from_type   TEXT NOT NULL,
+    seq         INTEGER NOT NULL,
+    to_qbo_id   TEXT NOT NULL,
+    to_type     TEXT NOT NULL,
+    line_no     INTEGER,
+    PRIMARY KEY (realm_id, from_qbo_id, seq)
+) STRICT;
+
+-- The reverse direction is the interesting one: given this estimate, what came
+-- out of it? Without this index that question is a table scan.
+CREATE INDEX idx_links_to ON document_links(realm_id, to_qbo_id);
+
+-- §3.3. External-content FTS5 over the projected tables, maintained by trigger
+-- so the index cannot drift from its source. `prefix` is what makes typing the
+-- first few characters fast rather than merely correct.
+CREATE VIRTUAL TABLE contacts_fts USING fts5(
+    display_name, company_name, email,
+    content='contacts', content_rowid='rowid',
+    tokenize='unicode61 remove_diacritics 2',
+    prefix='2 3 4'
+);
+
+CREATE TRIGGER contacts_fts_ai AFTER INSERT ON contacts BEGIN
+    INSERT INTO contacts_fts(rowid, display_name, company_name, email)
+    VALUES (new.rowid, new.display_name, new.company_name, new.email);
+END;
+CREATE TRIGGER contacts_fts_ad AFTER DELETE ON contacts BEGIN
+    INSERT INTO contacts_fts(contacts_fts, rowid, display_name, company_name, email)
+    VALUES ('delete', old.rowid, old.display_name, old.company_name, old.email);
+END;
+CREATE TRIGGER contacts_fts_au AFTER UPDATE ON contacts BEGIN
+    INSERT INTO contacts_fts(contacts_fts, rowid, display_name, company_name, email)
+    VALUES ('delete', old.rowid, old.display_name, old.company_name, old.email);
+    INSERT INTO contacts_fts(rowid, display_name, company_name, email)
+    VALUES (new.rowid, new.display_name, new.company_name, new.email);
+END;
+
+CREATE VIRTUAL TABLE items_fts USING fts5(
+    name, sku, description,
+    content='items', content_rowid='rowid',
+    tokenize='unicode61 remove_diacritics 2',
+    prefix='2 3 4'
+);
+
+CREATE TRIGGER items_fts_ai AFTER INSERT ON items BEGIN
+    INSERT INTO items_fts(rowid, name, sku, description)
+    VALUES (new.rowid, new.name, new.sku, new.description);
+END;
+CREATE TRIGGER items_fts_ad AFTER DELETE ON items BEGIN
+    INSERT INTO items_fts(items_fts, rowid, name, sku, description)
+    VALUES ('delete', old.rowid, old.name, old.sku, old.description);
+END;
+CREATE TRIGGER items_fts_au AFTER UPDATE ON items BEGIN
+    INSERT INTO items_fts(items_fts, rowid, name, sku, description)
+    VALUES ('delete', old.rowid, old.name, old.sku, old.description);
+    INSERT INTO items_fts(rowid, name, sku, description)
+    VALUES (new.rowid, new.name, new.sku, new.description);
+END;
+
+CREATE VIRTUAL TABLE documents_fts USING fts5(
+    doc_number, po_number, private_note, customer_memo,
+    content='documents', content_rowid='rowid',
+    tokenize='unicode61 remove_diacritics 2',
+    prefix='2 3 4'
+);
+
+CREATE TRIGGER documents_fts_ai AFTER INSERT ON documents BEGIN
+    INSERT INTO documents_fts(rowid, doc_number, po_number, private_note, customer_memo)
+    VALUES (new.rowid, new.doc_number, new.po_number, new.private_note, new.customer_memo);
+END;
+CREATE TRIGGER documents_fts_ad AFTER DELETE ON documents BEGIN
+    INSERT INTO documents_fts(documents_fts, rowid, doc_number, po_number, private_note, customer_memo)
+    VALUES ('delete', old.rowid, old.doc_number, old.po_number, old.private_note, old.customer_memo);
+END;
+CREATE TRIGGER documents_fts_au AFTER UPDATE ON documents BEGIN
+    INSERT INTO documents_fts(documents_fts, rowid, doc_number, po_number, private_note, customer_memo)
+    VALUES ('delete', old.rowid, old.doc_number, old.po_number, old.private_note, old.customer_memo);
+    INSERT INTO documents_fts(rowid, doc_number, po_number, private_note, customer_memo)
+    VALUES (new.rowid, new.doc_number, new.po_number, new.private_note, new.customer_memo);
+END;
+
+CREATE VIRTUAL TABLE lines_fts USING fts5(
+    description,
+    content='document_lines', content_rowid='rowid',
+    tokenize='unicode61 remove_diacritics 2',
+    prefix='2 3 4'
+);
+
+CREATE TRIGGER lines_fts_ai AFTER INSERT ON document_lines BEGIN
+    INSERT INTO lines_fts(rowid, description) VALUES (new.rowid, new.description);
+END;
+CREATE TRIGGER lines_fts_ad AFTER DELETE ON document_lines BEGIN
+    INSERT INTO lines_fts(lines_fts, rowid, description)
+    VALUES ('delete', old.rowid, old.description);
+END;
+CREATE TRIGGER lines_fts_au AFTER UPDATE ON document_lines BEGIN
+    INSERT INTO lines_fts(lines_fts, rowid, description)
+    VALUES ('delete', old.rowid, old.description);
+    INSERT INTO lines_fts(rowid, description) VALUES (new.rowid, new.description);
+END;
 "#,
     },
 ];
@@ -366,6 +572,625 @@ impl Store {
             |row| row.get(0),
         )?)
     }
+
+    // -----------------------------------------------------------------------
+    // Projection (§3.2)
+    // -----------------------------------------------------------------------
+
+    /// Parse one mirrored entity and write its projected form.
+    ///
+    /// The whole projection of a document — header, lines and links — lands in
+    /// one transaction, so a crash cannot leave an invoice holding another
+    /// invoice's lines.
+    pub fn project_entity(
+        &self,
+        realm: &RealmId,
+        entity: &MirroredEntity,
+        now: DateTime<Utc>,
+    ) -> Result<Projection, StoreError> {
+        let projection = crate::project::parse(entity);
+        let transaction = self.connection.unchecked_transaction()?;
+
+        match &projection {
+            Projection::Parsed(parsed) => {
+                write_parsed(&transaction, realm, parsed, now)?;
+                // A payload that used to fail and now parses should not keep
+                // its old quarantine row sitting there accusing it.
+                transaction.execute(
+                    "DELETE FROM quarantine_entities
+                     WHERE realm_id = ?1 AND entity_type = ?2 AND qbo_id = ?3",
+                    params![realm.as_str(), entity.entity_type.as_str(), entity.qbo_id],
+                )?;
+            }
+            Projection::Quarantine(reason) => {
+                transaction.execute(
+                    "INSERT INTO quarantine_entities
+                         (realm_id, entity_type, qbo_id, reason, raw_json, quarantined_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                     ON CONFLICT(realm_id, entity_type, qbo_id) DO UPDATE SET
+                         reason = excluded.reason,
+                         raw_json = excluded.raw_json,
+                         quarantined_at = excluded.quarantined_at",
+                    params![
+                        realm.as_str(),
+                        entity.entity_type.as_str(),
+                        entity.qbo_id,
+                        reason,
+                        entity.raw_json.to_string(),
+                        now.to_rfc3339(),
+                    ],
+                )?;
+            }
+            Projection::NotProjected => {}
+        }
+
+        transaction.commit()?;
+        Ok(projection)
+    }
+
+    /// Rebuild the entire projection for a realm from the raw payloads already
+    /// on disk.
+    ///
+    /// This is the point of keeping `raw_json`: a parser fix ships, this runs,
+    /// and the corrected projection appears without a single call to Intuit.
+    pub fn reproject_all(
+        &self,
+        realm: &RealmId,
+        now: DateTime<Utc>,
+    ) -> Result<ReprojectReport, StoreError> {
+        let entities = self.all_entities(realm)?;
+
+        let transaction = self.connection.unchecked_transaction()?;
+        // Order matters only for document_links and document_lines, which point
+        // at documents. Everything else is independent.
+        for table in [
+            "document_links",
+            "document_lines",
+            "documents",
+            "contacts",
+            "items",
+            "accounts",
+            "classes",
+            "quarantine_entities",
+        ] {
+            transaction.execute(
+                &format!("DELETE FROM {table} WHERE realm_id = ?1"),
+                params![realm.as_str()],
+            )?;
+        }
+
+        let mut report = ReprojectReport::default();
+        for entity in &entities {
+            match crate::project::parse(entity) {
+                Projection::Parsed(parsed) => {
+                    write_parsed(&transaction, realm, &parsed, now)?;
+                    report.parsed += 1;
+                }
+                Projection::NotProjected => report.not_projected += 1,
+                Projection::Quarantine(reason) => {
+                    transaction.execute(
+                        "INSERT INTO quarantine_entities
+                             (realm_id, entity_type, qbo_id, reason, raw_json, quarantined_at)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                        params![
+                            realm.as_str(),
+                            entity.entity_type.as_str(),
+                            entity.qbo_id,
+                            reason,
+                            entity.raw_json.to_string(),
+                            now.to_rfc3339(),
+                        ],
+                    )?;
+                    report.quarantined += 1;
+                }
+            }
+        }
+        transaction.commit()?;
+        Ok(report)
+    }
+
+    fn all_entities(&self, realm: &RealmId) -> Result<Vec<MirroredEntity>, StoreError> {
+        let mut statement = self.connection.prepare(
+            "SELECT entity_type, qbo_id, sync_token, last_updated_utc, is_deleted, raw_json
+             FROM entities WHERE realm_id = ?1
+             ORDER BY entity_type, qbo_id",
+        )?;
+        let rows = statement.query_map(params![realm.as_str()], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, i64>(4)?,
+                row.get::<_, String>(5)?,
+            ))
+        })?;
+
+        let mut entities = Vec::new();
+        for row in rows {
+            let (entity_type, qbo_id, sync_token, last_updated, is_deleted, raw) = row?;
+            // An entity type this build does not know is not a parse failure —
+            // it is a newer schema. Leave it in `entities` and move on.
+            let Ok(entity_type) = EntityType::parse(&entity_type) else {
+                continue;
+            };
+            entities.push(MirroredEntity {
+                entity_type,
+                qbo_id,
+                sync_token,
+                last_updated_utc: parse_timestamp(&last_updated),
+                is_deleted: is_deleted != 0,
+                raw_json: serde_json::from_str(&raw)?,
+            });
+        }
+        Ok(entities)
+    }
+
+    pub fn quarantined(&self, realm: &RealmId) -> Result<Vec<QuarantinedEntity>, StoreError> {
+        let mut statement = self.connection.prepare(
+            "SELECT entity_type, qbo_id, reason FROM quarantine_entities
+             WHERE realm_id = ?1 ORDER BY entity_type, qbo_id",
+        )?;
+        let rows = statement.query_map(params![realm.as_str()], |row| {
+            Ok(QuarantinedEntity {
+                entity_type: row.get(0)?,
+                qbo_id: row.get(1)?,
+                reason: row.get(2)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    // -----------------------------------------------------------------------
+    // Projected reads
+    // -----------------------------------------------------------------------
+
+    pub fn get_document(
+        &self,
+        realm: &RealmId,
+        qbo_id: &str,
+    ) -> Result<Option<DocumentRow>, StoreError> {
+        let mut statement = self.connection.prepare(&format!(
+            "{DOCUMENT_SELECT} WHERE d.realm_id = ?1 AND d.qbo_id = ?2"
+        ))?;
+        let row = statement
+            .query_row(params![realm.as_str(), qbo_id], document_row)
+            .optional()?;
+        Ok(row)
+    }
+
+    /// Documents of one type, newest first — the list behind every register.
+    pub fn list_documents(
+        &self,
+        realm: &RealmId,
+        doc_type: DocumentType,
+        limit: i64,
+    ) -> Result<Vec<DocumentRow>, StoreError> {
+        let mut statement = self.connection.prepare(&format!(
+            "{DOCUMENT_SELECT}
+             WHERE d.realm_id = ?1 AND d.doc_type = ?2 AND d.is_deleted = 0
+             ORDER BY d.txn_date DESC, d.qbo_id DESC
+             LIMIT ?3"
+        ))?;
+        let rows = statement.query_map(
+            params![realm.as_str(), doc_type.as_str(), limit],
+            document_row,
+        )?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    pub fn document_lines(
+        &self,
+        realm: &RealmId,
+        doc_qbo_id: &str,
+    ) -> Result<Vec<LineRow>, StoreError> {
+        let mut statement = self.connection.prepare(
+            "SELECT line_no, item_id, description, qty, unit_price,
+                    amount_minor, class_id, is_taxable
+             FROM document_lines
+             WHERE realm_id = ?1 AND doc_qbo_id = ?2
+             ORDER BY line_no",
+        )?;
+        let rows = statement.query_map(params![realm.as_str(), doc_qbo_id], |row| {
+            Ok(LineRow {
+                line_no: row.get(0)?,
+                item_id: row.get(1)?,
+                description: row.get(2)?,
+                qty: row.get::<_, Option<String>>(3)?,
+                unit_price: row.get::<_, Option<String>>(4)?,
+                amount: Money::from_minor(row.get(5)?),
+                class_id: row.get(6)?,
+                is_taxable: row.get::<_, i64>(7)? != 0,
+            })
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    pub fn count_projected(&self, realm: &RealmId, table: ProjectedTable) -> Result<i64, StoreError> {
+        Ok(self.connection.query_row(
+            &format!("SELECT COUNT(*) FROM {} WHERE realm_id = ?1", table.as_str()),
+            params![realm.as_str()],
+            |row| row.get(0),
+        )?)
+    }
+}
+
+/// The projected tables, named as a type so `count_projected` cannot be handed
+/// an arbitrary string that reaches SQL.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub enum ProjectedTable {
+    Contacts,
+    Items,
+    Accounts,
+    Classes,
+    Documents,
+    DocumentLines,
+    DocumentLinks,
+}
+
+impl ProjectedTable {
+    const fn as_str(self) -> &'static str {
+        match self {
+            ProjectedTable::Contacts => "contacts",
+            ProjectedTable::Items => "items",
+            ProjectedTable::Accounts => "accounts",
+            ProjectedTable::Classes => "classes",
+            ProjectedTable::Documents => "documents",
+            ProjectedTable::DocumentLines => "document_lines",
+            ProjectedTable::DocumentLinks => "document_links",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ReprojectReport {
+    pub parsed: usize,
+    pub not_projected: usize,
+    pub quarantined: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct QuarantinedEntity {
+    pub entity_type: String,
+    pub qbo_id: String,
+    pub reason: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DocumentRow {
+    pub qbo_id: String,
+    pub doc_type: DocumentType,
+    pub doc_number: Option<String>,
+    pub txn_date: String,
+    pub due_date: Option<String>,
+    pub contact_id: Option<String>,
+    pub contact_type: Option<ContactType>,
+    /// Joined from `contacts` so a register does not issue one query per row.
+    pub contact_name: Option<String>,
+    pub class_id: Option<String>,
+    pub total: Money,
+    pub balance: Option<Money>,
+    pub doc_status: Option<String>,
+    pub po_number: Option<String>,
+    pub private_note: Option<String>,
+    pub customer_memo: Option<String>,
+    pub is_deleted: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LineRow {
+    pub line_no: i64,
+    pub item_id: Option<String>,
+    pub description: Option<String>,
+    /// Decimal as text, exactly as stored — parsing it is the caller's choice.
+    pub qty: Option<String>,
+    pub unit_price: Option<String>,
+    pub amount: Money,
+    pub class_id: Option<String>,
+    pub is_taxable: bool,
+}
+
+/// Every projected document read goes through this projection and join, so a
+/// register never issues one query per row to name its customer.
+pub(crate) const DOCUMENT_SELECT: &str = "\
+SELECT d.qbo_id, d.doc_type, d.doc_number, d.txn_date, d.due_date,
+       d.contact_id, d.contact_type, c.display_name, d.class_id,
+       d.total_minor, d.balance_minor, d.doc_status, d.po_number,
+       d.private_note, d.customer_memo, d.is_deleted
+FROM documents d
+LEFT JOIN contacts c
+       ON c.realm_id = d.realm_id
+      AND c.contact_type = d.contact_type
+      AND c.qbo_id = d.contact_id
+";
+
+pub(crate) fn document_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<DocumentRow> {
+    let doc_type: String = row.get(1)?;
+    Ok(DocumentRow {
+        qbo_id: row.get(0)?,
+        // A row is only written through `write_parsed`, which takes a
+        // `DocumentType`, so an unreadable value here means the file was edited
+        // outside the app. Falling back to `JournalEntry` would be a quiet lie;
+        // surfacing it as a column decode error is not.
+        doc_type: EntityType::parse(&doc_type)
+            .ok()
+            .and_then(EntityType::as_document)
+            .ok_or_else(|| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    1,
+                    rusqlite::types::Type::Text,
+                    Box::new(crate::domain::DomainError::UnknownEntityType(doc_type)),
+                )
+            })?,
+        doc_number: row.get(2)?,
+        txn_date: row.get(3)?,
+        due_date: row.get(4)?,
+        contact_id: row.get(5)?,
+        contact_type: row
+            .get::<_, Option<String>>(6)?
+            .as_deref()
+            .and_then(ContactType::parse),
+        contact_name: row.get(7)?,
+        class_id: row.get(8)?,
+        total: Money::from_minor(row.get(9)?),
+        balance: row.get::<_, Option<i64>>(10)?.map(Money::from_minor),
+        doc_status: row.get(11)?,
+        po_number: row.get(12)?,
+        private_note: row.get(13)?,
+        customer_memo: row.get(14)?,
+        is_deleted: row.get::<_, i64>(15)? != 0,
+    })
+}
+
+fn parse_timestamp(raw: &str) -> DateTime<Utc> {
+    DateTime::parse_from_rfc3339(raw)
+        .map(|dt| dt.with_timezone(&Utc))
+        .unwrap_or_else(|_| Utc::now())
+}
+
+fn write_parsed(
+    transaction: &rusqlite::Transaction<'_>,
+    realm: &RealmId,
+    parsed: &ParsedEntity,
+    now: DateTime<Utc>,
+) -> Result<(), StoreError> {
+    let stamp = now.to_rfc3339();
+    match parsed {
+        ParsedEntity::Contact(contact) => {
+            transaction.execute(
+                "INSERT INTO contacts
+                     (realm_id, contact_type, qbo_id, display_name, company_name,
+                      email, phone, balance_minor, is_active, is_deleted, projected_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                 ON CONFLICT(realm_id, contact_type, qbo_id) DO UPDATE SET
+                     display_name = excluded.display_name,
+                     company_name = excluded.company_name,
+                     email = excluded.email,
+                     phone = excluded.phone,
+                     balance_minor = excluded.balance_minor,
+                     is_active = excluded.is_active,
+                     is_deleted = excluded.is_deleted,
+                     projected_at = excluded.projected_at",
+                params![
+                    realm.as_str(),
+                    contact.contact_type.as_str(),
+                    contact.qbo_id,
+                    contact.display_name,
+                    contact.company_name,
+                    contact.email,
+                    contact.phone,
+                    contact.balance.map(Money::minor),
+                    i64::from(contact.is_active),
+                    i64::from(contact.is_deleted),
+                    stamp,
+                ],
+            )?;
+        }
+        ParsedEntity::Item(item) => {
+            transaction.execute(
+                "INSERT INTO items
+                     (realm_id, qbo_id, name, sku, description, item_type,
+                      unit_price, purchase_cost, qty_on_hand, income_account_id,
+                      expense_account_id, asset_account_id, is_active, is_deleted,
+                      projected_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+                 ON CONFLICT(realm_id, qbo_id) DO UPDATE SET
+                     name = excluded.name,
+                     sku = excluded.sku,
+                     description = excluded.description,
+                     item_type = excluded.item_type,
+                     unit_price = excluded.unit_price,
+                     purchase_cost = excluded.purchase_cost,
+                     qty_on_hand = excluded.qty_on_hand,
+                     income_account_id = excluded.income_account_id,
+                     expense_account_id = excluded.expense_account_id,
+                     asset_account_id = excluded.asset_account_id,
+                     is_active = excluded.is_active,
+                     is_deleted = excluded.is_deleted,
+                     projected_at = excluded.projected_at",
+                params![
+                    realm.as_str(),
+                    item.qbo_id,
+                    item.name,
+                    item.sku,
+                    item.description,
+                    item.item_type,
+                    item.unit_price.map(|d| d.to_string()),
+                    item.purchase_cost.map(|d| d.to_string()),
+                    item.qty_on_hand.map(|d| d.to_string()),
+                    item.income_account_id,
+                    item.expense_account_id,
+                    item.asset_account_id,
+                    i64::from(item.is_active),
+                    i64::from(item.is_deleted),
+                    stamp,
+                ],
+            )?;
+        }
+        ParsedEntity::Account(account) => {
+            transaction.execute(
+                "INSERT INTO accounts
+                     (realm_id, qbo_id, name, acct_num, account_type, account_subtype,
+                      classification, balance_minor, is_active, is_deleted, projected_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                 ON CONFLICT(realm_id, qbo_id) DO UPDATE SET
+                     name = excluded.name,
+                     acct_num = excluded.acct_num,
+                     account_type = excluded.account_type,
+                     account_subtype = excluded.account_subtype,
+                     classification = excluded.classification,
+                     balance_minor = excluded.balance_minor,
+                     is_active = excluded.is_active,
+                     is_deleted = excluded.is_deleted,
+                     projected_at = excluded.projected_at",
+                params![
+                    realm.as_str(),
+                    account.qbo_id,
+                    account.name,
+                    account.acct_num,
+                    account.account_type,
+                    account.account_subtype,
+                    account.classification,
+                    account.balance.map(Money::minor),
+                    i64::from(account.is_active),
+                    i64::from(account.is_deleted),
+                    stamp,
+                ],
+            )?;
+        }
+        ParsedEntity::Class(class) => {
+            transaction.execute(
+                "INSERT INTO classes
+                     (realm_id, qbo_id, name, fully_qualified_name, parent_id,
+                      is_active, is_deleted, projected_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                 ON CONFLICT(realm_id, qbo_id) DO UPDATE SET
+                     name = excluded.name,
+                     fully_qualified_name = excluded.fully_qualified_name,
+                     parent_id = excluded.parent_id,
+                     is_active = excluded.is_active,
+                     is_deleted = excluded.is_deleted,
+                     projected_at = excluded.projected_at",
+                params![
+                    realm.as_str(),
+                    class.qbo_id,
+                    class.name,
+                    class.fully_qualified_name,
+                    class.parent_id,
+                    i64::from(class.is_active),
+                    i64::from(class.is_deleted),
+                    stamp,
+                ],
+            )?;
+        }
+        ParsedEntity::Document(document) => write_document(transaction, realm, document, &stamp)?,
+    }
+    Ok(())
+}
+
+fn write_document(
+    transaction: &rusqlite::Transaction<'_>,
+    realm: &RealmId,
+    document: &ParsedDocument,
+    stamp: &str,
+) -> Result<(), StoreError> {
+    transaction.execute(
+        "INSERT INTO documents
+             (realm_id, qbo_id, doc_type, doc_number, txn_date, contact_id,
+              class_id, total_minor, balance_minor, is_deleted, contact_type,
+              doc_status, po_number, due_date, private_note, customer_memo,
+              currency, projected_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
+                 ?15, ?16, ?17, ?18)
+         ON CONFLICT(realm_id, qbo_id) DO UPDATE SET
+             doc_type = excluded.doc_type,
+             doc_number = excluded.doc_number,
+             txn_date = excluded.txn_date,
+             contact_id = excluded.contact_id,
+             class_id = excluded.class_id,
+             total_minor = excluded.total_minor,
+             balance_minor = excluded.balance_minor,
+             is_deleted = excluded.is_deleted,
+             contact_type = excluded.contact_type,
+             doc_status = excluded.doc_status,
+             po_number = excluded.po_number,
+             due_date = excluded.due_date,
+             private_note = excluded.private_note,
+             customer_memo = excluded.customer_memo,
+             currency = excluded.currency,
+             projected_at = excluded.projected_at",
+        params![
+            realm.as_str(),
+            document.qbo_id,
+            document.doc_type.as_str(),
+            document.doc_number,
+            document.txn_date,
+            document.contact_id,
+            document.class_id,
+            document.total.minor(),
+            document.balance.map(Money::minor),
+            i64::from(document.is_deleted),
+            document.contact_type.map(ContactType::as_str),
+            document.doc_status,
+            document.po_number,
+            document.due_date,
+            document.private_note,
+            document.customer_memo,
+            document.currency,
+            stamp,
+        ],
+    )?;
+
+    // Lines and links are replaced wholesale rather than merged: an edit in QBO
+    // can delete a line, and an upsert alone would leave the deleted one behind.
+    transaction.execute(
+        "DELETE FROM document_lines WHERE realm_id = ?1 AND doc_qbo_id = ?2",
+        params![realm.as_str(), document.qbo_id],
+    )?;
+    transaction.execute(
+        "DELETE FROM document_links WHERE realm_id = ?1 AND from_qbo_id = ?2",
+        params![realm.as_str(), document.qbo_id],
+    )?;
+
+    for line in &document.lines {
+        transaction.execute(
+            "INSERT INTO document_lines
+                 (realm_id, doc_qbo_id, line_no, item_id, description, qty,
+                  unit_price, amount_minor, class_id, is_taxable)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![
+                realm.as_str(),
+                document.qbo_id,
+                line.line_no,
+                line.item_id,
+                line.description,
+                line.qty.map(|d| d.to_string()),
+                line.unit_price.map(|d| d.to_string()),
+                line.amount.minor(),
+                line.class_id,
+                i64::from(line.is_taxable),
+            ],
+        )?;
+    }
+
+    for (seq, link) in document.links.iter().enumerate() {
+        transaction.execute(
+            "INSERT INTO document_links
+                 (realm_id, from_qbo_id, from_type, seq, to_qbo_id, to_type, line_no)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                realm.as_str(),
+                document.qbo_id,
+                document.doc_type.as_str(),
+                seq as i64,
+                link.to_qbo_id,
+                link.to_type,
+                link.line_no,
+            ],
+        )?;
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]

@@ -331,17 +331,106 @@ to prevent, and SQLite has no decimal type.
 `STRICT` tables throughout: SQLite's default type affinity will silently accept a
 string into an integer column, which is not acceptable in a financial store.
 
-Masters (`customers`, `vendors`, `items`, `accounts`, `classes`) follow the same
-pattern: realm-scoped composite primary key, parsed columns for search and
-display, raw JSON in `entities`.
+Masters follow the same pattern — realm-scoped composite primary key, parsed
+columns for search and display, raw JSON in `entities`. They land in migration 2
+as `contacts`, `items`, `accounts` and `classes`, alongside `document_links`
+(§3.4) and the FTS indexes (§3.3).
 
-### 3.3 Search
+Customers and vendors share `contacts` because every document faces one or the
+other and the UI treats them the same way. Their QBO id spaces are separate, so
+`contact_type` is part of the key and travels with the id everywhere — an id
+alone does not identify a contact, and a join that forgets this files a vendor
+as a customer.
 
-FTS5 across customers, vendors, items, document memos and line descriptions —
-this is what makes Cmd-K instant. External-content FTS tables over the parsed
-tables, rebuilt by trigger, so the index cannot drift from its source.
+`documents` also gains the columns the UI needs and the first cut did not carry:
+`po_number` (the *customer's* PO, which QBO keeps in a custom field named
+whatever the file's owner chose, not a first-class field), `contact_type`,
+`doc_status`, `due_date`, the two memo fields and `currency`. They are added
+with `ALTER TABLE` rather than by dropping and rebuilding, so no replica loses
+its documents during the upgrade even though it could rebuild them.
 
-### 3.4 Data outlives the app
+### 3.3 Search — references first, text last
+
+FTS5 across customers, vendors, items, document memos and line descriptions is
+what makes Cmd-K instant, but full-text ranking alone answers the wrong
+question. The stated requirement is that typing a number lands on the
+transaction. A relevance score cannot promise that; an index lookup can.
+
+So search is not one ranked query. It is an ordered set of attempts, and the
+order **is** the ranking:
+
+| # | Attempt | Reason reported |
+|---|---|---|
+| 1 | `doc_number` equals the query | `DocumentNumber` |
+| 2 | `po_number` equals the query — the customer's PO, not ours | `PurchaseOrderNumber` |
+| 3 | An item's `sku` equals the query | `Sku` |
+| 4 | The query reads as money and equals a total or balance | `Amount` |
+| 5 | `doc_number` starts with the query | `DocumentNumberPrefix` |
+| 6 | FTS across contacts, items, memos, line descriptions | `Text` |
+
+Each stage runs only while there is room under the caller's limit, so the common
+case — the user typed a document number — touches one index and stops.
+
+Two rules worth stating because they are choices, not consequences:
+
+- **A bare run of digits is a reference, not an amount.** `21234` is far more
+  likely to be an invoice number than $21,234.00. Something in the query has to
+  say money — a currency symbol, a thousands separator, or a decimal point —
+  before amounts are searched at all. Otherwise every reference lookup drags a
+  list of coincidental totals behind it.
+- **User input never becomes FTS syntax.** Each alphanumeric run is quoted and
+  the last gets a `*`, so operators, quotes and stray punctuation are inert
+  rather than errors. `NEAR(` is a search for the word `NEAR`.
+
+External-content FTS tables over the projected tables, maintained by trigger, so
+the index cannot drift from its source — renaming a customer removes the old
+name from the index in the same statement that writes the new one.
+
+### 3.4 Lineage
+
+QBO records document relationships as `LinkedTxn`, written on the document that
+carries them: an invoice names the estimate it came from, a bill payment names
+the bills it settles. `document_links` flattens that, one row per link in payload
+order, with the line number when the link hangs off a line rather than the
+header — which is how a bill payment says which line settles which bill.
+
+Both directions come out of that one table. "What did this estimate become?" is
+the same rows read backwards, which is what `idx_links_to` exists for. A walk
+outward from any document is bounded by depth and by a visited set, because
+QBO's graph does not forbid cycles.
+
+`to_type` stays a string rather than becoming a `DocumentType`. QBO's `TxnType`
+vocabulary is wider than the entity names it accepts on the wire —
+`BillPaymentCheck`, `Check` and `ReimburseCharge` appear here and map to no
+single entity endpoint. Narrowing it would mean either dropping edges or
+inventing a mapping, so the payload's own word is kept.
+
+Links to documents outside the mirrored window are **reported, not hidden**: a
+lineage result carries an `unresolved` list, so a gap in a chain reads as a gap
+rather than as the chain ending.
+
+### 3.5 When a payload will not parse
+
+The projection is derived, so a parse failure is recoverable and must not be
+destructive. An entity whose payload cannot be read as its type goes to
+`quarantine_entities` with the reason; its raw JSON stays in `entities`
+untouched. A later parser fix plus a re-projection recovers it, and projecting a
+corrected payload clears the quarantine row.
+
+What counts as unreadable is deliberately strict on money:
+
+- A **missing total** is quarantined, never treated as zero. A number we could
+  not read is not the number zero, and writing a wrong figure into the
+  projection is the one failure that is not recoverable by re-reading.
+- An **amount carrying more than two decimals** is quarantined rather than
+  rounded. Amounts are two places in QBO; three means this build has misread the
+  field, and rounding would bury that. Prices, which legitimately carry more,
+  stay `Decimal` text and are not subject to this.
+
+A description-only line carrying no `Amount` is the one place zero is the honest
+reading, and it is taken as zero.
+
+### 3.6 Data outlives the app
 
 The brief requires the SQLite file be meaningful under plain `sqlite3` with no
 application code. Consequences honoured above: readable table and column names,
@@ -684,8 +773,25 @@ POs/SOs, **accrual only**.
 | Save a document (local commit) | < 50 ms |
 | Full initial sync, both realms | report actual; target < 10 min |
 
-A synthetic realm generator produces 50k transactions so these can be measured
-without hammering Intuit. Numbers get reported as measurements, never as claims.
+A synthetic realm generator produces the book so these can be measured without
+hammering Intuit. Numbers get reported as measurements, never as claims.
+
+**Measured so far** — 10,000 invoices and 200 customers, projected into an
+in-memory replica, debug build, one commit per entity
+(`cargo test -p qbo-local --test replica -- --ignored --nocapture`):
+
+| | Measured |
+|---|---|
+| Search by document number | ~8 ms |
+| Search by customer name | ~7 ms |
+| Search by line description | ~42 ms |
+| Projecting 10,200 entities | ~3.7 s |
+
+Two of those want work before they are done. Line-description search is the
+slowest path because it reaches its documents through a subquery on the line
+index; it is inside budget but it is the one that will degrade first. And
+projection commits one transaction per entity, which is fine for CDC deltas and
+wrong for an initial sync of a whole book — that needs a batch path before M1.
 
 ---
 

@@ -298,13 +298,51 @@ impl DocumentType {
     }
 }
 
+/// Which side of the book a contact sits on.
+///
+/// Customers and vendors have separate id spaces in QBO, so an id alone does
+/// not identify a contact — this travels with it everywhere.
+#[derive(Copy, Clone, PartialEq, Eq, Hash, Debug, serde::Serialize, serde::Deserialize)]
+pub enum ContactType {
+    Customer,
+    Vendor,
+}
+
+impl ContactType {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            ContactType::Customer => "Customer",
+            ContactType::Vendor => "Vendor",
+        }
+    }
+
+    /// Employees and other `EntityRef` targets are deliberately not contacts:
+    /// they are neither a customer nor a vendor, and saying so returns `None`
+    /// rather than picking the nearer of two wrong answers.
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw {
+            "Customer" => Some(ContactType::Customer),
+            "Vendor" => Some(ContactType::Vendor),
+            _ => None,
+        }
+    }
+
+    pub const fn as_entity(self) -> EntityType {
+        match self {
+            ContactType::Customer => EntityType::Customer,
+            ContactType::Vendor => EntityType::Vendor,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn realm_id_accepts_a_real_realm() {
-        // Aquamentor's realm, from the QBO deep link on invoice #21234.
+    fn realm_id_accepts_a_realm_shaped_string() {
+        // A placeholder of the right shape. Real realm ids do not go in the
+        // repository — HANDOFF.md §2.6; read yours from the QBO deep link.
         let realm = RealmId::parse("1234567890123456").unwrap();
         assert_eq!(realm.as_str(), "1234567890123456");
     }

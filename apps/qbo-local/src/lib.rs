@@ -8,6 +8,7 @@
 //!
 //! - [`domain`]   — §2: realm scoping, entity types
 //! - [`store`]    — §3: replica schema and migrations
+//! - [`project`]  — §3.2: raw payloads to the parsed projection
 //! - [`sync`]     — §4: CDC cursor strategy and its failure modes
 //! - [`auth`]     — §5: token rotation and durable persistence
 //! - [`ratelimit`]— §4.4: per-realm token buckets
@@ -19,6 +20,7 @@ pub mod auth;
 pub mod client;
 pub mod domain;
 pub mod outbox;
+pub mod project;
 pub mod ratelimit;
 pub mod store;
 pub mod sync;

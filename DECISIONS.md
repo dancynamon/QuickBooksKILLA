@@ -138,3 +138,60 @@ be made to look like one that was never touched.
 
 These were the last two open items on the ledger side. The remaining open
 questions are the API confidence items in `DESIGN.md` §0 and the class taxonomy.
+
+## D8 — Rounding gets a third policy: `MirroredAmount`
+
+23 Aug 2026, in build.
+
+`round_money` is the only `Decimal → Money` conversion point, and its policy
+enum names *why* a rounding decision is being made — `LineExtension`,
+`TaxCalculation`. Projecting a QBO amount is neither: the book of record already
+rounded it, and `qbo-local` is changing representation, not deciding anything.
+
+Borrowing `LineExtension` for it would have been a lie about intent in the one
+place the codebase is most careful about intent. So the policy set grows by one:
+`MirroredAmount`, documented as unreachable by construction — its caller rejects
+anything over two decimal places before it gets there, and if the strategy ever
+does fire, the precision check is the bug.
+
+## D9 — An unreadable amount is quarantined, never defaulted
+
+23 Aug 2026, in build.
+
+Two cases, one rule. A document with no readable `TotalAmt` does not project as
+zero, and an amount carrying three decimal places does not get rounded to two.
+Both go to `quarantine_entities` with the reason, raw JSON untouched in
+`entities`.
+
+The asymmetry is the point: a quarantined row is recoverable by fixing the parser
+and re-projecting, and it is visibly wrong in the meantime. A wrong figure
+written into the projection is neither. The one exception is a description-only
+line with no `Amount`, which genuinely contributes nothing — there, zero is the
+honest reading rather than a default.
+
+## D10 — A bare number is a reference, not an amount
+
+23 Aug 2026, in build.
+
+Search tries exact identifiers before text, which follows directly from the
+brief. The judgement call is what to do with digits: `21234` could be invoice
+21234 or $21,234.00.
+
+It is treated as a reference only. Amounts are searched only when the query says
+money — a currency symbol, a thousands separator, or a decimal point. Searching
+both would mean every reference lookup drags a list of coincidental totals behind
+it, which defeats the requirement that typing a number lands on the transaction.
+
+## D11 — `LinkedTxn` types stay strings
+
+23 Aug 2026, in build.
+
+QBO's `TxnType` vocabulary in a link is wider than the entity names the API
+accepts on the wire: `BillPaymentCheck`, `Check` and `ReimburseCharge` all appear
+and map to no single endpoint. Narrowing links to the `DocumentType` enum would
+mean either silently dropping those edges or inventing a mapping.
+
+Neither is acceptable in a lineage view whose whole value is that it shows the
+real chain, so the payload's own word is kept. Links pointing outside the
+mirrored window are reported in an `unresolved` list for the same reason: a gap
+in a chain should read as a gap, not as the chain ending.

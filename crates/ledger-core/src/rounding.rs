@@ -21,6 +21,15 @@ pub enum RoundingPolicy {
     /// if the ledger project ever computes tax independently and reconciles
     /// against QBO.
     TaxCalculation,
+    /// Converting an amount that arrived already rounded by the book of record.
+    ///
+    /// This is a change of representation, not a rounding decision: `qbo-local`
+    /// mirrors the amounts QBO computed rather than recomputing them, and its
+    /// caller rejects anything carrying more than two decimal places before it
+    /// gets here. A strategy is still required by the signature, so the
+    /// line-extension one stands in — it is unreachable by construction, and if
+    /// it ever does fire, the caller's precision check is the bug.
+    MirroredAmount,
 }
 
 impl RoundingPolicy {
@@ -28,6 +37,7 @@ impl RoundingPolicy {
         match self {
             RoundingPolicy::LineExtension => RoundingStrategy::MidpointAwayFromZero,
             RoundingPolicy::TaxCalculation => RoundingStrategy::MidpointNearestEven,
+            RoundingPolicy::MirroredAmount => RoundingStrategy::MidpointAwayFromZero,
         }
     }
 }
