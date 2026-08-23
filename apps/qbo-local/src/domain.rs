@@ -137,7 +137,11 @@ pub enum DocumentType {
 
 /// Which sync tier an entity belongs to. `DESIGN.md` §3.1 — history depth is
 /// never staged, but breadth is, so a working sync arrives sooner.
-#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+///
+/// The declaration order is load-bearing: `Ord` follows it, and the sync driver
+/// orders a run by tier so masters are mirrored before the documents that
+/// display them. Reordering these variants reorders sync.
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum SyncTier {
     /// Masters. Everything else references these, so they sync first.
     Masters,

@@ -550,41 +550,48 @@ fn search_stays_fast_at_a_realistic_book_size() {
     let store = Store::open_in_memory().unwrap();
     store.register_realm(&realm(), "Scale Test", now()).unwrap();
 
-    let built = Instant::now();
-    for customer in 0..CUSTOMERS {
-        let entity = mirrored(
-            EntityType::Customer,
-            &format!("c{customer}"),
-            json!({
-                "Id": format!("c{customer}"),
-                "DisplayName": format!("Test Customer {customer:04}"),
-                "Active": true
-            }),
-        );
-        store.upsert_entity(&realm(), &entity, now()).unwrap();
-        store.project_entity(&realm(), &entity, now()).unwrap();
-    }
+    // Built through `apply_batch`, which is the path a real sync takes — one
+    // commit per page rather than one per entity.
+    const PAGE: usize = 500;
 
-    for invoice in 0..INVOICES {
-        let entity = mirrored(
-            EntityType::Invoice,
-            &format!("i{invoice}"),
-            json!({
-                "Id": format!("i{invoice}"),
-                "DocNumber": format!("{}", 10_000 + invoice),
-                "TxnDate": "2026-01-15",
-                "CustomerRef": { "value": format!("c{}", invoice % CUSTOMERS) },
-                "TotalAmt": 100.00,
-                "Line": [ {
-                    "LineNum": 1,
-                    "Description": format!("Foam blank batch {invoice}, blue"),
-                    "Amount": 100.00, "DetailType": "SalesItemLineDetail",
-                    "SalesItemLineDetail": { "ItemRef": { "value": "12" } }
-                } ]
-            }),
-        );
-        store.upsert_entity(&realm(), &entity, now()).unwrap();
-        store.project_entity(&realm(), &entity, now()).unwrap();
+    let contacts: Vec<_> = (0..CUSTOMERS)
+        .map(|customer| {
+            mirrored(
+                EntityType::Customer,
+                &format!("c{customer}"),
+                json!({
+                    "Id": format!("c{customer}"),
+                    "DisplayName": format!("Test Customer {customer:04}"),
+                    "Active": true
+                }),
+            )
+        })
+        .collect();
+    let invoices: Vec<_> = (0..INVOICES)
+        .map(|invoice| {
+            mirrored(
+                EntityType::Invoice,
+                &format!("i{invoice}"),
+                json!({
+                    "Id": format!("i{invoice}"),
+                    "DocNumber": format!("{}", 10_000 + invoice),
+                    "TxnDate": "2026-01-15",
+                    "CustomerRef": { "value": format!("c{}", invoice % CUSTOMERS) },
+                    "TotalAmt": 100.00,
+                    "Line": [ {
+                        "LineNum": 1,
+                        "Description": format!("Foam blank batch {invoice}, blue"),
+                        "Amount": 100.00, "DetailType": "SalesItemLineDetail",
+                        "SalesItemLineDetail": { "ItemRef": { "value": "12" } }
+                    } ]
+                }),
+            )
+        })
+        .collect();
+
+    let built = Instant::now();
+    for page in contacts.chunks(PAGE).chain(invoices.chunks(PAGE)) {
+        store.apply_batch(&realm(), page, None, now()).unwrap();
     }
     let build = built.elapsed();
 
@@ -603,7 +610,8 @@ fn search_stays_fast_at_a_realistic_book_size() {
     let by_line_text = started.elapsed();
 
     println!(
-        "  {INVOICES} invoices, {CUSTOMERS} customers, projected in {build:?}\n    \
+        "  {INVOICES} invoices, {CUSTOMERS} customers, projected in {build:?} \
+         ({PAGE} per commit)\n    \
          document number : {by_number:?}\n    \
          customer name   : {by_text:?}\n    \
          line text       : {by_line_text:?}"

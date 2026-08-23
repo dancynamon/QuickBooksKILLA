@@ -468,10 +468,26 @@ This is where incremental sync actually breaks, so each mode gets an explicit
 response.
 
 **Truncation.** CDC returns at most 1000 objects. A response at exactly the cap
-must be assumed truncated. Response: halve the window and re-poll, recursively,
-until responses come back under the cap; only then advance the cursor. *Rejected:
-advancing the cursor to the newest returned record — with an unordered or
-partially-returned set, that silently drops everything not returned.*
+must be assumed truncated.
+
+An earlier draft of this section said to halve the window and re-poll. **That is
+not implementable**: CDC accepts a `changedSince` and nothing else, so a CDC
+window has no upper bound to halve. The only knob is moving the start forward,
+which is precisely the unsafe move — with an unordered or partially-returned set,
+advancing to the newest record received silently drops everything sharing that
+timestamp that the response did not include.
+
+Response: discard the truncated response entirely and re-read the same window
+through the **query** endpoint, which does take both bounds
+(`WHERE MetaData.LastUpdatedTime >= x AND < y`) and does page. The window is read
+to exhaustion at a page size we choose rather than one Intuit imposes, and the
+cursor advances only once the whole window is read — to the moment the sync
+started, never to the newest record seen. Anything modified during the backfill
+carries a later timestamp and is picked up by the next poll.
+
+*Rejected: advancing the cursor to the newest returned record, for the reason
+above. Also rejected: falling back to a full sweep, which is correct but costs a
+whole-book download to recover from one busy hour.*
 
 **Cursor older than the lookback window.** CDC looks back at most 30 days. Past
 that, a CDC call does not error — it returns what it can, which is the dangerous
@@ -776,22 +792,36 @@ POs/SOs, **accrual only**.
 A synthetic realm generator produces the book so these can be measured without
 hammering Intuit. Numbers get reported as measurements, never as claims.
 
-**Measured so far** — 10,000 invoices and 200 customers, projected into an
-in-memory replica, debug build, one commit per entity
-(`cargo test -p qbo-local --test replica -- --ignored --nocapture`):
+**Measured so far** — debug build, `cargo test -p qbo-local -- --ignored --nocapture`.
+
+Search, against 10,000 invoices and 200 customers in an in-memory replica:
 
 | | Measured |
 |---|---|
-| Search by document number | ~8 ms |
-| Search by customer name | ~7 ms |
-| Search by line description | ~42 ms |
-| Projecting 10,200 entities | ~3.7 s |
+| By document number | ~7 ms |
+| By customer name | ~7 ms |
+| By line description | ~41 ms |
 
-Two of those want work before they are done. Line-description search is the
-slowest path because it reaches its documents through a subquery on the line
-index; it is inside budget but it is the one that will degrade first. And
-projection commits one transaction per entity, which is fine for CDC deltas and
-wrong for an initial sync of a whole book — that needs a batch path before M1.
+Line-description search is the slowest path — it reaches its documents through a
+subquery on the line index. Inside budget, and the one that will degrade first.
+
+Commit cost, 2,000 invoices, **file** database with WAL and `synchronous = FULL`:
+
+| | Measured |
+|---|---|
+| One commit per entity | ~2.5 s |
+| 500 per commit (`apply_batch`) | ~0.58 s |
+
+The second measurement corrects the first attempt at it. Batching was measured
+in-memory first and looked worth almost nothing — 3.7 s to 3.2 s across 10,200
+entities. That measurement was meaningless: an in-memory database does not
+fsync, so it cannot show the cost a commit actually has. On disk the same change
+is **4.3×**, which for an initial sync of a thirty-thousand-transaction book is
+the difference between about forty seconds and about nine.
+
+The general lesson is worth keeping: a performance measurement taken against
+`open_in_memory` says nothing about durability costs, and `open_in_memory` is
+what every other test here uses.
 
 ---
 
@@ -802,5 +832,6 @@ wrong for an initial sync of a whole book — that needs a batch path before M1.
 | 1 | Confirm §0 ⚠️ items against `developer.intuit.com` — batch limit, CDC entity exclusions, `RequestId` scope | M2 write path |
 | 2 | OAuth client id/secret and a sandbox company, on the machine that will run the first live sync | M0 completion |
 | 3 | Confirm QBO's tax rounding mode (§1) | ledger project, not this one |
+| 4 | Confirm the query endpoint accepts a `MetaData.LastUpdatedTime` range and honours `ORDERBY` on it (§4.3) — CDC truncation recovery depends on it | M1 |
 
 Closed: WaterLine CNC sizing — not being measured, see §0.

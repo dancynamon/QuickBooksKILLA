@@ -195,3 +195,40 @@ Neither is acceptable in a lineage view whose whole value is that it shows the
 real chain, so the payload's own word is kept. Links pointing outside the
 mirrored window are reported in an `unresolved` list for the same reason: a gap
 in a chain should read as a gap, not as the chain ending.
+
+## D12 — CDC truncation recovers through the query endpoint, not by halving
+
+23 Aug 2026, in build.
+
+§4.3 originally said to halve the CDC window and re-poll until responses came
+back under the cap. Building the driver showed that cannot work: CDC takes a
+`changedSince` and no end bound, so there is no window to halve. The only
+available move is advancing the start, which is the exact silent-loss case the
+rule existed to prevent.
+
+The query endpoint takes both bounds and pages, so a truncated window is re-read
+there instead — completely, at a page size we control. `halve_window` and its
+tests have been **deleted** rather than left in place. Machinery with tests
+around it reads as a strategy in use, and this one was neither used nor usable;
+leaving it would have meant the next person implementing against §4.3 built the
+wrong thing twice.
+
+The cost of being wrong here is bounded and worth stating: if the query endpoint
+turns out not to accept a `LastUpdatedTime` range the way §0 assumes, the
+fallback is a full sweep — correct, and expensive. That assumption is on the §12
+open-items list with the rest of the ⚠️ API facts.
+
+## D13 — The sync cursor advances only inside the transaction that wrote its entities
+
+23 Aug 2026, in build.
+
+§4.1 asked for this and nothing enforced it. `Store::apply_batch` now takes the
+entities and the cursor together and commits them in one transaction, so a
+cursor that has moved is a cursor whose records are on disk.
+
+Two consequences fall out. A multi-page sweep writes **no** cursor until its last
+page, so a crash halfway through re-sweeps rather than resuming from a position
+that was never fully covered — the partial pages are already mirrored, so the
+re-sweep is idempotent, not wasted. And batching is now the normal path rather
+than an optimisation, which fixes the one-transaction-per-entity cost flagged in
+§11 for initial sync.

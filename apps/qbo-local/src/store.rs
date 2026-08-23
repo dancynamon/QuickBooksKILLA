@@ -17,6 +17,7 @@ pub mod search;
 
 use crate::domain::{ContactType, DocumentType, EntityType, RealmId};
 use crate::project::{ParsedDocument, ParsedEntity, Projection};
+use crate::sync::SyncCursor;
 
 #[derive(Debug, Error)]
 pub enum StoreError {
@@ -496,29 +497,7 @@ impl Store {
         entity: &MirroredEntity,
         mirrored_at: DateTime<Utc>,
     ) -> Result<(), StoreError> {
-        self.connection.execute(
-            "INSERT INTO entities
-                 (realm_id, entity_type, qbo_id, sync_token, last_updated_utc,
-                  is_deleted, raw_json, mirrored_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
-             ON CONFLICT(realm_id, entity_type, qbo_id) DO UPDATE SET
-                 sync_token       = excluded.sync_token,
-                 last_updated_utc = excluded.last_updated_utc,
-                 is_deleted       = excluded.is_deleted,
-                 raw_json         = excluded.raw_json,
-                 mirrored_at      = excluded.mirrored_at",
-            params![
-                realm.as_str(),
-                entity.entity_type.as_str(),
-                entity.qbo_id,
-                entity.sync_token,
-                entity.last_updated_utc.to_rfc3339(),
-                i64::from(entity.is_deleted),
-                entity.raw_json.to_string(),
-                mirrored_at.to_rfc3339(),
-            ],
-        )?;
-        Ok(())
+        upsert_entity_in(&self.connection, realm, entity, mirrored_at)
     }
 
     pub fn get_entity(
@@ -574,6 +553,101 @@ impl Store {
     }
 
     // -----------------------------------------------------------------------
+    // Sync application (§4.1)
+    // -----------------------------------------------------------------------
+
+    /// Mirror a batch of entities, project them, and advance the cursor — all
+    /// in one transaction.
+    ///
+    /// The atomicity is the requirement, not an optimisation. §4.1: a cursor
+    /// advanced outside the transaction that wrote the entities it covers can
+    /// skip changes after a crash, and nothing afterwards would know to look for
+    /// them. One commit per batch is also what makes an initial sync of a whole
+    /// book tractable — a commit per entity is fine for a CDC delta of six rows
+    /// and wrong for thirty thousand.
+    pub fn apply_batch(
+        &self,
+        realm: &RealmId,
+        entities: &[MirroredEntity],
+        cursor: Option<&SyncCursor>,
+        now: DateTime<Utc>,
+    ) -> Result<BatchReport, StoreError> {
+        let transaction = self.connection.unchecked_transaction()?;
+        let mut report = BatchReport::default();
+
+        for entity in entities {
+            upsert_entity_in(&transaction, realm, entity, now)?;
+
+            match crate::project::parse(entity) {
+                Projection::Parsed(parsed) => {
+                    write_parsed(&transaction, realm, &parsed, now)?;
+                    transaction.execute(
+                        "DELETE FROM quarantine_entities
+                         WHERE realm_id = ?1 AND entity_type = ?2 AND qbo_id = ?3",
+                        params![realm.as_str(), entity.entity_type.as_str(), entity.qbo_id],
+                    )?;
+                    report.projected += 1;
+                }
+                Projection::NotProjected => report.not_projected += 1,
+                Projection::Quarantine(reason) => {
+                    quarantine_in(&transaction, realm, entity, &reason, now)?;
+                    report.quarantined += 1;
+                }
+            }
+            report.mirrored += 1;
+        }
+
+        if let Some(cursor) = cursor {
+            save_cursor_in(&transaction, cursor)?;
+        }
+
+        transaction.commit()?;
+        Ok(report)
+    }
+
+    pub fn load_cursor(
+        &self,
+        realm: &RealmId,
+        entity_type: EntityType,
+    ) -> Result<SyncCursor, StoreError> {
+        let row = self
+            .connection
+            .query_row(
+                "SELECT last_cdc_cursor, last_full_sweep FROM sync_cursors
+                 WHERE realm_id = ?1 AND entity_type = ?2",
+                params![realm.as_str(), entity_type.as_str()],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<String>>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                    ))
+                },
+            )
+            .optional()?;
+
+        // No row means never synced, which is exactly what a fresh cursor says.
+        let Some((cdc, sweep)) = row else {
+            return Ok(SyncCursor::new(realm.clone(), entity_type));
+        };
+
+        Ok(SyncCursor {
+            realm_id: realm.clone(),
+            entity_type,
+            last_cdc_cursor: cdc.as_deref().and_then(parse_optional_timestamp),
+            last_full_sweep: sweep.as_deref().and_then(parse_optional_timestamp),
+        })
+    }
+
+    /// Write a cursor on its own.
+    ///
+    /// Prefer [`Store::apply_batch`], which writes it alongside the entities it
+    /// covers. This exists for the case where a sync legitimately advances a
+    /// cursor without mirroring anything — a poll that returned nothing.
+    pub fn save_cursor(&self, cursor: &SyncCursor) -> Result<(), StoreError> {
+        save_cursor_in(&self.connection, cursor)
+    }
+
+    // -----------------------------------------------------------------------
     // Projection (§3.2)
     // -----------------------------------------------------------------------
 
@@ -602,25 +676,7 @@ impl Store {
                     params![realm.as_str(), entity.entity_type.as_str(), entity.qbo_id],
                 )?;
             }
-            Projection::Quarantine(reason) => {
-                transaction.execute(
-                    "INSERT INTO quarantine_entities
-                         (realm_id, entity_type, qbo_id, reason, raw_json, quarantined_at)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-                     ON CONFLICT(realm_id, entity_type, qbo_id) DO UPDATE SET
-                         reason = excluded.reason,
-                         raw_json = excluded.raw_json,
-                         quarantined_at = excluded.quarantined_at",
-                    params![
-                        realm.as_str(),
-                        entity.entity_type.as_str(),
-                        entity.qbo_id,
-                        reason,
-                        entity.raw_json.to_string(),
-                        now.to_rfc3339(),
-                    ],
-                )?;
-            }
+            Projection::Quarantine(reason) => quarantine_in(&transaction, realm, entity, reason, now)?,
             Projection::NotProjected => {}
         }
 
@@ -668,19 +724,7 @@ impl Store {
                 }
                 Projection::NotProjected => report.not_projected += 1,
                 Projection::Quarantine(reason) => {
-                    transaction.execute(
-                        "INSERT INTO quarantine_entities
-                             (realm_id, entity_type, qbo_id, reason, raw_json, quarantined_at)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                        params![
-                            realm.as_str(),
-                            entity.entity_type.as_str(),
-                            entity.qbo_id,
-                            reason,
-                            entity.raw_json.to_string(),
-                            now.to_rfc3339(),
-                        ],
-                    )?;
+                    quarantine_in(&transaction, realm, entity, &reason, now)?;
                     report.quarantined += 1;
                 }
             }
@@ -940,6 +984,102 @@ pub(crate) fn document_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Document
         customer_memo: row.get(14)?,
         is_deleted: row.get::<_, i64>(15)? != 0,
     })
+}
+
+fn upsert_entity_in(
+    connection: &rusqlite::Connection,
+    realm: &RealmId,
+    entity: &MirroredEntity,
+    mirrored_at: DateTime<Utc>,
+) -> Result<(), StoreError> {
+    connection.execute(
+        "INSERT INTO entities
+             (realm_id, entity_type, qbo_id, sync_token, last_updated_utc,
+              is_deleted, raw_json, mirrored_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+         ON CONFLICT(realm_id, entity_type, qbo_id) DO UPDATE SET
+             sync_token       = excluded.sync_token,
+             last_updated_utc = excluded.last_updated_utc,
+             is_deleted       = excluded.is_deleted,
+             raw_json         = excluded.raw_json,
+             mirrored_at      = excluded.mirrored_at",
+        params![
+            realm.as_str(),
+            entity.entity_type.as_str(),
+            entity.qbo_id,
+            entity.sync_token,
+            entity.last_updated_utc.to_rfc3339(),
+            i64::from(entity.is_deleted),
+            entity.raw_json.to_string(),
+            mirrored_at.to_rfc3339(),
+        ],
+    )?;
+    Ok(())
+}
+
+fn quarantine_in(
+    connection: &rusqlite::Connection,
+    realm: &RealmId,
+    entity: &MirroredEntity,
+    reason: &str,
+    now: DateTime<Utc>,
+) -> Result<(), StoreError> {
+    connection.execute(
+        "INSERT INTO quarantine_entities
+             (realm_id, entity_type, qbo_id, reason, raw_json, quarantined_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+         ON CONFLICT(realm_id, entity_type, qbo_id) DO UPDATE SET
+             reason = excluded.reason,
+             raw_json = excluded.raw_json,
+             quarantined_at = excluded.quarantined_at",
+        params![
+            realm.as_str(),
+            entity.entity_type.as_str(),
+            entity.qbo_id,
+            reason,
+            entity.raw_json.to_string(),
+            now.to_rfc3339(),
+        ],
+    )?;
+    Ok(())
+}
+
+fn save_cursor_in(
+    connection: &rusqlite::Connection,
+    cursor: &SyncCursor,
+) -> Result<(), StoreError> {
+    connection.execute(
+        "INSERT INTO sync_cursors
+             (realm_id, entity_type, last_cdc_cursor, last_full_sweep)
+         VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(realm_id, entity_type) DO UPDATE SET
+             last_cdc_cursor = excluded.last_cdc_cursor,
+             last_full_sweep = excluded.last_full_sweep",
+        params![
+            cursor.realm_id.as_str(),
+            cursor.entity_type.as_str(),
+            cursor.last_cdc_cursor.map(|at| at.to_rfc3339()),
+            cursor.last_full_sweep.map(|at| at.to_rfc3339()),
+        ],
+    )?;
+    Ok(())
+}
+
+/// A stored timestamp that will not parse is treated as absent rather than as
+/// "now" — an unreadable cursor should cause a full sweep, which is safe, not a
+/// poll from the current moment, which silently skips everything before it.
+fn parse_optional_timestamp(raw: &str) -> Option<DateTime<Utc>> {
+    DateTime::parse_from_rfc3339(raw)
+        .ok()
+        .map(|at| at.with_timezone(&Utc))
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct BatchReport {
+    pub mirrored: usize,
+    pub projected: usize,
+    pub not_projected: usize,
+    pub quarantined: usize,
 }
 
 fn parse_timestamp(raw: &str) -> DateTime<Utc> {

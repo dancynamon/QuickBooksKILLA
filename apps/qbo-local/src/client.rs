@@ -48,13 +48,30 @@ impl QboError {
     }
 }
 
+/// A half-open `[from, to)` window on `MetaData.LastUpdatedTime`.
+///
+/// CDC takes only a `changedSince` and has no upper bound, so a truncated CDC
+/// response cannot be narrowed from the top. The query endpoint can: QBO's
+/// query language accepts `WHERE MetaData.LastUpdatedTime >= x AND < y`. That
+/// is what makes recovery from truncation proportional — a bounded backfill of
+/// the window that overflowed, rather than re-downloading the whole book.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct UpdatedRange {
+    pub from: DateTime<Utc>,
+    pub to: DateTime<Utc>,
+}
+
 pub trait QboClient {
-    /// Paged read of every record of a type. The full-sweep and initial-pull
-    /// path.
+    /// Paged read of records of a type, optionally bounded to an update window.
+    ///
+    /// Unbounded, this is the full-sweep and initial-pull path. Bounded, it is
+    /// the backfill path CDC truncation falls back to (`DESIGN.md` §4.3).
+    /// Results come back ordered by update time so that paging is stable.
     fn query(
         &mut self,
         realm: &RealmId,
         entity_type: EntityType,
+        updated: Option<UpdatedRange>,
         start_position: usize,
         max_results: usize,
     ) -> Result<Vec<EntityPayload>, QboError>;
@@ -131,6 +148,10 @@ pub struct MockQbo {
     scripted_failures: Vec<QboError>,
     pub create_calls: usize,
     pub query_calls: usize,
+    /// How many objects one CDC response may carry. Set to the real
+    /// [`crate::sync::CDC_RESPONSE_CAP`] by `new`; tests lower it so truncation
+    /// can be exercised without seeding a thousand entities.
+    cdc_cap: usize,
 }
 
 impl MockQbo {
@@ -138,8 +159,15 @@ impl MockQbo {
         MockQbo {
             next_id: 1,
             clock,
+            cdc_cap: crate::sync::CDC_RESPONSE_CAP,
             ..Default::default()
         }
+    }
+
+    /// Lower the CDC response cap, so a test can hit truncation with a handful
+    /// of entities instead of a thousand.
+    pub fn set_cdc_cap(&mut self, cap: usize) {
+        self.cdc_cap = cap;
     }
 
     /// Queue an error to be returned by the next call, before any state change.
@@ -214,6 +242,7 @@ impl QboClient for MockQbo {
         &mut self,
         realm: &RealmId,
         entity_type: EntityType,
+        updated: Option<UpdatedRange>,
         start_position: usize,
         max_results: usize,
     ) -> Result<Vec<EntityPayload>, QboError> {
@@ -224,10 +253,24 @@ impl QboClient for MockQbo {
         let mut matches: Vec<EntityPayload> = self
             .entities
             .iter()
-            .filter(|((r, t, _), _)| r == realm.as_str() && *t == entity_type)
+            .filter(|((r, t, _), payload)| {
+                r == realm.as_str()
+                    && *t == entity_type
+                    && updated.is_none_or(|window| {
+                        payload.last_updated_utc >= window.from
+                            && payload.last_updated_utc < window.to
+                    })
+            })
             .map(|(_, payload)| payload.clone())
             .collect();
-        matches.sort_by(|a, b| a.qbo_id.cmp(&b.qbo_id));
+        // Ordered by update time, then id, so a paged read is stable — which is
+        // what STARTPOSITION paging assumes and what the real endpoint gives
+        // with an explicit ORDERBY.
+        matches.sort_by(|a, b| {
+            a.last_updated_utc
+                .cmp(&b.last_updated_utc)
+                .then(a.qbo_id.cmp(&b.qbo_id))
+        });
         Ok(matches.into_iter().skip(start_position).take(max_results).collect())
     }
 
@@ -250,7 +293,16 @@ impl QboClient for MockQbo {
             })
             .map(|(_, payload)| payload.clone())
             .collect();
-        matches.sort_by(|a, b| a.last_updated_utc.cmp(&b.last_updated_utc));
+        matches.sort_by(|a, b| {
+            a.last_updated_utc
+                .cmp(&b.last_updated_utc)
+                .then(a.qbo_id.cmp(&b.qbo_id))
+        });
+        // The real endpoint truncates rather than erroring, which is the whole
+        // reason §4.3 exists. A double that returned everything would let a
+        // driver look correct while being untested against the failure that
+        // matters.
+        matches.truncate(self.cdc_cap);
         Ok(matches)
     }
 
@@ -495,9 +547,9 @@ mod tests {
             )
             .unwrap();
         }
-        assert_eq!(qbo.query(&realm(), EntityType::Invoice, 0, 2).unwrap().len(), 2);
-        assert_eq!(qbo.query(&realm(), EntityType::Invoice, 4, 2).unwrap().len(), 1);
-        assert_eq!(qbo.query(&realm(), EntityType::Invoice, 9, 2).unwrap().len(), 0);
+        assert_eq!(qbo.query(&realm(), EntityType::Invoice, None, 0, 2).unwrap().len(), 2);
+        assert_eq!(qbo.query(&realm(), EntityType::Invoice, None, 4, 2).unwrap().len(), 1);
+        assert_eq!(qbo.query(&realm(), EntityType::Invoice, None, 9, 2).unwrap().len(), 0);
     }
 
     #[test]

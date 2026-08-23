@@ -10,6 +10,7 @@
 //! - [`store`]    — §3: replica schema and migrations
 //! - [`project`]  — §3.2: raw payloads to the parsed projection
 //! - [`sync`]     — §4: CDC cursor strategy and its failure modes
+//! - [`driver`]   — §4: the loop that runs them against a client and a store
 //! - [`auth`]     — §5: token rotation and durable persistence
 //! - [`ratelimit`]— §4.4: per-realm token buckets
 //! - [`outbox`]   — §6: the write queue and its state machine
@@ -19,6 +20,7 @@
 pub mod auth;
 pub mod client;
 pub mod domain;
+pub mod driver;
 pub mod outbox;
 pub mod project;
 pub mod ratelimit;

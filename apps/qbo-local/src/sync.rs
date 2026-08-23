@@ -110,27 +110,30 @@ pub enum CdcOutcome {
 /// everything the response did not include, which is unrecoverable without a
 /// full sweep nobody knows to run.
 pub fn classify_response(returned: usize) -> CdcOutcome {
-    if returned >= CDC_RESPONSE_CAP {
+    classify_response_with_cap(returned, CDC_RESPONSE_CAP)
+}
+
+/// As [`classify_response`], against a cap the caller names. Exists so a test
+/// can reach truncation with a handful of entities rather than a thousand; the
+/// rule being tested is identical either way.
+pub fn classify_response_with_cap(returned: usize, cap: usize) -> CdcOutcome {
+    if returned >= cap {
         CdcOutcome::PossiblyTruncated
     } else {
         CdcOutcome::Complete
     }
 }
 
-/// Halve a polling window towards its start, for re-polling after truncation.
+/// Whether CDC is known to cover this entity type.
 ///
-/// Returns `None` once the window cannot be meaningfully narrowed further — at
-/// that point more than [`CDC_RESPONSE_CAP`] entities changed within a second
-/// and the caller must fall back to a full sweep rather than loop.
-pub fn halve_window(
-    from: DateTime<Utc>,
-    to: DateTime<Utc>,
-) -> Option<(DateTime<Utc>, DateTime<Utc>)> {
-    let span = to - from;
-    if span <= Duration::seconds(1) {
-        return None;
-    }
-    Some((from, from + span / 2))
+/// ⚠️ §0 records the exact CDC exclusion list as unverified against Intuit's own
+/// documentation (open item 1). The tiers are the honest split available now:
+/// masters and documents are the entities CDC is documented to serve, and the
+/// peripheral tier is where the uncertainty sits. Unconfirmed means the full
+/// sweep, which §4.3 treats as the correctness baseline rather than a fallback —
+/// so being wrong here costs bandwidth, not accuracy.
+pub fn cdc_coverage_confirmed(entity_type: EntityType) -> bool {
+    entity_type.tier() != crate::domain::SyncTier::Peripheral
 }
 
 impl SyncCursor {
@@ -276,35 +279,6 @@ mod tests {
     }
 
     #[test]
-    fn halving_narrows_towards_the_window_start() {
-        let (from, to) = halve_window(at(0), at(10)).unwrap();
-        assert_eq!(from, at(0));
-        assert_eq!(to, at(5));
-    }
-
-    #[test]
-    fn halving_bottoms_out_rather_than_looping_forever() {
-        // More than 1000 entities changed inside one second: narrowing cannot
-        // help, so the caller must sweep instead of spinning.
-        let from = at(0);
-        assert_eq!(halve_window(from, from + Duration::seconds(1)), None);
-        assert_eq!(halve_window(from, from), None);
-    }
-
-    #[test]
-    fn repeated_halving_terminates() {
-        let (mut from, mut to) = (at(0), at(30));
-        let mut iterations = 0;
-        while let Some((next_from, next_to)) = halve_window(from, to) {
-            from = next_from;
-            to = next_to;
-            iterations += 1;
-            assert!(iterations < 64, "halving failed to converge");
-        }
-        assert!(iterations > 0);
-    }
-
-    #[test]
     fn a_full_sweep_rebases_the_incremental_cursor() {
         let mut cursor = cursor(None);
         cursor.record_full_sweep(at(3));
@@ -332,16 +306,5 @@ mod tests {
             }
         }
 
-        /// Halving always produces a strictly smaller window that still starts
-        /// where the original did, so no part of the range is skipped.
-        #[test]
-        fn halving_never_skips_the_start(span_secs in 2i64..1_000_000) {
-            let from = at(0);
-            let to = from + Duration::seconds(span_secs);
-            let (next_from, next_to) = halve_window(from, to).unwrap();
-            prop_assert_eq!(next_from, from);
-            prop_assert!(next_to > from);
-            prop_assert!(next_to < to);
-        }
     }
 }
