@@ -32,7 +32,7 @@ to goal 2 rather than a detour. Three consequences run through the phases:
 
 ## 0. Where it stands
 
-`cargo test --workspace`: 232 tests, all offline, all green. Clippy clean.
+`cargo test --workspace`: 288 tests, all offline, all green. Clippy clean.
 
 Everything that can be built **without Intuit credentials** has been built:
 money and rounding, realm scoping, SQLite replica with projection and
@@ -49,7 +49,7 @@ Everything **not** built needs credentials, Intuit's docs, or a UI toolchain:
 | OAuth loopback flow, or import of the `qbo_headless` refresh token | A | client id/secret, redirect URI |
 | `HttpQboClient` | A | credentials |
 | First live sync, counts and wall-clock measured | A | credentials |
-| CDC daemon loop, nightly snapshot | A | **built 11 Sep**; wiring into a binary remains |
+| CDC daemon loop, nightly snapshot | A | **built 11 Sep**, wired into the `qbo-local` binary (`daemon`, `sweep`, `snapshot`, `init`, `status`); runs with `--mock` until `HttpQboClient` exists |
 | Reconciliation sweep (DESIGN §7) | A | **built 11 Sep**; TB diff (step 5) waits on the ledger |
 | Fixture recorder and scrubber (HANDOFF §2.6) | A | one live response |
 | Verify the four ⚠️ API facts (DESIGN §0, §12) | A, gates C | `developer.intuit.com`, blocked from the cloud sandbox |
@@ -96,9 +96,12 @@ not gate anything written to your own books.
   `store/backup.rs`.
 - ~~Read-only query API~~ built: `store/query.rs`. Measured on the synthetic
   10,000-invoice book, debug build: AR aging ~59 ms, document detail ~0.3 ms.
-- **Wire the daemon into `main.rs`** behind a `--realm` flag, with `SystemClock`
-  and `FileTokenStore` for now; the keychain backend replaces the store on the
-  Mac.
+- ~~Wire the daemon into `main.rs`~~ built: subcommand binary, `--mock` for the
+  loop today, exit 2 with a clear message without it.
+- ~~MCP server over the query API~~ built: `qbo-local-mcp`, 11 read tools,
+  `docs/MCP.md`. A skill can be repointed for a read test as soon as a replica
+  exists.
+- ~~LEDGER-DESIGN.md first draft~~ written (D18), 30 open items for Dan and Joel.
 - **Chaos test for `in_flight` recovery** (DESIGN §10) with a process-boundary
   harness.
 - **Un-ignore the performance measurements** as a thresholded `--ignored` CI
@@ -275,7 +278,7 @@ books in QBO, each scoped as its own item with its own acceptance:
 | 1099-NEC | **Out of scope** (Dan, 11 Sep). The vendor 1099 flag stays in the design as a column; nothing is generated | |
 | CPA handoff | **Accountant mode** (Dan, 11 Sep): a read-only role in the app with what QBO's accountant view gives Joel today. Scoped in `LEDGER-DESIGN.md`: period-locked view, GL detail and TB/P&L/BS exports, an adjusting-entry request queue Dan approves rather than direct posting, a reclassify tool, the close-history log from D7, and an audit trail of every change since the last close. Joel sees it before 1 November and accepts it in writing | A hosted read-only login instead of a local install |
 | Customer payments | **Authorize.net** (Dan, 11 Sep; D15 amended). QBO Payments is used sparingly and is not a hard blocker. The own invoice carries an Authorize.net hosted payment link; a settled payment posts as a customer payment against the invoice. Wire the account, the link, and the settlement import before the 1 November go/no-go | Card-present or ACH if ever needed |
-| Channel intake | **MCP server over the own store** (Dan, 11 Sep). The Shopify, Amazon and wholesale skills in `claude-config` write to QBO through the QuickBooks MCP today; they get repointed to the own platform's MCP server rather than rewritten. The server exposes the query API (built) and, from Phase D, the document-write API. This is also how every other skill that reads QBO keeps working after cutover | Native channel integrations |
+| Channel intake | **MCP server over the own store** (Dan, 11 Sep). The Shopify, Amazon and wholesale skills in `claude-config` write to QBO through the QuickBooks MCP today; they get repointed to the own platform's MCP server rather than rewritten. The server exists (`qbo-local-mcp`, `docs/MCP.md`) with the 11 read tools; document-write tools arrive in Phase D. This is also how every other skill that reads QBO keeps working after cutover | Native channel integrations |
 | Payroll | Already SurePayroll; journal the summary. Not a blocker | |
 | Inventory quantities | QBO's inventory tracking is not used for foam; the own system's manufacturing costing replaces it after cutover | |
 

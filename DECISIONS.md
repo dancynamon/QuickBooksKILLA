@@ -306,3 +306,17 @@ ROADMAP §B', because they are the ones that cannot be changed once history has
 been imported.
 
 Nothing here is decided. The document's purpose is to be marked up.
+
+## D19 — The sales tax return is a four-line derivation, not a tax engine
+
+11 Sep 2026, Dan.
+
+Dan showed the sheet he files from each quarter: A = total income from the P&L
+for the quarter; B = total sales tax collected; C = B / 6.625% = taxable sales;
+D = A - C = non-taxable sales. The own system reproduces those four lines from
+the ledger (`LEDGER-DESIGN.md` §9) and adds a fifth: taxable sales summed from
+line-level `is_taxable`, with the variance against C shown, so the derivation
+can be checked against the lines for the first time.
+
+*Rejected: a per-agency, per-tax-code liability engine. New Jersey at one rate
+is the whole filing today; the rate is a config value in case that changes.*
