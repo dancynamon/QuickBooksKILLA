@@ -12,7 +12,7 @@ edition = "2021"
 [workspace.dependencies]
 chrono = { version = "0.4", features = ["serde"] }
 proptest = "1"
-rusqlite = { version = "0.37", features = ["bundled"] }
+rusqlite = { version = "0.37", features = ["bundled", "backup"] }
 rust_decimal = { version = "1", features = ["serde-with-str"] }
 rust_decimal_macros = "1"
 serde = { version = "1", features = ["derive"] }

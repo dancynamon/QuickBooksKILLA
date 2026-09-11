@@ -17,9 +17,14 @@
 //! - [`client`]   — the QBO API boundary, plus an in-memory double
 //! - [`worker`]   — §6.3-6.5: draining the outbox, dependency resolution
 //! - [`reconcile`]— §7: the verification sweep against QBO's own index
+//! - [`clock`]    — `HANDOFF.md` §2.5: a testable source of time and waiting
+//! - [`daemon`]   — `HANDOFF.md` §2.5, `DESIGN.md` §8: the CDC poll loop and
+//!   nightly snapshots
 
 pub mod auth;
 pub mod client;
+pub mod clock;
+pub mod daemon;
 pub mod domain;
 pub mod driver;
 pub mod outbox;

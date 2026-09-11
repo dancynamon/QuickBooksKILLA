@@ -12,6 +12,7 @@ use thiserror::Error;
 
 use ledger_core::Money;
 
+pub mod backup;
 pub mod index;
 pub mod lineage;
 pub mod query;
@@ -34,6 +35,11 @@ pub enum StoreError {
     /// (D5), and a read path is no exception.
     #[error("money: {0}")]
     Money(#[from] ledger_core::MoneyError),
+    /// Snapshotting (`store::backup`, `DESIGN.md` §8) touches the filesystem
+    /// directly — creating the snapshot directory, pruning old files — which
+    /// none of the SQL-only paths above needed an error variant for.
+    #[error("io: {0}")]
+    Io(#[from] std::io::Error),
 }
 
 /// A forward-only, numbered migration. Applied in a transaction, version
