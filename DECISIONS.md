@@ -248,15 +248,33 @@ over `Store`. No framework until the vanilla code is shown to be the bottleneck.
 an axum server with the prototype in a browser — a listening port on the machine
 that holds the book, and not the desktop app the brief asked for.*
 
-## D15 — QBO Payments is in use, so payments are a hard decoupling blocker
+## D15 — Customer payments move to Authorize.net at cutover
+
+11 Sep 2026, Dan. Amended the same day.
+
+First reading: QBO Payments is in use, so a replacement is a hard blocker.
+Corrected by Dan: it is used sparingly, and the replacement is Authorize.net,
+which the business already has an account with. So it is a go/no-go item
+(hosted payment link on the own invoice, settlement import posting the customer
+payment) but not one that keeps invoices flowing to QBO after cutover.
+
+## D17 — The decoupling blockers, as Dan scoped them
 
 11 Sep 2026, Dan.
 
-Customer payments run through QBO Payments today. Until a replacement processor
-or payment-link path exists in the own system, invoices have to keep reaching
-QBO, which means the outbox export shim (ROADMAP §C) cannot be switched off at
-cutover even if every other blocker is clear. This goes on the 1 November
-go/no-go list as a hard item, not a nice-to-have.
+- **Bank and card feeds:** import the statements the bank and Chase already
+  generate; no aggregator. Reconciliation is a per-statement close.
+- **Sales tax:** replicate the handful of QBO reports the filing is done from.
+  No tax engine. Which reports is still to be named.
+- **1099-NEC:** out of scope entirely.
+- **Accountant:** an accountant mode in the app, modelled on what QBO gives the
+  CPA, rather than an export pack. Read-only, period-locked, with an
+  adjusting-entry request queue Dan approves. Scoped in `LEDGER-DESIGN.md`.
+- **Channel intake and every other skill:** an MCP server over the own store,
+  so the existing `claude-config` skills are repointed rather than rewritten.
+
+*Rejected: Plaid, a tax engine, and a CPA export pack — each solves a problem
+Dan does not have, at a cost he would pay every month.*
 
 ## D16 — Cutover target 1 January 2027, fallback 1 January 2028
 

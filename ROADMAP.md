@@ -58,7 +58,7 @@ Everything **not** built needs credentials, Intuit's docs, or a UI toolchain:
 | `LEDGER-DESIGN.md` | B | Dan's review of three posting policies, §B |
 | Ledger engine, import from replica | B' | LEDGER-DESIGN |
 | Write UI into own store, export via outbox | D | C |
-| Bank import, sales tax, CPA export, channel intake | G | scoped separately |
+| Statement import, sales-tax reports, accountant mode, Authorize.net, MCP server | G | scoped in §G |
 
 The Rust side has never made one HTTP call to Intuit. That is still the first
 thing to fix.
@@ -237,10 +237,12 @@ that produced them.
 
 - Phase E has been running with zero unexplained TB variance for at least four
   weeks, and will reach a full quarter by 31 December.
-- Phase G's blockers for the first quarter of 2027 are done: bank import, sales
-  tax liability report, CPA export accepted by Joel in writing.
-- Channel intake (Shopify, Amazon, wholesale POs) lands in the own store, not
-  only in QBO.
+- Phase G's blockers for the first quarter of 2027 are done: statement import
+  with match-and-clear, the sales-tax reports Dan actually files from, an
+  accountant mode Joel has seen and accepted in writing, and Authorize.net
+  wired for customer payments.
+- Channel intake (Shopify, Amazon, wholesale POs) lands in the own store
+  through the MCP server, and the skills that write orders have been repointed.
 
 If any of those is missing on 1 November, the target moves to 1/1/28 without
 argument, and the parallel run continues for all of 2027. That is the whole
@@ -268,12 +270,12 @@ books in QBO, each scoped as its own item with its own acceptance:
 
 | Blocker | Realistic 2026 path | Later path |
 |---|---|---|
-| Bank and credit-card feeds | CSV/OFX import from Chase and the bank, with a match-and-clear screen | Plaid |
-| Sales tax | NJ single rate plus exemption certificates on file for out-of-state wholesale; liability report by period; filing stays on the NJ portal as it does today | Multi-state nexus if it ever matters |
-| 1099-NEC | Not needed until January 2028 for FY2027; FY2026 comes from QBO | Vendor 1099 flag already in the prototype; generate from payments |
-| CPA handoff | Joel gets GL detail, TB, P&L, balance sheet as exports, and QBO read-only for FY2026; **confirm in writing before 1 November what he will accept** | Read-only login to the app |
-| Customer payments | **QBO Payments is in use (D15).** A replacement processor or hosted payment link is a hard go/no-go item; until it exists invoices must keep reaching QBO through the outbox | Stripe or similar, with the link on the own invoice PDF |
-| Channel intake | The Shopify, Amazon and wholesale skills in `claude-config` write to QBO through the QuickBooks MCP. An **MCP server over the own store** lets every existing skill be repointed without rewriting them, and is the cheapest way to move intake | Native integrations |
+| Bank and credit-card statements | **Statement import** (Dan, 11 Sep): the CSV/OFX/QFX files the bank and Chase already generate, parsed into a `bank_lines` table, then a match-and-clear screen that pairs each line to a payment, deposit, bill payment or expense and flags the unmatched. Reconciliation is a per-statement close: beginning balance + cleared lines = ending balance, or it does not close | Plaid, if manual import ever becomes the bottleneck |
+| Sales tax | **Replicate the QBO reports Dan files from** (Dan, 11 Sep), not QBO's Automated Sales Tax engine. Which reports is an open input; the candidates are the Sales Tax Liability report, Taxable Sales Summary and Taxable Sales Detail. Line-level `is_taxable` and the exemption flag are already in the projection, so these are queries, not schema | Rate tables per jurisdiction if nexus ever widens |
+| 1099-NEC | **Out of scope** (Dan, 11 Sep). The vendor 1099 flag stays in the design as a column; nothing is generated | |
+| CPA handoff | **Accountant mode** (Dan, 11 Sep): a read-only role in the app with what QBO's accountant view gives Joel today. Scoped in `LEDGER-DESIGN.md`: period-locked view, GL detail and TB/P&L/BS exports, an adjusting-entry request queue Dan approves rather than direct posting, a reclassify tool, the close-history log from D7, and an audit trail of every change since the last close. Joel sees it before 1 November and accepts it in writing | A hosted read-only login instead of a local install |
+| Customer payments | **Authorize.net** (Dan, 11 Sep; D15 amended). QBO Payments is used sparingly and is not a hard blocker. The own invoice carries an Authorize.net hosted payment link; a settled payment posts as a customer payment against the invoice. Wire the account, the link, and the settlement import before the 1 November go/no-go | Card-present or ACH if ever needed |
+| Channel intake | **MCP server over the own store** (Dan, 11 Sep). The Shopify, Amazon and wholesale skills in `claude-config` write to QBO through the QuickBooks MCP today; they get repointed to the own platform's MCP server rather than rewritten. The server exposes the query API (built) and, from Phase D, the document-write API. This is also how every other skill that reads QBO keeps working after cutover | Native channel integrations |
 | Payroll | Already SurePayroll; journal the summary. Not a blocker | |
 | Inventory quantities | QBO's inventory tracking is not used for foam; the own system's manufacturing costing replaces it after cutover | |
 
@@ -329,5 +331,6 @@ and has never fetched an invoice.
 | 2 | M1 UI stack | **A**, D14 |
 | 3 | The three posting policies in B2 | Open; needed before B' starts |
 | 4 | Reuse the `qbo_headless` refresh token or build the consent flow | Open; recommendation reuse if valid |
-| 5 | Is QBO Payments in use for customer payments? | **Yes**, D15: a replacement is a hard go/no-go item |
-| 6 | Start the offline-buildable Phase A items now, ahead of the Mac session | **Yes**, in progress |
+| 5 | Customer payments after cutover | **Authorize.net**, D15 amended; QBO Payments used sparingly |
+| 6 | Start the offline-buildable Phase A items now, ahead of the Mac session | **Yes**, done 11 Sep |
+| 7 | Which QBO sales-tax reports are filed from | Open; §G |
