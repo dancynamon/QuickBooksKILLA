@@ -14,6 +14,7 @@ use ledger_core::Money;
 
 pub mod index;
 pub mod lineage;
+pub mod query;
 pub mod search;
 
 use crate::domain::{ContactType, DocumentType, EntityType, RealmId};
