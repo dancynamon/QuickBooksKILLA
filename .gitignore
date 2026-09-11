@@ -36,3 +36,6 @@ rotation-*.jsonl
 
 # OS
 .DS_Store
+
+# Agent worktrees created by Claude Code sessions
+.claude/worktrees/
