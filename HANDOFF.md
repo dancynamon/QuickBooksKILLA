@@ -43,7 +43,7 @@ backend in §2.1. Never in the repo, never in a dotfile Dropbox syncs.
 
 ## 1. Where the work stands
 
-`cargo test` — 128 tests, all offline, all green. `cargo clippy --all-targets` —
+`cargo test` — 232 tests, all offline, all green. `cargo clippy --all-targets` —
 clean.
 
 Built and tested:
@@ -59,12 +59,16 @@ Built and tested:
 | `outbox` | State machine with enforced transitions |
 | `client` | The QBO trait boundary + `MockQbo` double |
 | `worker` | Drain loop, dependency resolution, local-id rewriting |
+| `driver` | Initial sync, CDC poll, truncation backfill (D12, D13) |
+| `reconcile` | Verification sweep against QBO's index (DESIGN §7 steps 1-4) |
+| `daemon`, `clock` | Cadence loop around the driver, backoff, nightly snapshots |
+| `store::query` | Read-only query API for the UI and the ledger import |
 
 **Not built:** the HTTP transport behind `QboClient`, the OAuth authorisation
-flow, the keychain token backend, the initial-sync driver, the CDC poll loop,
-the reconciliation sweep, the Tauri shell, the React UI.
+flow, the keychain token backend, wiring the daemon into a binary, the Tauri
+shell and its front-end.
 
-M0 needs the first five of those. The last two are M1.
+M0 needs the first four of those. The last is M1. `ROADMAP.md` has the phases.
 
 ---
 
@@ -141,7 +145,11 @@ Mapping obligations:
 mock disagree about any of the above, the mock is what the worker's 20-odd
 tests were written against — reconcile deliberately, don't just change the mock.
 
-### 2.4 Initial sync driver
+### 2.4 Initial sync driver — built (`driver.rs`, D12, D13)
+
+The section below is kept as the specification the driver was built to; the
+live-sync step that remains is running it against `HttpQboClient` and reporting
+the measured counts and wall-clock.
 
 Per realm, walk `EntityType::m0_scope()` — masters before documents, which the
 ordering in `EntityType::ALL` already guarantees and a test enforces.
@@ -155,7 +163,11 @@ Report actual row counts and wall-clock time. The brief is explicit that these
 are measured and reported, never asserted. Expect roughly nine thousand invoices
 and tens of thousands of documents in total, going back to 2012.
 
-### 2.5 CDC poll loop
+### 2.5 CDC poll loop — built (`daemon.rs`), not yet wired into a binary
+
+`Daemon::run` loops `SyncDriver::sync_realm` on a focused/idle cadence with
+backoff, and takes the nightly snapshot. What remains is the binary that
+constructs it with the real client and keychain store.
 
 15 seconds focused, 5 minutes idle, both configurable.
 

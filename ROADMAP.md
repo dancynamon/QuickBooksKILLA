@@ -32,8 +32,7 @@ to goal 2 rather than a detour. Three consequences run through the phases:
 
 ## 0. Where it stands
 
-`cargo test --workspace`: 184 tests, all offline, all green. Clippy clean. Last
-commit 23 August; nineteen days idle.
+`cargo test --workspace`: 232 tests, all offline, all green. Clippy clean.
 
 Everything that can be built **without Intuit credentials** has been built:
 money and rounding, realm scoping, SQLite replica with projection and
@@ -50,11 +49,11 @@ Everything **not** built needs credentials, Intuit's docs, or a UI toolchain:
 | OAuth loopback flow, or import of the `qbo_headless` refresh token | A | client id/secret, redirect URI |
 | `HttpQboClient` | A | credentials |
 | First live sync, counts and wall-clock measured | A | credentials |
-| CDC daemon loop, nightly snapshot | A | nothing, buildable offline |
-| Reconciliation sweep (DESIGN §7) | A | nothing, buildable offline |
+| CDC daemon loop, nightly snapshot | A | **built 11 Sep**; wiring into a binary remains |
+| Reconciliation sweep (DESIGN §7) | A | **built 11 Sep**; TB diff (step 5) waits on the ledger |
 | Fixture recorder and scrubber (HANDOFF §2.6) | A | one live response |
 | Verify the four ⚠️ API facts (DESIGN §0, §12) | A, gates C | `developer.intuit.com`, blocked from the cloud sandbox |
-| Read-only query API over `Store` | B | nothing |
+| Read-only query API over `Store` | B | **built 11 Sep** |
 | UI shell and read screens | B | stack decision, §B |
 | `LEDGER-DESIGN.md` | B | Dan's review of three posting policies, §B |
 | Ledger engine, import from replica | B' | LEDGER-DESIGN |
@@ -92,16 +91,16 @@ not gate anything written to your own books.
 
 ### Buildable now, offline, ahead of the Mac session
 
-- **Reconciliation sweep** against `MockQbo`: missing, extra, stale, orphaned;
-  heal missing and stale, quarantine extra, never delete. Also the recovery path
-  for a stale cursor and uncovered entity types.
-- **CDC daemon loop and snapshot rotation**, generic over `QboClient`, tested
-  with a fake clock.
+- ~~Reconciliation sweep~~ built: `reconcile.rs`, `store/index.rs`.
+- ~~CDC daemon loop and snapshot rotation~~ built: `daemon.rs`, `clock.rs`,
+  `store/backup.rs`.
+- ~~Read-only query API~~ built: `store/query.rs`. Measured on the synthetic
+  10,000-invoice book, debug build: AR aging ~59 ms, document detail ~0.3 ms.
+- **Wire the daemon into `main.rs`** behind a `--realm` flag, with `SystemClock`
+  and `FileTokenStore` for now; the keychain backend replaces the store on the
+  Mac.
 - **Chaos test for `in_flight` recovery** (DESIGN §10) with a process-boundary
   harness.
-- **Read-only query API over `Store`** (list, get, search, lineage, aging).
-  This is the boundary both the UI and the ledger import sit on, so it is the
-  first item of Phase B regardless of the stack answer.
 - **Un-ignore the performance measurements** as a thresholded `--ignored` CI
   job, so DESIGN §11's numbers are guarded rather than reported once.
 

@@ -32,7 +32,7 @@ than engineering judgement.
 ## Build
 
 ```sh
-cargo test          # 184 tests, all offline
+cargo test          # 232 tests, all offline
 cargo clippy --all-targets
 cargo run --bin qbo-local
 ```
@@ -56,9 +56,17 @@ Built and tested:
   conflicts, `RequestId` replay, and the Customer/Item idempotency gap
 - The drain worker: per-entity ordering, dependency resolution, local-id
   rewriting, query-before-create adoption, convergence property test
+- The sync driver: full sweep, CDC poll, truncation backfill through the query
+  endpoint, cursor advanced only in the transaction that wrote its entities
+- The reconciliation sweep: id + timestamp index diff, heal missing and stale,
+  quarantine extra, never delete
+- The CDC daemon loop: focused/idle cadence, jittered backoff, nightly SQLite
+  snapshots with rotation
+- The read-only query API over the replica: document, contact and item detail,
+  AR/AP aging, open documents, sync status, classes, chart of accounts
 
 Not built yet: the HTTP transport behind the client trait, the OAuth flow, the
-reconciliation sweep, the Tauri shell, the React UI.
+keychain token backend, the Tauri shell and its front-end. See `ROADMAP.md`.
 
 The first live authentication run should happen wherever the OAuth credentials
 already live, rather than moving them onto another machine.
