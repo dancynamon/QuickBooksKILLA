@@ -403,6 +403,33 @@ impl Store {
         Ok(store)
     }
 
+    /// Open an existing replica strictly read-only — no create, no write.
+    ///
+    /// `SQLITE_OPEN_READ_ONLY` with `SQLITE_OPEN_CREATE` omitted is enforced by
+    /// SQLite itself, not by caller discipline: an attempted write on this
+    /// connection fails at the engine rather than depending on every future
+    /// caller remembering not to issue one. This is what the MCP server
+    /// (`mcp.rs`) opens with — a read surface that cannot become a write path
+    /// by accident.
+    ///
+    /// The file must already exist and be migrated; this never runs
+    /// migrations, which write.
+    pub fn open_read_only(path: impl AsRef<std::path::Path>) -> Result<Self, StoreError> {
+        let connection =
+            Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        connection.execute_batch("PRAGMA foreign_keys = ON;")?;
+        let store = Store { connection };
+
+        let version = store.schema_version()?;
+        if version > latest_version() {
+            return Err(StoreError::SchemaTooNew {
+                found: version,
+                supported: latest_version(),
+            });
+        }
+        Ok(store)
+    }
+
     /// In-memory, for tests. WAL does not apply to a memory database.
     pub fn open_in_memory() -> Result<Self, StoreError> {
         let connection = Connection::open_in_memory()?;
@@ -959,7 +986,7 @@ pub struct QuarantinedEntity {
     pub reason: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct DocumentRow {
     pub qbo_id: String,
     pub doc_type: DocumentType,
@@ -971,7 +998,9 @@ pub struct DocumentRow {
     /// Joined from `contacts` so a register does not issue one query per row.
     pub contact_name: Option<String>,
     pub class_id: Option<String>,
+    #[serde(serialize_with = "serialize_money")]
     pub total: Money,
+    #[serde(serialize_with = "serialize_money_opt")]
     pub balance: Option<Money>,
     pub doc_status: Option<String>,
     pub po_number: Option<String>,
@@ -980,7 +1009,7 @@ pub struct DocumentRow {
     pub is_deleted: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct LineRow {
     pub line_no: i64,
     pub item_id: Option<String>,
@@ -988,9 +1017,48 @@ pub struct LineRow {
     /// Decimal as text, exactly as stored — parsing it is the caller's choice.
     pub qty: Option<String>,
     pub unit_price: Option<String>,
+    #[serde(serialize_with = "serialize_money")]
     pub amount: Money,
     pub class_id: Option<String>,
     pub is_taxable: bool,
+}
+
+/// Renders [`Money`] as a decimal string with two places — `"1234.56"`,
+/// negative as `"-12.00"` — for MCP tool output (`mcp.rs`), whose consumers
+/// are LLM skills reading text, not the bare minor-units integer `Money`'s own
+/// `Serialize` impl produces. That impl is untouched; this is only ever named
+/// from a field's `#[serde(serialize_with = ...)]`, never used to change what
+/// `Money` itself serialises as.
+pub(crate) fn serialize_money<S>(money: &Money, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    serializer.serialize_str(&format_money(*money))
+}
+
+/// The `Option<Money>` counterpart of [`serialize_money`], for balance and
+/// similar fields that may be absent.
+pub(crate) fn serialize_money_opt<S>(
+    money: &Option<Money>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    match money {
+        Some(money) => serializer.serialize_str(&format_money(*money)),
+        None => serializer.serialize_none(),
+    }
+}
+
+fn format_money(money: Money) -> String {
+    // `unsigned_abs` rather than `.abs()`: `i64::MIN` has no positive
+    // counterpart (money.rs's own overflow test makes the same point), and
+    // this path must never panic on a value that reached storage safely.
+    let minor = money.minor();
+    let sign = if minor < 0 { "-" } else { "" };
+    let magnitude = minor.unsigned_abs();
+    format!("{sign}{}.{:02}", magnitude / 100, magnitude % 100)
 }
 
 /// Every projected document read goes through this projection and join, so a
