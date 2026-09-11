@@ -25,3 +25,7 @@ path = "src/lib.rs"
 [[bin]]
 name = "qbo-local"
 path = "src/main.rs"
+
+[[bin]]
+name = "qbo-local-mcp"
+path = "src/bin/qbo-local-mcp.rs"

@@ -20,7 +20,10 @@ use rusqlite::{params, OptionalExtension};
 use rust_decimal::Decimal;
 
 use super::lineage::Lineage;
-use super::{document_row, DocumentRow, LineRow, Store, StoreError, DOCUMENT_SELECT};
+use super::{
+    document_row, serialize_money, serialize_money_opt, DocumentRow, LineRow, Store, StoreError,
+    DOCUMENT_SELECT,
+};
 use crate::domain::{ContactType, DocumentType, EntityType, RealmId};
 
 /// A lineage walk is bounded by depth (`DESIGN.md` §3.4); this is generous for
@@ -68,7 +71,7 @@ impl Page {
 
 /// A document with its lines and its lineage — the single read a document
 /// viewer opens with.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct DocumentDetail {
     pub document: DocumentRow,
     pub lines: Vec<LineRow>,
@@ -81,7 +84,7 @@ pub struct DocumentDetail {
 
 /// A customer or vendor, projected — the `contacts` row on its own, without
 /// its document history.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct ContactRow {
     pub contact_type: ContactType,
     pub qbo_id: String,
@@ -89,6 +92,7 @@ pub struct ContactRow {
     pub company_name: Option<String>,
     pub email: Option<String>,
     pub phone: Option<String>,
+    #[serde(serialize_with = "serialize_money_opt")]
     pub balance: Option<Money>,
     pub is_active: bool,
 }
@@ -98,7 +102,7 @@ pub struct ContactRow {
 /// balance-carrying rather than merely recent — and the two answer different
 /// questions, so both are returned rather than making the caller re-derive
 /// one from the other.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct ContactDetail {
     pub contact: ContactRow,
     /// Not deleted, balance > 0 — every document still carrying a balance.
@@ -114,7 +118,7 @@ const RECENT_DOCUMENTS_LIMIT: i64 = 50;
 // ---------------------------------------------------------------------------
 
 /// An `items` row, projected.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct ItemRow {
     pub qbo_id: String,
     pub name: String,
@@ -135,7 +139,7 @@ pub struct ItemRow {
 /// A SKU page: price, cost and where it has actually been used. The
 /// prototype's own words: "a SKU page that cannot answer 'where has this been
 /// used' is not worth opening."
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct ItemDetail {
     pub item: ItemRow,
     pub where_used: Vec<DocumentRow>,
@@ -151,12 +155,17 @@ pub struct ItemDetail {
 // ---------------------------------------------------------------------------
 
 /// The five buckets AR/AP aging reports in, `DESIGN.md` §9's v1 report list.
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, serde::Serialize)]
 pub struct AgingBuckets {
+    #[serde(serialize_with = "serialize_money")]
     pub current: Money,
+    #[serde(serialize_with = "serialize_money")]
     pub d1_30: Money,
+    #[serde(serialize_with = "serialize_money")]
     pub d31_60: Money,
+    #[serde(serialize_with = "serialize_money")]
     pub d61_90: Money,
+    #[serde(serialize_with = "serialize_money")]
     pub over_90: Money,
 }
 
@@ -213,18 +222,19 @@ fn bucket_for(as_of: NaiveDate, due: NaiveDate) -> AgingBucket {
 }
 
 /// One contact's aging line.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct AgingRow {
     pub contact_id: String,
     pub contact_name: String,
     pub buckets: AgingBuckets,
+    #[serde(serialize_with = "serialize_money")]
     pub total: Money,
 }
 
 /// AR or AP aging as of one date. `totals` is always the sum of `rows`'
 /// buckets — computed the same way, not restated — so the two cannot drift
 /// apart the way a stored total could.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct AgingReport {
     pub as_of: NaiveDate,
     pub rows: Vec<AgingRow>,
@@ -236,7 +246,7 @@ pub struct AgingReport {
 // ---------------------------------------------------------------------------
 
 /// One entity type's sync state — one row of the chrome's sync panel.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct EntitySyncStatus {
     pub entity_type: EntityType,
     pub mirrored: i64,
@@ -247,7 +257,7 @@ pub struct EntitySyncStatus {
 
 /// Everything the app chrome shows about a realm's sync health in one read
 /// (`DESIGN.md` §6.6: "last successful sync per realm... always visible").
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct SyncStatus {
     pub write_enabled: bool,
     pub quarantined_total: i64,
@@ -259,7 +269,7 @@ pub struct SyncStatus {
 // ---------------------------------------------------------------------------
 
 /// A `classes` row, projected.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct ClassRow {
     pub qbo_id: String,
     pub name: String,
@@ -269,7 +279,7 @@ pub struct ClassRow {
 }
 
 /// An `accounts` row, projected.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct AccountRow {
     pub qbo_id: String,
     pub name: String,
@@ -277,6 +287,7 @@ pub struct AccountRow {
     pub account_type: Option<String>,
     pub account_subtype: Option<String>,
     pub classification: Option<String>,
+    #[serde(serialize_with = "serialize_money_opt")]
     pub balance: Option<Money>,
     pub is_active: bool,
 }

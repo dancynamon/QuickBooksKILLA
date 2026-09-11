@@ -403,6 +403,33 @@ impl Store {
         Ok(store)
     }
 
+    /// Open an existing replica strictly read-only — no create, no write.
+    ///
+    /// `SQLITE_OPEN_READ_ONLY` with `SQLITE_OPEN_CREATE` omitted is enforced by
+    /// SQLite itself, not by caller discipline: an attempted write on this
+    /// connection fails at the engine rather than depending on every future
+    /// caller remembering not to issue one. This is what the MCP server
+    /// (`mcp.rs`) opens with — a read surface that cannot become a write path
+    /// by accident.
+    ///
+    /// The file must already exist and be migrated; this never runs
+    /// migrations, which write.
+    pub fn open_read_only(path: impl AsRef<std::path::Path>) -> Result<Self, StoreError> {
+        let connection =
+            Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        connection.execute_batch("PRAGMA foreign_keys = ON;")?;
+        let store = Store { connection };
+
+        let version = store.schema_version()?;
+        if version > latest_version() {
+            return Err(StoreError::SchemaTooNew {
+                found: version,
+                supported: latest_version(),
+            });
+        }
+        Ok(store)
+    }
+
     /// In-memory, for tests. WAL does not apply to a memory database.
     pub fn open_in_memory() -> Result<Self, StoreError> {
         let connection = Connection::open_in_memory()?;
@@ -414,8 +441,7 @@ impl Store {
 
     fn configure(connection: &Connection) -> Result<(), StoreError> {
         // journal_mode returns a row, so it cannot go through execute_batch.
-        let _: String =
-            connection.query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))?;
+        let _: String = connection.query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))?;
         connection.execute_batch(
             "PRAGMA foreign_keys = ON;
              PRAGMA synchronous = FULL;",
@@ -432,11 +458,11 @@ impl Store {
              ) STRICT;",
         )?;
 
-        let current: i64 = self
-            .connection
-            .query_row("SELECT COALESCE(MAX(version), 0) FROM schema_version", [], |row| {
-                row.get(0)
-            })?;
+        let current: i64 = self.connection.query_row(
+            "SELECT COALESCE(MAX(version), 0) FROM schema_version",
+            [],
+            |row| row.get(0),
+        )?;
 
         if current > latest_version() {
             return Err(StoreError::SchemaTooNew {
@@ -689,7 +715,9 @@ impl Store {
                     params![realm.as_str(), entity.entity_type.as_str(), entity.qbo_id],
                 )?;
             }
-            Projection::Quarantine(reason) => quarantine_in(&transaction, realm, entity, reason, now)?,
+            Projection::Quarantine(reason) => {
+                quarantine_in(&transaction, realm, entity, reason, now)?
+            }
             Projection::NotProjected => {}
         }
 
@@ -863,9 +891,16 @@ impl Store {
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
-    pub fn count_projected(&self, realm: &RealmId, table: ProjectedTable) -> Result<i64, StoreError> {
+    pub fn count_projected(
+        &self,
+        realm: &RealmId,
+        table: ProjectedTable,
+    ) -> Result<i64, StoreError> {
         Ok(self.connection.query_row(
-            &format!("SELECT COUNT(*) FROM {} WHERE realm_id = ?1", table.as_str()),
+            &format!(
+                "SELECT COUNT(*) FROM {} WHERE realm_id = ?1",
+                table.as_str()
+            ),
             params![realm.as_str()],
             |row| row.get(0),
         )?)
@@ -913,7 +948,7 @@ pub struct QuarantinedEntity {
     pub reason: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct DocumentRow {
     pub qbo_id: String,
     pub doc_type: DocumentType,
@@ -925,7 +960,9 @@ pub struct DocumentRow {
     /// Joined from `contacts` so a register does not issue one query per row.
     pub contact_name: Option<String>,
     pub class_id: Option<String>,
+    #[serde(serialize_with = "serialize_money")]
     pub total: Money,
+    #[serde(serialize_with = "serialize_money_opt")]
     pub balance: Option<Money>,
     pub doc_status: Option<String>,
     pub po_number: Option<String>,
@@ -934,7 +971,7 @@ pub struct DocumentRow {
     pub is_deleted: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct LineRow {
     pub line_no: i64,
     pub item_id: Option<String>,
@@ -942,9 +979,48 @@ pub struct LineRow {
     /// Decimal as text, exactly as stored — parsing it is the caller's choice.
     pub qty: Option<String>,
     pub unit_price: Option<String>,
+    #[serde(serialize_with = "serialize_money")]
     pub amount: Money,
     pub class_id: Option<String>,
     pub is_taxable: bool,
+}
+
+/// Renders [`Money`] as a decimal string with two places — `"1234.56"`,
+/// negative as `"-12.00"` — for MCP tool output (`mcp.rs`), whose consumers
+/// are LLM skills reading text, not the bare minor-units integer `Money`'s own
+/// `Serialize` impl produces. That impl is untouched; this is only ever named
+/// from a field's `#[serde(serialize_with = ...)]`, never used to change what
+/// `Money` itself serialises as.
+pub(crate) fn serialize_money<S>(money: &Money, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    serializer.serialize_str(&format_money(*money))
+}
+
+/// The `Option<Money>` counterpart of [`serialize_money`], for balance and
+/// similar fields that may be absent.
+pub(crate) fn serialize_money_opt<S>(
+    money: &Option<Money>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    match money {
+        Some(money) => serializer.serialize_str(&format_money(*money)),
+        None => serializer.serialize_none(),
+    }
+}
+
+fn format_money(money: Money) -> String {
+    // `unsigned_abs` rather than `.abs()`: `i64::MIN` has no positive
+    // counterpart (money.rs's own overflow test makes the same point), and
+    // this path must never panic on a value that reached storage safely.
+    let minor = money.minor();
+    let sign = if minor < 0 { "-" } else { "" };
+    let magnitude = minor.unsigned_abs();
+    format!("{sign}{}.{:02}", magnitude / 100, magnitude % 100)
 }
 
 /// Every projected document read goes through this projection and join, so a
@@ -1364,8 +1440,12 @@ mod tests {
 
     fn store() -> Store {
         let store = Store::open_in_memory().unwrap();
-        store.register_realm(&aquamentor(), "Aquamentor, Inc.", now()).unwrap();
-        store.register_realm(&waterline(), "WaterLine CNC", now()).unwrap();
+        store
+            .register_realm(&aquamentor(), "Aquamentor, Inc.", now())
+            .unwrap();
+        store
+            .register_realm(&waterline(), "WaterLine CNC", now())
+            .unwrap();
         store
     }
 
@@ -1393,7 +1473,10 @@ mod tests {
         let mut sorted = versions.clone();
         sorted.sort_unstable();
         sorted.dedup();
-        assert_eq!(versions, sorted, "migrations must be uniquely and increasingly numbered");
+        assert_eq!(
+            versions, sorted,
+            "migrations must be uniquely and increasingly numbered"
+        );
     }
 
     #[test]
@@ -1402,14 +1485,23 @@ mod tests {
         let path = directory.path().join("replica.db");
 
         let first = Store::open(&path).unwrap();
-        first.register_realm(&aquamentor(), "Aquamentor, Inc.", now()).unwrap();
-        first.upsert_entity(&aquamentor(), &entity("71204"), now()).unwrap();
+        first
+            .register_realm(&aquamentor(), "Aquamentor, Inc.", now())
+            .unwrap();
+        first
+            .upsert_entity(&aquamentor(), &entity("71204"), now())
+            .unwrap();
         drop(first);
 
         let second = Store::open(&path).unwrap();
         assert_eq!(second.schema_version().unwrap(), latest_version());
         // Data survived, and re-running migrations did not clear it.
-        assert_eq!(second.count_entities(&aquamentor(), EntityType::Invoice).unwrap(), 1);
+        assert_eq!(
+            second
+                .count_entities(&aquamentor(), EntityType::Invoice)
+                .unwrap(),
+            1
+        );
     }
 
     #[test]
@@ -1457,7 +1549,9 @@ mod tests {
     fn an_entity_round_trips_with_its_raw_payload_intact() {
         let store = store();
         let original = entity("71204");
-        store.upsert_entity(&aquamentor(), &original, now()).unwrap();
+        store
+            .upsert_entity(&aquamentor(), &original, now())
+            .unwrap();
 
         let loaded = store
             .get_entity(&aquamentor(), EntityType::Invoice, "71204")
@@ -1471,14 +1565,21 @@ mod tests {
     #[test]
     fn upsert_updates_rather_than_duplicating() {
         let store = store();
-        store.upsert_entity(&aquamentor(), &entity("71204"), now()).unwrap();
+        store
+            .upsert_entity(&aquamentor(), &entity("71204"), now())
+            .unwrap();
 
         let mut updated = entity("71204");
         updated.sync_token = "1".to_string();
         updated.raw_json = serde_json::json!({ "DocNumber": "21234", "TotalAmt": 99.99 });
         store.upsert_entity(&aquamentor(), &updated, now()).unwrap();
 
-        assert_eq!(store.count_entities(&aquamentor(), EntityType::Invoice).unwrap(), 1);
+        assert_eq!(
+            store
+                .count_entities(&aquamentor(), EntityType::Invoice)
+                .unwrap(),
+            1
+        );
         let loaded = store
             .get_entity(&aquamentor(), EntityType::Invoice, "71204")
             .unwrap()
@@ -1497,11 +1598,25 @@ mod tests {
         let mut water_invoice = entity("71204");
         water_invoice.raw_json = serde_json::json!({ "DocNumber": "WATER" });
 
-        store.upsert_entity(&aquamentor(), &aqua_invoice, now()).unwrap();
-        store.upsert_entity(&waterline(), &water_invoice, now()).unwrap();
+        store
+            .upsert_entity(&aquamentor(), &aqua_invoice, now())
+            .unwrap();
+        store
+            .upsert_entity(&waterline(), &water_invoice, now())
+            .unwrap();
 
-        assert_eq!(store.count_entities(&aquamentor(), EntityType::Invoice).unwrap(), 1);
-        assert_eq!(store.count_entities(&waterline(), EntityType::Invoice).unwrap(), 1);
+        assert_eq!(
+            store
+                .count_entities(&aquamentor(), EntityType::Invoice)
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            store
+                .count_entities(&waterline(), EntityType::Invoice)
+                .unwrap(),
+            1
+        );
 
         let from_aqua = store
             .get_entity(&aquamentor(), EntityType::Invoice, "71204")
@@ -1523,10 +1638,22 @@ mod tests {
         customer.entity_type = EntityType::Customer;
 
         store.upsert_entity(&aquamentor(), &invoice, now()).unwrap();
-        store.upsert_entity(&aquamentor(), &customer, now()).unwrap();
+        store
+            .upsert_entity(&aquamentor(), &customer, now())
+            .unwrap();
 
-        assert_eq!(store.count_entities(&aquamentor(), EntityType::Invoice).unwrap(), 1);
-        assert_eq!(store.count_entities(&aquamentor(), EntityType::Customer).unwrap(), 1);
+        assert_eq!(
+            store
+                .count_entities(&aquamentor(), EntityType::Invoice)
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            store
+                .count_entities(&aquamentor(), EntityType::Customer)
+                .unwrap(),
+            1
+        );
     }
 
     #[test]
@@ -1574,7 +1701,10 @@ mod tests {
     fn foreign_keys_stop_an_entity_landing_under_an_unknown_realm() {
         let store = Store::open_in_memory().unwrap();
         let result = store.upsert_entity(&aquamentor(), &entity("71204"), now());
-        assert!(result.is_err(), "unregistered realm should have been refused");
+        assert!(
+            result.is_err(),
+            "unregistered realm should have been refused"
+        );
     }
 
     #[test]
