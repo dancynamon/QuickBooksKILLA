@@ -18,16 +18,18 @@ Two projects, one workspace:
 | File | What it is |
 |---|---|
 | `DESIGN.md` | The `qbo-local` design. Replica schema, sync, token rotation, outbox, reconciliation, safety. |
+| `LEDGER-DESIGN.md` | The ledger design. Posting rules, chart of accounts, class taxonomy, double-entry schema and oplog, period close, import from the replica, parallel run, accountant mode, sales tax, bank reconciliation, manufacturing costing. First draft, 30 open policy items for Dan and the CPA. |
 | `DECISIONS.md` | Running log of review decisions and the reasoning behind them. |
 | `HANDOFF.md` | What to build next to finish M0, and the constraints that go with it. |
 | `ROADMAP.md` | From `qbo-local` to a book of record that is not QBO: phases, 1/1/27 cutover plan with fallback, decoupling blockers, ranked risks. |
 | `docs/CLAUDE_CODE_KICKOFF_PROMPT.md` | Original brief for the ledger project. |
 | `docs/CLAUDE_CODE_PROMPT_2_QBO_CACHE.md` | Original brief for `qbo-local`. |
 
-`LEDGER-DESIGN.md` does not exist yet. It gets written when the ledger project
-starts, and leads with the posting-rules table — document type to debit and
-credit effects — because that encodes accounting policy that needs review rather
-than engineering judgement.
+`LEDGER-DESIGN.md` leads with the posting-rules table — document type to debit
+and credit effects — because that encodes accounting policy that needs review
+rather than engineering judgement. It is a first draft: the ledger engine does
+not start until the three ROADMAP §B2 policies and the other gating open items
+in its §13 come back answered.
 
 ## Build
 

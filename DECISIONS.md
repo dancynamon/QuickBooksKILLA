@@ -284,3 +284,25 @@ Fiscal year is calendar year (D7), so cutover is a year boundary. 1/1/27 is the
 target; the go/no-go is 1 November 2026 against the bar in ROADMAP §F; missing
 any item moves the date to 1/1/28 without argument. The bar is not shortened to
 hit the date.
+
+## D18 — LEDGER-DESIGN.md first draft
+
+11 Sep 2026.
+
+`LEDGER-DESIGN.md` exists, written from ROADMAP §B2, §E, §F, §G and §H, the
+prototype's ledger, period-close and manufacturing sections, and the original
+kickoff brief. Fourteen sections: scope and basis, the posting-rules table,
+chart of accounts, class taxonomy, ledger schema and the command/oplog design,
+period close, import from the replica, the parallel run and trial-balance diff,
+accountant mode, the sales-tax liability report, bank statement import,
+manufacturing costing, what is deliberately excluded, and the open items.
+
+**It is a draft for Dan's and Joel's review, not an approved design.** It
+carries **30 open policy items**, marked `⚠️ Dan/CPA to confirm` and collected
+as W1 to W30 in §13, each stating what changes if the answer is no. Thirteen
+are Dan's, sixteen are Joel's, one is a fact for engineering to verify against
+Intuit's documentation. Six of them — W2, W3, W4, W12, W15 and W16 — gate
+ROADMAP §B', because they are the ones that cannot be changed once history has
+been imported.
+
+Nothing here is decided. The document's purpose is to be marked up.
