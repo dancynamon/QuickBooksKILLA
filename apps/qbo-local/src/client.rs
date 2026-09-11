@@ -25,6 +25,17 @@ pub struct EntityPayload {
     pub raw_json: serde_json::Value,
 }
 
+/// One row of the id + `MetaData.LastUpdatedTime` index the reconciliation
+/// sweep reads (`DESIGN.md` §7 step 1) — everything [`EntityPayload`] carries
+/// except the payload itself, which the sweep does not need until it decides
+/// something must be healed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IndexEntry {
+    pub qbo_id: String,
+    pub last_updated_utc: DateTime<Utc>,
+    pub is_deleted: bool,
+}
+
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum QboError {
     /// The `SyncToken` sent does not match the current one: someone changed
@@ -110,6 +121,42 @@ pub trait QboClient {
         realm: &RealmId,
         entity_type: EntityType,
         name: &str,
+    ) -> Result<Option<EntityPayload>, QboError>;
+
+    /// Paged id + `MetaData.LastUpdatedTime` read, for the reconciliation
+    /// sweep's first step (`DESIGN.md` §7 step 1): who exists, and when they
+    /// last changed, without pulling every payload.
+    ///
+    /// The default projects a full [`QboClient::query`] page down to the index
+    /// fields, which is correct but wasteful. A real HTTP client should
+    /// override this with a projected `SELECT Id, MetaData FROM <Entity>` so
+    /// the sweep pulls ids and timestamps only rather than whole payloads.
+    fn index(
+        &mut self,
+        realm: &RealmId,
+        entity_type: EntityType,
+        start_position: usize,
+        max_results: usize,
+    ) -> Result<Vec<IndexEntry>, QboError> {
+        Ok(self
+            .query(realm, entity_type, None, start_position, max_results)?
+            .into_iter()
+            .map(|payload| IndexEntry {
+                qbo_id: payload.qbo_id,
+                last_updated_utc: payload.last_updated_utc,
+                is_deleted: payload.is_deleted,
+            })
+            .collect())
+    }
+
+    /// One entity by id, or `None` if QBO no longer serves it at all — the
+    /// reconciliation sweep's signal that a record it still holds locally was
+    /// deleted there (`DESIGN.md` §7 step 3).
+    fn fetch(
+        &mut self,
+        realm: &RealmId,
+        entity_type: EntityType,
+        qbo_id: &str,
     ) -> Result<Option<EntityPayload>, QboError>;
 }
 
@@ -409,6 +456,26 @@ impl QboClient for MockQbo {
                     && unique_name_of(entity_type, &existing.raw_json).as_deref() == Some(name)
             })
             .map(|(_, payload)| payload.clone()))
+    }
+
+    fn fetch(
+        &mut self,
+        realm: &RealmId,
+        entity_type: EntityType,
+        qbo_id: &str,
+    ) -> Result<Option<EntityPayload>, QboError> {
+        self.query_calls += 1;
+        if let Some(error) = self.take_failure() {
+            return Err(error);
+        }
+        // A record QBO has soft-deleted no longer comes back from a direct
+        // read, even though `query`/`cdc` still surface its id with
+        // `is_deleted` set — that gap is what tells the sweep a stale id was
+        // deleted rather than merely edited.
+        Ok(self
+            .get(realm, entity_type, qbo_id)
+            .filter(|e| !e.is_deleted)
+            .cloned())
     }
 }
 

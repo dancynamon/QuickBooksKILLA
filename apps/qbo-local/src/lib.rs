@@ -16,6 +16,7 @@
 //! - [`outbox`]   — §6: the write queue and its state machine
 //! - [`client`]   — the QBO API boundary, plus an in-memory double
 //! - [`worker`]   — §6.3-6.5: draining the outbox, dependency resolution
+//! - [`reconcile`]— §7: the verification sweep against QBO's own index
 
 pub mod auth;
 pub mod client;
@@ -24,6 +25,7 @@ pub mod driver;
 pub mod outbox;
 pub mod project;
 pub mod ratelimit;
+pub mod reconcile;
 pub mod store;
 pub mod sync;
 pub mod worker;
