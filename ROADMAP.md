@@ -273,7 +273,7 @@ books in QBO, each scoped as its own item with its own acceptance:
 | Sales tax | NJ single rate plus exemption certificates on file for out-of-state wholesale; liability report by period; filing stays on the NJ portal as it does today | Multi-state nexus if it ever matters |
 | 1099-NEC | Not needed until January 2028 for FY2027; FY2026 comes from QBO | Vendor 1099 flag already in the prototype; generate from payments |
 | CPA handoff | Joel gets GL detail, TB, P&L, balance sheet as exports, and QBO read-only for FY2026; **confirm in writing before 1 November what he will accept** | Read-only login to the app |
-| Customer payments | Depends on whether QBO Payments is in use today; **Dan to confirm.** If yes, a replacement processor or payment links is a hard blocker | |
+| Customer payments | **QBO Payments is in use (D15).** A replacement processor or hosted payment link is a hard go/no-go item; until it exists invoices must keep reaching QBO through the outbox | Stripe or similar, with the link on the own invoice PDF |
 | Channel intake | The Shopify, Amazon and wholesale skills in `claude-config` write to QBO through the QuickBooks MCP. An **MCP server over the own store** lets every existing skill be repointed without rewriting them, and is the cheapest way to move intake | Native integrations |
 | Payroll | Already SurePayroll; journal the summary. Not a blocker | |
 | Inventory quantities | QBO's inventory tracking is not used for foam; the own system's manufacturing costing replaces it after cutover | |
@@ -327,8 +327,8 @@ and has never fetched an invoice.
 | # | Decision | Status |
 |---|---|---|
 | 1 | Cutover date | 1/1/27 target, 1/1/28 fallback, go/no-go 1 Nov 2026 |
-| 2 | M1 UI stack | Open; recommendation A |
+| 2 | M1 UI stack | **A**, D14 |
 | 3 | The three posting policies in B2 | Open; needed before B' starts |
 | 4 | Reuse the `qbo_headless` refresh token or build the consent flow | Open; recommendation reuse if valid |
-| 5 | Is QBO Payments in use for customer payments? | Open; decides whether G has a hard blocker |
-| 6 | Start the offline-buildable Phase A items now, ahead of the Mac session | Open; recommendation yes |
+| 5 | Is QBO Payments in use for customer payments? | **Yes**, D15: a replacement is a hard go/no-go item |
+| 6 | Start the offline-buildable Phase A items now, ahead of the Mac session | **Yes**, in progress |

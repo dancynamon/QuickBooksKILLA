@@ -232,3 +232,37 @@ that was never fully covered — the partial pages are already mirrored, so the
 re-sweep is idempotent, not wasted. And batching is now the normal path rather
 than an optimisation, which fixes the one-transaction-per-entity cost flagged in
 §11 for initial sync.
+
+## D14 — M1 stack: Tauri v2 shell over the prototype's vanilla front-end
+
+11 Sep 2026, Dan.
+
+The brief said Tauri + React + Vite. The prototype is 3,900 lines of vanilla
+HTML/JS that already encodes every M1 read screen, and the cutover target
+(D16) makes the cheapest path to a real screen the right one. So: Tauri v2 for
+the native shell and the no-network guarantee, the prototype's view code kept
+and its fake data layer replaced with `invoke` calls into a read-only query API
+over `Store`. No framework until the vanilla code is shown to be the bottleneck.
+
+*Rejected: React as briefed — every screen rebuilt for no M1 benefit. Rejected:
+an axum server with the prototype in a browser — a listening port on the machine
+that holds the book, and not the desktop app the brief asked for.*
+
+## D15 — QBO Payments is in use, so payments are a hard decoupling blocker
+
+11 Sep 2026, Dan.
+
+Customer payments run through QBO Payments today. Until a replacement processor
+or payment-link path exists in the own system, invoices have to keep reaching
+QBO, which means the outbox export shim (ROADMAP §C) cannot be switched off at
+cutover even if every other blocker is clear. This goes on the 1 November
+go/no-go list as a hard item, not a nice-to-have.
+
+## D16 — Cutover target 1 January 2027, fallback 1 January 2028
+
+11 Sep 2026, Dan.
+
+Fiscal year is calendar year (D7), so cutover is a year boundary. 1/1/27 is the
+target; the go/no-go is 1 November 2026 against the bar in ROADMAP §F; missing
+any item moves the date to 1/1/28 without argument. The bar is not shortened to
+hit the date.
