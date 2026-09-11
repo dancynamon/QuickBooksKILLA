@@ -12,6 +12,7 @@ use thiserror::Error;
 
 use ledger_core::Money;
 
+pub mod index;
 pub mod lineage;
 pub mod search;
 
