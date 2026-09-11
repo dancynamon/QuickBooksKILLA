@@ -29,6 +29,11 @@ pub enum StoreError {
     Json(#[from] serde_json::Error),
     #[error("replica schema version {found} is newer than this build supports ({supported})")]
     SchemaTooNew { found: i64, supported: i64 },
+    /// A computed total overflowed `i64` minor units. Unreachable at any
+    /// realistic book size, but money arithmetic returns `Result` everywhere
+    /// (D5), and a read path is no exception.
+    #[error("money: {0}")]
+    Money(#[from] ledger_core::MoneyError),
 }
 
 /// A forward-only, numbered migration. Applied in a transaction, version

@@ -15,7 +15,7 @@
 use std::str::FromStr;
 
 use chrono::{DateTime, NaiveDate, Utc};
-use ledger_core::Money;
+use ledger_core::{Money, MoneyError};
 use rusqlite::{params, OptionalExtension};
 use rust_decimal::Decimal;
 
@@ -161,13 +161,13 @@ pub struct AgingBuckets {
 }
 
 impl AgingBuckets {
-    /// Arithmetic is checked, per `DESIGN.md` §1 — but a bucket total that
-    /// overflows `i64` minor units is not a business outcome this replica
-    /// will ever see (Aquamentor and WaterLine both measured in the low
-    /// millions, §0), so a violation here means the aging query itself is
-    /// broken, not that a real total was too large. Panicking says so loudly
-    /// rather than silently returning a wrong figure.
-    fn add(&mut self, bucket: AgingBucket, amount: Money) {
+    /// Arithmetic is checked, per `DESIGN.md` §1. A bucket total that
+    /// overflows `i64` minor units is not a business outcome this replica will
+    /// ever see (both books measured in the low millions, §0), so an error
+    /// here means the aging query itself is broken — and it surfaces as an
+    /// error rather than a wrong figure, the same rule every other money path
+    /// follows (D5).
+    fn add(&mut self, bucket: AgingBucket, amount: Money) -> Result<(), MoneyError> {
         let slot = match bucket {
             AgingBucket::Current => &mut self.current,
             AgingBucket::Days1To30 => &mut self.d1_30,
@@ -175,12 +175,11 @@ impl AgingBuckets {
             AgingBucket::Days61To90 => &mut self.d61_90,
             AgingBucket::Over90 => &mut self.over_90,
         };
-        *slot = slot
-            .checked_add(amount)
-            .expect("aging bucket total overflowed i64 minor units");
+        *slot = slot.checked_add(amount)?;
+        Ok(())
     }
 
-    fn total(&self) -> Money {
+    fn total(&self) -> Result<Money, MoneyError> {
         Money::checked_sum([
             self.current,
             self.d1_30,
@@ -188,7 +187,6 @@ impl AgingBuckets {
             self.d61_90,
             self.over_90,
         ])
-        .expect("aging total overflowed i64 minor units")
     }
 }
 
@@ -484,9 +482,9 @@ impl Store {
                     rows_by_contact.last_mut().unwrap()
                 }
             };
-            entry.buckets.add(bucket, balance);
-            entry.total = entry.buckets.total();
-            totals.add(bucket, balance);
+            entry.buckets.add(bucket, balance)?;
+            entry.total = entry.buckets.total()?;
+            totals.add(bucket, balance)?;
         }
 
         rows_by_contact.sort_by(|a, b| {
