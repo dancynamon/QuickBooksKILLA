@@ -20,7 +20,7 @@ Two projects, one workspace:
 | `DESIGN.md` | The `qbo-local` design. Replica schema, sync, token rotation, outbox, reconciliation, safety. |
 | `DECISIONS.md` | Running log of review decisions and the reasoning behind them. |
 | `HANDOFF.md` | What to build next to finish M0, and the constraints that go with it. |
-| `ROADMAP.md` | Phases after M0, the M1 stack decision, prototype governance, ranked risks. |
+| `ROADMAP.md` | From `qbo-local` to a book of record that is not QBO: phases, 1/1/27 cutover plan with fallback, decoupling blockers, ranked risks. |
 | `docs/CLAUDE_CODE_KICKOFF_PROMPT.md` | Original brief for the ledger project. |
 | `docs/CLAUDE_CODE_PROMPT_2_QBO_CACHE.md` | Original brief for `qbo-local`. |
 

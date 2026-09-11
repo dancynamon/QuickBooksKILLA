@@ -1,249 +1,334 @@
-# ROADMAP — where `qbo-local` goes from here
+# ROADMAP — from `qbo-local` to a book of record that is not QuickBooks
 
-Written 11 September 2026 against commit `c56af00`. Companion to `HANDOFF.md`
-(which says how to finish M0) and `DECISIONS.md` (which says why). This one says
-what comes after, in what order, and which items are Dan's to decide.
+Written 11 September 2026 against commit `c56af00`. Revised the same day after
+Dan restated the goals. Companion to `HANDOFF.md` (how to finish M0) and
+`DECISIONS.md` (why).
+
+## The two goals, and the order they come in
+
+1. **Speed and UI over the QBO book.** Every lookup local, every screen faster
+   than the browser, QBO's own model as the guide. This is `qbo-local`, M0 and
+   M1, and it pays off on its own.
+2. **Own accounting software, decoupled from QBO.** The ledger project. Target
+   cutover **1 January 2027**, fallback **1 January 2028** (Dan, 11 Sep 2026;
+   fiscal year is calendar year per D7, so cutover is a year boundary).
+
+The revision this document makes over the first draft: the ledger is the main
+line, not a "later" item, and everything built for goal 1 has to be an on-ramp
+to goal 2 rather than a detour. Three consequences run through the phases:
+
+- **`LEDGER-DESIGN.md` gets written right after M0**, in parallel with M1, not
+  at the end. Its posting-rules table and class taxonomy decide how the
+  replica's raw JSON becomes opening balances and history in the new books.
+- **The outbox is an export shim, not a destination.** From M3 on, local
+  documents are the source of truth and QBO is a downstream mirror kept for the
+  CPA and bank feeds. The outbox pushes to it. Decoupling is switching the
+  outbox off. The code is the same; the direction of authority flips.
+- **The prototype's ledger, period-close and manufacturing sections are the
+  first draft of `LEDGER-DESIGN.md`**, not shelved design assets. They get
+  promoted into the document, then the prototype stops growing.
 
 ---
 
 ## 0. Where it stands
 
-`cargo test --workspace`: 184 tests, all offline, all green. `cargo clippy
---all-targets`: clean. (`README.md` still says 128; it is stale.)
-
-Last commit 23 August. Nineteen days idle.
+`cargo test --workspace`: 184 tests, all offline, all green. Clippy clean. Last
+commit 23 August; nineteen days idle.
 
 Everything that can be built **without Intuit credentials** has been built:
+money and rounding, realm scoping, SQLite replica with projection and
+quarantine, reference-first search, lineage, CDC planning with truncation
+recovery (D12), the sync driver with cursor-in-transaction (D13), the outbox
+state machine and drain worker, token generations with a file backend, the rate
+limiter.
 
-| Layer | State |
-|---|---|
-| Money, rounding | done, `ledger-core` |
-| Realm scoping, entity taxonomy, sync tiers | done |
-| SQLite replica, migrations, projection, quarantine | done |
-| Reference-first search, lineage walk | done |
-| CDC planning, truncation recovery through the query endpoint | done, D12 |
-| Sync driver (sweep, poll, backfill, cursor-in-transaction) | done, D13 |
-| Outbox state machine, drain worker, adopt-on-retry | done |
-| Token generations, atomic persistence, rotation log | done, file backend only |
-| Rate limiter | done |
+Everything **not** built needs credentials, Intuit's docs, or a UI toolchain:
 
-Everything **not** built needs either Intuit credentials, Intuit's docs, or a
-UI toolchain:
-
-| Gap | Milestone | Needs |
+| Gap | Phase | Needs |
 |---|---|---|
-| `KeychainTokenStore` | M0 | macOS |
-| OAuth loopback flow | M0 | client id/secret, redirect URI |
-| `HttpQboClient` | M0 | credentials to test against |
-| First live sync, counts and wall-clock reported | M0 | credentials |
-| CDC daemon loop (cadence around `SyncDriver::poll`) | M0 | nothing, buildable offline |
-| Reconciliation sweep (§7) | M0 per DESIGN, listed M4 in the brief | nothing, buildable offline |
-| Nightly replica snapshot, N-deep | M0 | nothing |
-| Fixture recorder + scrubber (`HANDOFF` §2.6) | M0 | one live response to record |
-| Verify the four ⚠️ API facts (DESIGN §0, §12) | M2 gate, M1 for item 4 | `developer.intuit.com`, blocked from the cloud sandbox |
-| UI shell + read-only screens | M1 | stack decision (§3) |
-| Write UI | M3 | M2 + two-week clock |
-| Ledger project | later | `LEDGER-DESIGN.md` |
+| `KeychainTokenStore` | A | macOS |
+| OAuth loopback flow, or import of the `qbo_headless` refresh token | A | client id/secret, redirect URI |
+| `HttpQboClient` | A | credentials |
+| First live sync, counts and wall-clock measured | A | credentials |
+| CDC daemon loop, nightly snapshot | A | nothing, buildable offline |
+| Reconciliation sweep (DESIGN §7) | A | nothing, buildable offline |
+| Fixture recorder and scrubber (HANDOFF §2.6) | A | one live response |
+| Verify the four ⚠️ API facts (DESIGN §0, §12) | A, gates C | `developer.intuit.com`, blocked from the cloud sandbox |
+| Read-only query API over `Store` | B | nothing |
+| UI shell and read screens | B | stack decision, §B |
+| `LEDGER-DESIGN.md` | B | Dan's review of three posting policies, §B |
+| Ledger engine, import from replica | B' | LEDGER-DESIGN |
+| Write UI into own store, export via outbox | D | C |
+| Bank import, sales tax, CPA export, channel intake | G | scoped separately |
 
-The **prototype has run three milestones ahead of the backend.** BunzBooks
-mocks manufacturing costing, a document-generated ledger, period close, vendor
-credits and progress invoicing. None of that has a Rust counterpart, and the
-Rust side has never made one HTTP call to Intuit. That is the risk this roadmap
-is shaped around.
+The Rust side has never made one HTTP call to Intuit. That is still the first
+thing to fix.
 
 ---
 
-## 1. Phase A — finish M0 (needs Dan's Mac, one Cowork session)
+## A. Finish M0 — one Cowork session on Dan's Mac
 
-Everything here is specified in `HANDOFF.md` §2. Order:
+Specified in `HANDOFF.md` §2. Order:
 
-1. **Verify the ⚠️ facts first** (HANDOFF §4). Thirty minutes on a machine that
-   can reach `developer.intuit.com`. Two of them change code if wrong: the batch
-   limit is a config value, and the query endpoint's `LastUpdatedTime` range
-   support is what the truncation backfill (D12) stands on. Record in
-   `DECISIONS.md`, update DESIGN §0's confidence column.
-2. **`KeychainTokenStore`** against `auth::TokenStore` (HANDOFF §2.1).
-   `security-framework` crate. Keep `TokenGenerations` as the stored unit.
-3. **OAuth.** Check whether `qbo_headless` already holds a valid refresh token.
-   If it does, import it and skip the consent flow for now (HANDOFF §0).
-   Otherwise build the loopback flow (§2.2).
-4. **`HttpQboClient`** (§2.3). `MockQbo` is the behavioural spec. Blocking
-   transport is fine: the driver is synchronous by design, and the UI must never
-   share its thread anyway.
-5. **First live sync** of Aquamentor. Report rows and wall-clock, measured.
-6. **CDC daemon.** A cadence loop around `SyncDriver::poll`, 15 s focused, 5 min
-   idle. Plus the nightly SQLite backup with rotation, outbox included.
-7. **Record fixtures** from the live responses into `.local/fixtures/`, scrubbed
-   on the way in, and commit synthetic equivalents so `cargo test` gains real
-   response shapes without gaining real names.
+1. **Verify the ⚠️ facts** (HANDOFF §4). Thirty minutes with access to
+   `developer.intuit.com`. The batch limit is a config value; the query
+   endpoint's `LastUpdatedTime` range support is what D12's backfill stands on.
+   Record in `DECISIONS.md`, update DESIGN §0's confidence column.
+2. **`KeychainTokenStore`** (HANDOFF §2.1), `security-framework` crate,
+   `TokenGenerations` as the stored unit.
+3. **Tokens.** If `qbo_headless` holds a valid refresh token, import it and skip
+   the consent flow. Build the loopback flow only if it does not.
+4. **`HttpQboClient`** (HANDOFF §2.3). `MockQbo` is the behavioural spec.
+   Blocking transport; the driver is synchronous by design.
+5. **First live sync** of Aquamentor. Rows and wall-clock, measured.
+6. **CDC daemon** around `SyncDriver::poll`, 15 s focused, 5 min idle. Nightly
+   SQLite backup, N-deep, outbox included.
+7. **Record fixtures** into `.local/fixtures/`, scrubbed on the way in; commit
+   synthetic equivalents.
 
-Done when `HANDOFF.md` §5 is all ticked. **The two-week read-only clock
-(DESIGN §8) starts the day step 5 lands on production**, not when M1 ships.
-Nothing in M1 shortens it.
+Done when `HANDOFF.md` §5 is ticked. The two-week read-only window (DESIGN §8)
+starts the day step 5 lands on production. It gates QBO writes only; it does
+not gate anything written to your own books.
 
-### Buildable now, offline, before the Mac session
+### Buildable now, offline, ahead of the Mac session
 
-These do not need credentials and unblock Phase A rather than wait on it:
-
-- **Reconciliation sweep** (DESIGN §7) against `MockQbo`: id + `LastUpdatedTime`
-  diff, missing/extra/stale/orphaned classification, auto-heal missing and
-  stale, quarantine extra. This is also the recovery path for a stale cursor and
-  for uncovered entity types, which is why DESIGN puts it in M0.
+- **Reconciliation sweep** against `MockQbo`: missing, extra, stale, orphaned;
+  heal missing and stale, quarantine extra, never delete. Also the recovery path
+  for a stale cursor and uncovered entity types.
 - **CDC daemon loop and snapshot rotation**, generic over `QboClient`, tested
-  against the mock with a fake clock.
-- **Chaos test for `in_flight` recovery** (DESIGN §10): kill mid-write, restart,
-  assert exactly-once. Needs a process-boundary harness; the state machine
-  already supports it.
-- **Un-ignore the performance measurements** as a separate `cargo test --
-  --ignored` CI job with thresholds, so §11's numbers are guarded rather than
-  reported once.
-- **README test count.**
+  with a fake clock.
+- **Chaos test for `in_flight` recovery** (DESIGN §10) with a process-boundary
+  harness.
+- **Read-only query API over `Store`** (list, get, search, lineage, aging).
+  This is the boundary both the UI and the ledger import sit on, so it is the
+  first item of Phase B regardless of the stack answer.
+- **Un-ignore the performance measurements** as a thresholded `--ignored` CI
+  job, so DESIGN §11's numbers are guarded rather than reported once.
 
 ---
 
-## 2. Phase B — M1, read-only UI
+## B. M1 read-only UI, and LEDGER-DESIGN.md, in parallel
+
+Two tracks that touch different layers and can run as separate agents.
+
+### B1. Read UI (goal 1)
 
 Acceptance from the brief: Dan stops opening QBO in the browser to look things
-up. Every §11 read target met and measured.
+up. Every DESIGN §11 read target met and measured. Build order, each one
+replacing a real QBO trip:
 
-Scope, in build order, each one replacing a real QBO trip:
-
-1. Command palette and reference search (the backend exists: `store::search`).
-2. Document viewers: invoice, estimate, PO, bill, payment, with the lineage rail
-   (`store::lineage` exists).
-3. Customer, vendor, item pages with full transaction history and where-used.
+1. Command palette and reference search (`store::search` exists).
+2. Document viewers with the lineage rail (`store::lineage` exists).
+3. Customer, vendor, item pages with history and where-used.
 4. AR and AP aging, open POs, open sales orders.
 5. Sync state in the chrome: last sync, cursor age per entity, quarantine count.
 6. Realm switcher.
 
-Not in M1, whatever the prototype shows: orders as a shop-floor queue, build
-sheets, builds, manufacturing costing, ledger, period close, vendor credit
-application, progress invoicing UI. Those are M3 or ledger-project work and
-several depend on the write path.
-
-### The stack decision (Dan's)
-
-The brief says Tauri v2 + React + Vite. The prototype is 3,900 lines of vanilla
-HTML/JS with no build step, and it already encodes every M1 screen. Three ways
-to go:
+**Stack decision (Dan's).** The brief says Tauri v2 + React + Vite. The
+prototype is 3,900 lines of vanilla HTML/JS with no build step and already
+encodes every M1 screen.
 
 | Option | What it is | Cost | Risk |
 |---|---|---|---|
-| **A. Tauri v2 shell, vanilla TS front-end grown from the prototype** | Tauri commands over `Store`; prototype's fake data layer replaced with `invoke` calls; no React, no bundler beyond `tsc` | Lowest. Reuses the prototype. Native window, no open port. | Vanilla JS at 10k+ lines gets hard to keep coherent; a framework migration later is a rewrite of the view layer. |
-| B. Tauri v2 + React + Vite, as briefed | Rewrite the prototype's screens as components | Highest. Every screen rebuilt. | None architecturally; it is the conventional path. |
-| C. Rust local HTTP server (axum) + the prototype HTML in a browser | No Tauri at all; JSON over localhost | Low. Fastest to first screen. | A listening port on the machine that holds the book; browser chrome around it; not the desktop app the brief asks for. |
+| **A. Tauri v2 shell, vanilla TS grown from the prototype** | Tauri commands over the query API; prototype's fake data layer replaced with `invoke`; `tsc` only | Lowest; reuses the prototype; native window, no open port | Vanilla at 10k+ lines gets hard to keep coherent; a later framework move rewrites the view layer |
+| B. Tauri v2 + React + Vite, as briefed | Rewrite every screen as components | Highest | None architectural |
+| C. Rust HTTP server (axum) + prototype in a browser | No Tauri; JSON over localhost | Low; fastest first screen | Listening port on the machine with the book; browser chrome; not the desktop app briefed |
 
-**Recommendation: A.** The prototype is the M1 spec and most of its code is
-the view layer M1 needs. Tauri gives the native shell and the no-network
-guarantee the brief wants (the front-end has no network capability at all; only
-the Rust side talks to Intuit). Move to a framework only if the vanilla code
-becomes the bottleneck, and decide that with evidence rather than up front.
+**Recommendation: A.** Given the 1/1/27 target, the cheapest path to a real
+screen wins, and the prototype is most of that path. Move to a framework only
+with evidence that vanilla is the bottleneck.
 
-Either way, the boundary is the same: a **read-only query API in Rust** over
-`Store` (list, get, search, lineage, aging), typed, with the Tauri command layer
-as a thin adapter. That API is buildable offline now and is the same one an HTTP
-server or a React app would call, so it is the first M1 task regardless of the
-stack answer.
+### B2. LEDGER-DESIGN.md (goal 2)
 
----
-
-## 3. Phase C — M2, outbox live against sandbox
-
-Gate: the ⚠️ facts verified (Phase A step 1). Do not start without them; the
-`RequestId` scope on Customer/Item decides whether the adopt path is a guard or
-the whole mechanism.
-
-1. `HttpQboClient::create` and `update` against an Intuit sandbox company.
-2. `RequestId` reuse on retry, checked against real responses.
-3. Chaos test passes against the sandbox, not only the mock.
-4. Convergence property test passes against the sandbox.
-5. Failure inbox surfaced in the UI (`conflicted`, `rejected` records with the
-   QBO response, resolution actions: retry, edit, abandon).
-
-Acceptance: zero duplicates under induced network failure. `is_write_enabled`
-stays 0 for both production realms throughout.
-
----
-
-## 4. Phase D — M3, write UI, production behind the flag
-
-Invoice, PO, estimate, bill, receive payment. Keyboard-first. Class on every
-line, enforced at the boundary. Optimistic commit with the honest "not yet in
-QBO" state the prototype shows.
-
-Production writes: two weeks of daily read-only use elapsed, Dan's explicit go,
-one realm at a time, Aquamentor first. No delete, no void.
-
-The prototype's vendor-credit application and progress invoicing belong here,
-after the five core documents, not before.
-
----
-
-## 5. Phase E — M4, reconciliation and hardening
-
-- Nightly sweep in production, with the report visible in the chrome.
-- Trial-balance diff: QBO's `TrialBalance` report against one computed from the
-  replica. Needs the reports bucket in `HttpQboClient`. Non-zero variance is an
-  unmissable error.
-- Backup and restore drill: restore last night's snapshot into a fresh path,
-  point the app at it, confirm the outbox survived.
-- Audit log review tooling over the JSONL write log.
-- WaterLine realm switched on, same code path, own budget.
-
----
-
-## 6. Later — the ledger project
-
-Starts with `LEDGER-DESIGN.md`, leading with the posting-rules table. The
-prototype already carries a first draft of that table and encodes three policy
-decisions that need Dan's review, not engineering judgement:
+Leads with the **posting-rules table**, document type to debit and credit
+effects, because that is accounting policy for Dan and the CPA to review, not
+engineering judgement. The prototype's ledger section is the first draft.
+Three policies it already encodes need an explicit yes or no:
 
 1. Raw-material bills capitalise to inventory rather than expensing.
 2. A vendor credit reduces material cost rather than posting to other income.
 3. Build variance plugs against manufacturing variance rather than being spread
    back over unit cost.
 
-Plus D7 (calendar fiscal year, closed periods reject) and the open tax-rounding
-question (DESIGN §12 item 3). Manufacturing costing (landed cost by board-foot,
-build sheets with yield as a divisor, sensitivity) lives here too. The replica's
-complete history and retained raw JSON are the import source, which is the only
-accommodation `qbo-local` makes for it.
+Also in the document: the double-entry schema; the command/oplog design from the
+original kickoff brief; period close as D7 specifies (reject, never warn; reopen
+is loud); the class taxonomy, which is the one thing that cannot be backfilled;
+the tax-rounding question (DESIGN §12 item 3); and **the import mapping from the
+replica**, entity by entity, including what becomes an opening balance and what
+becomes history.
+
+Manufacturing costing (landed cost by board-foot, build sheets with yield as a
+divisor, sensitivity, build variance) is designed here too, as the section of
+the ledger QBO cannot do. It is built after cutover, not before.
+
+### B'. Ledger engine and import
+
+Starts as soon as the posting-rules table is approved. `apps/ledger` stops
+being a stub.
+
+1. Chart of accounts, classes, periods, the posting gate.
+2. The one function that turns a document into a balanced entry, per the table.
+3. Trial balance, P&L, balance sheet, aging, all computed, never stored.
+4. **Import from the replica**: every mirrored document posted through the same
+   function, so history in the new book is derived, not copied. Trial balance
+   of the import diffed against QBO's `TrialBalance` report for the same date.
+   Non-zero variance blocks everything downstream.
+
+Step 4 is the first real test of whether the posting rules are right. Expect it
+to find policy differences (QBO's own treatment of inventory, sales tax
+liability, undeposited funds), and record each one in `DECISIONS.md`.
 
 ---
 
-## 7. Prototype governance
+## C. M2 — outbox live against sandbox
 
-Freeze new prototype features until M1 ships. From here the prototype is the
-**spec for M1's read screens**, and its M3/ledger sections are **design assets
-for later phases**, not build targets. A new idea goes into `DECISIONS.md` or
-`LEDGER-DESIGN.md` as a decision to make, not into `bunzbooks.html` as a screen
-to admire. The failure mode is obvious in hindsight: an app that mocks a period
-close beautifully and has never fetched an invoice.
+Gate: the ⚠️ facts verified. The `RequestId` scope on Customer and Item decides
+whether the adopt path is a guard or the whole mechanism.
+
+1. `HttpQboClient::create` and `update` against an Intuit sandbox company.
+2. `RequestId` reuse on retry checked against real responses.
+3. Chaos and convergence tests pass against the sandbox, not only the mock.
+4. Failure inbox in the UI: `conflicted` and `rejected` records with the QBO
+   response and the resolution actions.
+
+Acceptance: zero duplicates under induced network failure. `is_write_enabled`
+stays 0 for both production realms throughout.
+
+Framing: this is the **export shim**. It is worth building only because QBO has
+to stay current for the CPA and bank feeds until cutover. Nothing here is the
+destination.
 
 ---
 
-## 8. Risks, ranked
+## D. M3 — write UI, own store first, QBO second
 
-1. **The four ⚠️ API facts.** Baked into `RealmLimits::default`,
-   `requires_query_before_create`, and the D12 backfill. Verification is thirty
-   minutes on a machine with access and gates M2.
-2. **184 tests prove behaviour against `MockQbo`, not Intuit.** The first live
-   sync is where the mock and reality diverge. Record fixtures immediately so the
-   divergence becomes a test rather than a memory.
-3. **Prototype scope creep**, above.
-4. **Performance numbers are `#[ignore]`d**, so a regression ships silently.
-5. **Worker local-id rewriting** is the one place a bug double-bills a customer.
-   Sandbox chaos testing in M2 is the mitigation; do not skip it for the mock.
-6. **macOS-only** once the keychain backend lands. Acceptable; stated so it is
+Invoice, PO, estimate, bill, receive payment. Keyboard-first. Class on every
+line, enforced at the boundary.
+
+The change from the first draft: **a save commits to your own document store
+and posts to your own ledger**, then enqueues the outbox record that mirrors it
+to QBO. The "not yet in QBO" state the prototype shows is now literally true and
+stays true until the outbox drains. A QBO rejection is a mirror problem
+surfaced in the failure inbox, not a reason the local document is wrong.
+
+Production QBO writes: two-week read-only window elapsed, Dan's explicit go, one
+realm at a time, Aquamentor first. No delete, no void, in either book.
+
+---
+
+## E. Parallel run
+
+Both books post every document. Nightly:
+
+- Trial balance, own ledger versus QBO `TrialBalance` report, same date. Any
+  variance is an unmissable error with the offending entries listed.
+- AR and AP aging diffed by customer and vendor.
+- Reconciliation sweep of the replica (Phase A) still runs, because the mirror
+  can drift independently of the ledger.
+
+Minimum duration before cutover: **one full quarter with zero unexplained
+variance.** Explained variances are recorded in `DECISIONS.md` with the policy
+that produced them.
+
+---
+
+## F. Cutover — 1 January 2027, fallback 1 January 2028
+
+**Go/no-go on 1 November 2026.** Go requires all of:
+
+- Phase E has been running with zero unexplained TB variance for at least four
+  weeks, and will reach a full quarter by 31 December.
+- Phase G's blockers for the first quarter of 2027 are done: bank import, sales
+  tax liability report, CPA export accepted by Joel in writing.
+- Channel intake (Shopify, Amazon, wholesale POs) lands in the own store, not
+  only in QBO.
+
+If any of those is missing on 1 November, the target moves to 1/1/28 without
+argument, and the parallel run continues for all of 2027. That is the whole
+point of a fallback: a bad cutover costs a year of books, a late one costs
+nothing.
+
+At cutover: outbox off; QBO kept read-only for history and the FY2026 close; the
+replica retained as the import source it always was; FY2026 1099-NEC and the
+FY2026 tax package come from QBO, since the 2026 books live there.
+
+Honest read on 1/1/27: today is 11 September. Phase A has not started, needs
+the Mac, and a full quarter of parallel run means both books posting by
+1 October. That is not going to happen in three weeks. The realistic 1/1/27
+case is a parallel run from early November, checked at the go/no-go with the
+four-week bar rather than the quarter bar, and the quarter bar reached by
+31 December. It is a stretch, it is not impossible, and the fallback makes
+missing it cheap.
+
+---
+
+## G. Decoupling blockers that are not the ledger
+
+The double-entry engine is the easy part. These are what actually keep the
+books in QBO, each scoped as its own item with its own acceptance:
+
+| Blocker | Realistic 2026 path | Later path |
+|---|---|---|
+| Bank and credit-card feeds | CSV/OFX import from Chase and the bank, with a match-and-clear screen | Plaid |
+| Sales tax | NJ single rate plus exemption certificates on file for out-of-state wholesale; liability report by period; filing stays on the NJ portal as it does today | Multi-state nexus if it ever matters |
+| 1099-NEC | Not needed until January 2028 for FY2027; FY2026 comes from QBO | Vendor 1099 flag already in the prototype; generate from payments |
+| CPA handoff | Joel gets GL detail, TB, P&L, balance sheet as exports, and QBO read-only for FY2026; **confirm in writing before 1 November what he will accept** | Read-only login to the app |
+| Customer payments | Depends on whether QBO Payments is in use today; **Dan to confirm.** If yes, a replacement processor or payment links is a hard blocker | |
+| Channel intake | The Shopify, Amazon and wholesale skills in `claude-config` write to QBO through the QuickBooks MCP. An **MCP server over the own store** lets every existing skill be repointed without rewriting them, and is the cheapest way to move intake | Native integrations |
+| Payroll | Already SurePayroll; journal the summary. Not a blocker | |
+| Inventory quantities | QBO's inventory tracking is not used for foam; the own system's manufacturing costing replaces it after cutover | |
+
+---
+
+## H. After cutover
+
+Manufacturing costing as designed in LEDGER-DESIGN.md: landed cost, build
+sheets, variance, sensitivity. Orders as a shop-floor queue. Vendor credit
+application and progress invoicing as the prototype shows them. WaterLine's
+realm, same code path, own budget. These are the features QBO never had and are
+the reason for goal 2; they wait only because they are worthless in a book that
+is not yet the book of record.
+
+---
+
+## Prototype governance
+
+The prototype stops growing once its ledger, period-close and manufacturing
+sections have been lifted into `LEDGER-DESIGN.md`. From then on it is the spec
+for B1's read screens. A new idea goes into `DECISIONS.md` or
+`LEDGER-DESIGN.md` as a decision, not into `bunzbooks.html` as a screen. The
+failure mode it guards against is an app that mocks a period close beautifully
+and has never fetched an invoice.
+
+---
+
+## Risks, ranked
+
+1. **The 1/1/27 date.** Mitigated entirely by the go/no-go and the fallback.
+   The one way it goes wrong is skipping the parallel-run bar to hit the date.
+2. **The four ⚠️ API facts**, baked into `RealmLimits::default`,
+   `requires_query_before_create` and D12's backfill. Thirty minutes on a
+   machine with access.
+3. **184 tests prove behaviour against `MockQbo`, not Intuit.** Record fixtures
+   at the first live sync so divergence becomes a test.
+4. **Posting-policy differences from QBO surfacing at import** (B' step 4). Not
+   a risk to avoid, a risk to schedule: budget time for it.
+5. **CPA acceptance.** A cutover Joel will not work with is not a cutover.
+6. **Performance numbers are `#[ignore]`d**, so a regression ships silently.
+7. **Worker local-id rewriting** is where a bug double-bills a customer.
+   Sandbox chaos testing in C is the mitigation.
+8. **macOS-only** once the keychain backend lands. Acceptable; stated so it is
    not a surprise.
 
 ---
 
-## 9. Decisions Dan owns
+## Decisions Dan owns
 
-| # | Decision | Recommendation |
+| # | Decision | Status |
 |---|---|---|
-| 1 | M1 UI stack (§2) | Option A |
-| 2 | Freeze the prototype (§7) | Yes |
-| 3 | Reuse the `qbo_headless` refresh token or build the consent flow now | Reuse if valid; consent flow is a later hardening item |
-| 4 | Start the offline-buildable Phase A items in the cloud sandbox now, ahead of the Mac session | Yes: sweep, daemon loop, query API |
+| 1 | Cutover date | 1/1/27 target, 1/1/28 fallback, go/no-go 1 Nov 2026 |
+| 2 | M1 UI stack | Open; recommendation A |
+| 3 | The three posting policies in B2 | Open; needed before B' starts |
+| 4 | Reuse the `qbo_headless` refresh token or build the consent flow | Open; recommendation reuse if valid |
+| 5 | Is QBO Payments in use for customer payments? | Open; decides whether G has a hard blocker |
+| 6 | Start the offline-buildable Phase A items now, ahead of the Mac session | Open; recommendation yes |
