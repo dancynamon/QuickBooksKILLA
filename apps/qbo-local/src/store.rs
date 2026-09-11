@@ -13,6 +13,7 @@ use thiserror::Error;
 use ledger_core::Money;
 
 pub mod lineage;
+pub mod query;
 pub mod search;
 
 use crate::domain::{ContactType, DocumentType, EntityType, RealmId};
