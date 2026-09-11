@@ -414,8 +414,7 @@ impl Store {
 
     fn configure(connection: &Connection) -> Result<(), StoreError> {
         // journal_mode returns a row, so it cannot go through execute_batch.
-        let _: String =
-            connection.query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))?;
+        let _: String = connection.query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))?;
         connection.execute_batch(
             "PRAGMA foreign_keys = ON;
              PRAGMA synchronous = FULL;",
@@ -432,11 +431,11 @@ impl Store {
              ) STRICT;",
         )?;
 
-        let current: i64 = self
-            .connection
-            .query_row("SELECT COALESCE(MAX(version), 0) FROM schema_version", [], |row| {
-                row.get(0)
-            })?;
+        let current: i64 = self.connection.query_row(
+            "SELECT COALESCE(MAX(version), 0) FROM schema_version",
+            [],
+            |row| row.get(0),
+        )?;
 
         if current > latest_version() {
             return Err(StoreError::SchemaTooNew {
@@ -502,6 +501,34 @@ impl Store {
             params![realm.as_str(), i64::from(enabled)],
         )?;
         Ok(())
+    }
+
+    /// Every registered realm, for a status view that has no single realm to
+    /// scope to yet — the one place in this module that reads across realms,
+    /// because listing them is what lets a caller pick one.
+    pub fn list_realms(&self) -> Result<Vec<RealmSummary>, StoreError> {
+        let mut statement = self.connection.prepare(
+            "SELECT realm_id, display_name, is_write_enabled FROM realms ORDER BY realm_id",
+        )?;
+        let rows = statement.query_map([], |row| {
+            let raw_realm_id: String = row.get(0)?;
+            // As `document_row`'s `doc_type` decode: a row only ever lands here
+            // through `register_realm`, which takes a `&RealmId`, so a value
+            // that fails to parse means the file was edited outside the app.
+            let realm_id = RealmId::parse(&raw_realm_id).map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    0,
+                    rusqlite::types::Type::Text,
+                    Box::new(error),
+                )
+            })?;
+            Ok(RealmSummary {
+                realm_id,
+                display_name: row.get(1)?,
+                is_write_enabled: row.get::<_, i64>(2)? != 0,
+            })
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
     pub fn upsert_entity(
@@ -689,7 +716,9 @@ impl Store {
                     params![realm.as_str(), entity.entity_type.as_str(), entity.qbo_id],
                 )?;
             }
-            Projection::Quarantine(reason) => quarantine_in(&transaction, realm, entity, reason, now)?,
+            Projection::Quarantine(reason) => {
+                quarantine_in(&transaction, realm, entity, reason, now)?
+            }
             Projection::NotProjected => {}
         }
 
@@ -863,9 +892,16 @@ impl Store {
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
-    pub fn count_projected(&self, realm: &RealmId, table: ProjectedTable) -> Result<i64, StoreError> {
+    pub fn count_projected(
+        &self,
+        realm: &RealmId,
+        table: ProjectedTable,
+    ) -> Result<i64, StoreError> {
         Ok(self.connection.query_row(
-            &format!("SELECT COUNT(*) FROM {} WHERE realm_id = ?1", table.as_str()),
+            &format!(
+                "SELECT COUNT(*) FROM {} WHERE realm_id = ?1",
+                table.as_str()
+            ),
             params![realm.as_str()],
             |row| row.get(0),
         )?)
@@ -904,6 +940,16 @@ pub struct ReprojectReport {
     pub parsed: usize,
     pub not_projected: usize,
     pub quarantined: usize,
+}
+
+/// A registered realm, as listed by [`Store::list_realms`] — enough for a
+/// status view to name each realm and know whether writes are on before it
+/// asks for anything more.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RealmSummary {
+    pub realm_id: RealmId,
+    pub display_name: String,
+    pub is_write_enabled: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1364,8 +1410,12 @@ mod tests {
 
     fn store() -> Store {
         let store = Store::open_in_memory().unwrap();
-        store.register_realm(&aquamentor(), "Aquamentor, Inc.", now()).unwrap();
-        store.register_realm(&waterline(), "WaterLine CNC", now()).unwrap();
+        store
+            .register_realm(&aquamentor(), "Aquamentor, Inc.", now())
+            .unwrap();
+        store
+            .register_realm(&waterline(), "WaterLine CNC", now())
+            .unwrap();
         store
     }
 
@@ -1393,7 +1443,10 @@ mod tests {
         let mut sorted = versions.clone();
         sorted.sort_unstable();
         sorted.dedup();
-        assert_eq!(versions, sorted, "migrations must be uniquely and increasingly numbered");
+        assert_eq!(
+            versions, sorted,
+            "migrations must be uniquely and increasingly numbered"
+        );
     }
 
     #[test]
@@ -1402,14 +1455,23 @@ mod tests {
         let path = directory.path().join("replica.db");
 
         let first = Store::open(&path).unwrap();
-        first.register_realm(&aquamentor(), "Aquamentor, Inc.", now()).unwrap();
-        first.upsert_entity(&aquamentor(), &entity("71204"), now()).unwrap();
+        first
+            .register_realm(&aquamentor(), "Aquamentor, Inc.", now())
+            .unwrap();
+        first
+            .upsert_entity(&aquamentor(), &entity("71204"), now())
+            .unwrap();
         drop(first);
 
         let second = Store::open(&path).unwrap();
         assert_eq!(second.schema_version().unwrap(), latest_version());
         // Data survived, and re-running migrations did not clear it.
-        assert_eq!(second.count_entities(&aquamentor(), EntityType::Invoice).unwrap(), 1);
+        assert_eq!(
+            second
+                .count_entities(&aquamentor(), EntityType::Invoice)
+                .unwrap(),
+            1
+        );
     }
 
     #[test]
@@ -1457,7 +1519,9 @@ mod tests {
     fn an_entity_round_trips_with_its_raw_payload_intact() {
         let store = store();
         let original = entity("71204");
-        store.upsert_entity(&aquamentor(), &original, now()).unwrap();
+        store
+            .upsert_entity(&aquamentor(), &original, now())
+            .unwrap();
 
         let loaded = store
             .get_entity(&aquamentor(), EntityType::Invoice, "71204")
@@ -1471,14 +1535,21 @@ mod tests {
     #[test]
     fn upsert_updates_rather_than_duplicating() {
         let store = store();
-        store.upsert_entity(&aquamentor(), &entity("71204"), now()).unwrap();
+        store
+            .upsert_entity(&aquamentor(), &entity("71204"), now())
+            .unwrap();
 
         let mut updated = entity("71204");
         updated.sync_token = "1".to_string();
         updated.raw_json = serde_json::json!({ "DocNumber": "21234", "TotalAmt": 99.99 });
         store.upsert_entity(&aquamentor(), &updated, now()).unwrap();
 
-        assert_eq!(store.count_entities(&aquamentor(), EntityType::Invoice).unwrap(), 1);
+        assert_eq!(
+            store
+                .count_entities(&aquamentor(), EntityType::Invoice)
+                .unwrap(),
+            1
+        );
         let loaded = store
             .get_entity(&aquamentor(), EntityType::Invoice, "71204")
             .unwrap()
@@ -1497,11 +1568,25 @@ mod tests {
         let mut water_invoice = entity("71204");
         water_invoice.raw_json = serde_json::json!({ "DocNumber": "WATER" });
 
-        store.upsert_entity(&aquamentor(), &aqua_invoice, now()).unwrap();
-        store.upsert_entity(&waterline(), &water_invoice, now()).unwrap();
+        store
+            .upsert_entity(&aquamentor(), &aqua_invoice, now())
+            .unwrap();
+        store
+            .upsert_entity(&waterline(), &water_invoice, now())
+            .unwrap();
 
-        assert_eq!(store.count_entities(&aquamentor(), EntityType::Invoice).unwrap(), 1);
-        assert_eq!(store.count_entities(&waterline(), EntityType::Invoice).unwrap(), 1);
+        assert_eq!(
+            store
+                .count_entities(&aquamentor(), EntityType::Invoice)
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            store
+                .count_entities(&waterline(), EntityType::Invoice)
+                .unwrap(),
+            1
+        );
 
         let from_aqua = store
             .get_entity(&aquamentor(), EntityType::Invoice, "71204")
@@ -1523,10 +1608,22 @@ mod tests {
         customer.entity_type = EntityType::Customer;
 
         store.upsert_entity(&aquamentor(), &invoice, now()).unwrap();
-        store.upsert_entity(&aquamentor(), &customer, now()).unwrap();
+        store
+            .upsert_entity(&aquamentor(), &customer, now())
+            .unwrap();
 
-        assert_eq!(store.count_entities(&aquamentor(), EntityType::Invoice).unwrap(), 1);
-        assert_eq!(store.count_entities(&aquamentor(), EntityType::Customer).unwrap(), 1);
+        assert_eq!(
+            store
+                .count_entities(&aquamentor(), EntityType::Invoice)
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            store
+                .count_entities(&aquamentor(), EntityType::Customer)
+                .unwrap(),
+            1
+        );
     }
 
     #[test]
@@ -1557,6 +1654,26 @@ mod tests {
     }
 
     #[test]
+    fn list_realms_returns_every_registered_realm() {
+        let store = store();
+        store.set_write_enabled(&aquamentor(), true).unwrap();
+
+        let realms = store.list_realms().unwrap();
+        assert_eq!(realms.len(), 2);
+        let aqua = realms.iter().find(|r| r.realm_id == aquamentor()).unwrap();
+        assert_eq!(aqua.display_name, "Aquamentor, Inc.");
+        assert!(aqua.is_write_enabled);
+        let water = realms.iter().find(|r| r.realm_id == waterline()).unwrap();
+        assert!(!water.is_write_enabled);
+    }
+
+    #[test]
+    fn list_realms_is_empty_for_a_fresh_store() {
+        let store = Store::open_in_memory().unwrap();
+        assert!(store.list_realms().unwrap().is_empty());
+    }
+
+    #[test]
     fn strict_tables_reject_a_wrong_typed_value() {
         // Without STRICT, SQLite's type affinity would accept a string into an
         // integer column, which is not acceptable in a financial store.
@@ -1574,7 +1691,10 @@ mod tests {
     fn foreign_keys_stop_an_entity_landing_under_an_unknown_realm() {
         let store = Store::open_in_memory().unwrap();
         let result = store.upsert_entity(&aquamentor(), &entity("71204"), now());
-        assert!(result.is_err(), "unregistered realm should have been refused");
+        assert!(
+            result.is_err(),
+            "unregistered realm should have been refused"
+        );
     }
 
     #[test]
