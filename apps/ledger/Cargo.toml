@@ -2,6 +2,28 @@
 name = "ledger"
 version = "0.1.0"
 edition.workspace = true
+description = "Double-entry general ledger for Aquamentor and WaterLine CNC. LEDGER-DESIGN.md."
 
 [dependencies]
 ledger-core = { path = "../../crates/ledger-core" }
+qbo-local = { path = "../qbo-local" }
+chrono = { workspace = true }
+rusqlite = { workspace = true }
+rust_decimal = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+rust_decimal_macros = { workspace = true }
+tempfile = { workspace = true }
+
+[lib]
+name = "ledger"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ledger"
+path = "src/main.rs"
