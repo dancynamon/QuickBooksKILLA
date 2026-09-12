@@ -55,8 +55,8 @@ Everything **not** built needs credentials, Intuit's docs, or a UI toolchain:
 | Verify the four ⚠️ API facts (DESIGN §0, §12) | A, gates C | `developer.intuit.com`, blocked from the cloud sandbox |
 | Read-only query API over `Store` | B | **built 11 Sep** |
 | UI shell and read screens | B | stack decision, §B |
-| `LEDGER-DESIGN.md` | B | Dan's review of three posting policies, §B |
-| Ledger engine, import from replica | B' | LEDGER-DESIGN |
+| `LEDGER-DESIGN.md` | B | **drafted 11 Sep**; Dan's six gating items decided 12 Sep (D20, D21); Joel's sixteen open |
+| Ledger engine, import from replica | B' | **unblocked 12 Sep**; buildable offline against the replica |
 | Write UI into own store, export via outbox | D | C |
 | Statement import, sales-tax reports, accountant mode, Authorize.net, MCP server | G | scoped in §G |
 

@@ -335,3 +335,21 @@ is the whole filing today; the rate is a config value in case that changes.*
 *Rejected: expensing material on purchase (what QBO does for Dan today), which
 makes a large foam order distort two months of margin; FIFO, which needs lot
 tracking on every cut for a material where lots are interchangeable.*
+
+## D21 — W6, W8, W15, W16 decided
+
+12 Sep 2026, Dan, each as the draft recommended.
+
+- **W6** Shipping charged to customers is income (4300), so line A of the
+  sales tax worksheet keeps its shape.
+- **W8** Customer payments land in undeposited funds by default; bank matching
+  is per deposit, which is what a batched Authorize.net settlement needs.
+- **W15** Aquamentor's class list is `foam`, `sign`, `chair`, `drop`, `cnc`,
+  `uv`; `cnc` and `uv` exist in both books.
+- **W16** At import an unclassed line takes its item's default class and is
+  marked `class_source = 'item_default'`; only a line whose item has no default
+  is quarantined.
+
+Every import-gating item (W2, W3, W4, W12, W15, W16) is now decided. The ledger
+engine and the replica import (ROADMAP §B') are unblocked on Dan's side; the
+sixteen Joel items remain open and none of them gate the start of §B'.
