@@ -36,7 +36,7 @@ in its §13 come back answered.
 ## Build
 
 ```sh
-cargo test          # 412 tests, all offline
+cargo test          # 451 tests, all offline
 cargo clippy --all-targets
 cargo run --bin qbo-local -- --help
 cargo run --bin ledger -- --help
@@ -89,12 +89,21 @@ keychain token backend, the Tauri shell and its front-end. See `ROADMAP.md`.
   (unmapped ones created and flagged, never dropped), every document
   translated from raw JSON and posted through the same function the UI will
   use, idempotent and re-runnable, changed documents reversed and reposted
-- A `ledger` binary: `init`, `import`, `tb`, `pnl`, `bs`, `tax`, `close`,
-  `reopen`, `tbdiff`
+- Opening balances and the §6 boundary-year walk, run on scratch ledgers
+  against QBO trial balance snapshots
+- Per-line taxability on journal lines, so the §9 report's line E and its
+  variance against the derived taxable figure exist
+- §10 bank statements: Chase CSV and OFX/QFX parsers, exact and settlement
+  matching, proposals that never post unconfirmed, the per-statement close
+- §8 accountant mode read side: GL detail with running balances, audit trail,
+  CSV export pack, the adjusting-entry request queue, reclassify as a proposal
+- A `ledger` binary: `init`, `import`, `opening`, `boundary`, `tb`, `pnl`,
+  `bs`, `tax`, `close`, `reopen`, `tbdiff`, `gl`, `audit`, `export`,
+  `adjust`, `reclass`, `bank import|match|confirm|close|status`
 
-Not built yet: opening balances wired into the import, the boundary-year walk
-against live QBO trial balances, statement import and reconciliation (§10),
-accountant mode (§8), manufacturing costing (§11), the UI.
+Not built yet: manufacturing costing (§11), Authorize.net settlement import,
+PDF exports, the UI. `docs/BANK.md` and `docs/ACCOUNTANT.md` describe the two
+workflows.
 
 The first live authentication run should happen wherever the OAuth credentials
 already live, rather than moving them onto another machine.
