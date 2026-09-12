@@ -16,7 +16,10 @@
 //! - [`import`]   — §6: replica to documents, chart mapping, opening balances
 //! - [`pipeline`] — §6: the importer wired to [`post`] and [`store`] —
 //!   replica in, posted entries out
+//! - [`bank`]     — §10: statement import, matching, proposals, the
+//!   per-statement close
 
+pub mod bank;
 pub mod chart;
 pub mod import;
 pub mod pipeline;
