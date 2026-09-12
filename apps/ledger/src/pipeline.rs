@@ -26,14 +26,15 @@
 //!   version is saved, and the new entry is posted. Counted in
 //!   [`PipelineReport::replaced`].
 //!
-//! A document that has never posted (first import, or a non-posting kind
-//! that never leaves an entry behind) always takes the "different" path: it
-//! is saved and posted fresh. One consequence, noted rather than hidden: a
-//! document that never posts (`Estimate`, `PurchaseOrder`) has no entries to
-//! key the skip check on, so an unchanged estimate is re-saved as a new
-//! version on every re-run rather than being deduplicated the way a posting
-//! document is. Nothing in `LEDGER-DESIGN.md` §6 asks for more than that
-//! today, and estimates carry no accounting weight to duplicate.
+//! A document that has never posted (first import) always takes the
+//! "different" path: it is saved and posted fresh. A non-posting kind
+//! (`Estimate`, `PurchaseOrder`) never leaves a posted entry behind, so it
+//! cannot use the entries-exist check above at all — it is instead
+//! deduplicated by comparing its translated payload directly against the
+//! latest saved version (the same `document_unchanged` comparison), and
+//! skipped when it matches. Counted in [`PipelineReport::skipped_unchanged`]
+//! and [`PipelineReport::non_posting`] respectively, same as a posting
+//! document.
 //!
 //! **Error handling** (§2, "an import that stops at the first oddity never
 //! finishes"): a [`crate::post::PostError`] or a [`crate::store::LedgerError`]
@@ -50,7 +51,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDate, Utc};
 use thiserror::Error;
 
 use ledger_core::{round_money, RoundingPolicy};
@@ -60,9 +61,10 @@ use qbo_local::store::Store;
 use crate::chart;
 use crate::import::{
     self, map_accounts, map_classes, AccountMapping, ClassMapping, ImportError, ImportOptions,
-    ItemContext, Translated,
+    ItemContext, MappedAccount, Translated,
 };
 use crate::post::{self, Posting};
+use crate::report;
 use crate::store::{CommandMeta, Ledger, LedgerError};
 use crate::types::{
     AccountId, CompanyId, CustomerPosting, ItemAccounts, LedgerDocument, PostingConfig,
@@ -424,6 +426,35 @@ fn process_document(
     let doc = &translated.document;
     let document_id = doc.document_id.clone();
 
+    // Estimate and PurchaseOrder never post, so they never leave a posted
+    // entry behind for the check below to key on. Compare the payload
+    // directly instead: an unchanged one is skipped exactly like a posting
+    // document whose entries matched, rather than re-saved as a fresh
+    // version on every run.
+    if !doc.kind.posts() {
+        if document_unchanged(ledger, company, &document_id, doc) {
+            report.skipped_unchanged += 1;
+            return;
+        }
+        match ledger.save_document(
+            company,
+            doc,
+            CommandMeta {
+                actor_id: "import".to_string(),
+                kind: "import_qbo".to_string(),
+                hlc: now.to_rfc3339(),
+            },
+            now,
+        ) {
+            Ok(_) => report.non_posting += 1,
+            Err(err) => report.rejected.push(Rejected {
+                document_id,
+                reason: err.to_string(),
+            }),
+        }
+        return;
+    }
+
     let existing = match ledger.entries_for_document(company, &document_id) {
         Ok(rows) => rows,
         Err(err) => {
@@ -524,4 +555,257 @@ fn document_unchanged(
         return false;
     };
     saved == fresh
+}
+
+// ---------------------------------------------------------------------------
+// Opening balances (§6 "Full history from where, opening balances before")
+// ---------------------------------------------------------------------------
+
+/// What one call to [`apply_opening_balance`] did.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct OpeningReport {
+    /// The opening balance document's deterministic id
+    /// (`opening-balance:<company>:<as_of>`, [`import::opening_balance_entry`]).
+    pub document_id: String,
+    /// A saved opening balance for this company and `as_of` already existed
+    /// with an identical payload — skipped rather than reversed and reposted
+    /// (the same rule [`import_replica`] applies to every document).
+    pub skipped_unchanged: bool,
+    /// A saved opening balance existed and differed: its posted entries were
+    /// reversed as of `as_of` and the new version posted in their place.
+    pub replaced: bool,
+}
+
+/// Build every mapped account this company's chart already knows about from
+/// the accounts materialised in `ledger` itself — every row with a
+/// `source_ref` (§2, set the first time an import or a prior opening balance
+/// mapped a QBO account onto it). Unlike [`import_replica`], applying an
+/// opening balance needs no replica and no realm: the only accounts a QBO
+/// trial balance row can possibly land on are the ones already in this
+/// company's chart.
+fn account_mapping_from_ledger(
+    ledger: &Ledger,
+    company: &str,
+) -> Result<AccountMapping, PipelineError> {
+    let mapped = ledger
+        .list_accounts(company)?
+        .into_iter()
+        .filter_map(|account| {
+            let source_ref = account.source_ref?;
+            Some(MappedAccount {
+                source_ref,
+                ledger_number: account.account_id,
+                name: account.name,
+                classification: account.classification,
+                needs_mapping: account.needs_mapping,
+            })
+        })
+        .collect();
+    Ok(AccountMapping { mapped })
+}
+
+/// §6: apply — or idempotently skip or replace — the single opening balance
+/// entry that stands in for every year before the boundary year. Builds the
+/// entry with [`import::opening_balance_entry`] against
+/// [`account_mapping_from_ledger`], saves it as a `Journal`-kind document
+/// with [`CommandMeta::kind`] `"opening_balance"`, and posts it flagged
+/// (§4: manual and imported journal entries carry `is_flagged`).
+///
+/// Idempotent, the same rule §6 gives every imported document (see this
+/// module's own docs above): a saved opening balance document whose payload
+/// is unchanged is skipped entirely; one that differs has its posted entries
+/// reversed as of `as_of` and the new version posted in its place. Safe to
+/// call again with the same `qbo_tb`, and safe to call as part of
+/// [`boundary_walk`]'s per-year scratch replay.
+pub fn apply_opening_balance(
+    ledger: &Ledger,
+    company: &str,
+    as_of: NaiveDate,
+    qbo_tb: &[report::QboTbRow],
+    now: DateTime<Utc>,
+) -> Result<OpeningReport, PipelineError> {
+    let company_id = CompanyId(company.to_string());
+    let mapping = account_mapping_from_ledger(ledger, company)?;
+    let (doc, mut entry) = import::opening_balance_entry(&company_id, as_of, qbo_tb, &mapping)?;
+    let document_id = doc.document_id.clone();
+
+    let posted_existing: Vec<_> = ledger
+        .entries_for_document(company, &document_id)?
+        .into_iter()
+        .filter(|(_, _, posted)| *posted)
+        .collect();
+
+    if !posted_existing.is_empty() && document_unchanged(ledger, company, &document_id, &doc) {
+        return Ok(OpeningReport {
+            document_id,
+            skipped_unchanged: true,
+            replaced: false,
+        });
+    }
+
+    let replaced = !posted_existing.is_empty();
+    for (entry_id, _entry, _posted) in &posted_existing {
+        ledger.reverse_entry(company, entry_id, as_of, now)?;
+    }
+
+    let version = ledger.save_document(
+        company,
+        &doc,
+        CommandMeta {
+            actor_id: "opening_balance".to_string(),
+            kind: "opening_balance".to_string(),
+            hlc: now.to_rfc3339(),
+        },
+        now,
+    )?;
+    entry.source_version = version.version;
+    ledger.post_entry(company, &entry, now)?;
+
+    Ok(OpeningReport {
+        document_id,
+        skipped_unchanged: false,
+        replaced,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// The boundary-year walk (§6, same section)
+// ---------------------------------------------------------------------------
+
+/// One year of the walk: whether the replay agreed with QBO's own trial
+/// balance for that year, and the diff that says so.
+#[derive(Clone, Debug, PartialEq)]
+pub struct YearAgreement {
+    pub year: i32,
+    /// `diff.must_failures.is_empty()` — the §7 tolerance rules the walk
+    /// procedure itself calls for ("Compare ... on the §7 tolerance rules").
+    pub agrees: bool,
+    pub diff: report::TbDiff,
+}
+
+/// What [`boundary_walk`] found.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BoundaryReport {
+    /// Every year examined, most recent first (the order the walk runs in),
+    /// stopping at the first disagreement.
+    pub years: Vec<YearAgreement>,
+    /// The earliest year such that it and every later year agree —
+    /// [`import::boundary_year`] over `years`. `None` if even the most
+    /// recent year disagrees.
+    pub boundary_year: Option<i32>,
+}
+
+impl BoundaryReport {
+    /// The §7-style fixed-width table, plus the boundary year itself.
+    pub fn render_text(&self, company: &str) -> String {
+        let mut out = String::new();
+        out.push_str(&format!("BOUNDARY WALK   {company}\n\n"));
+        out.push_str(&format!(
+            "{:<8}{:<10}{:>16}\n",
+            "year", "agrees", "must-failures"
+        ));
+        for year in &self.years {
+            out.push_str(&format!(
+                "{:<8}{:<10}{:>16}\n",
+                year.year,
+                if year.agrees { "yes" } else { "no" },
+                year.diff.must_failures.len(),
+            ));
+        }
+        match self.boundary_year {
+            Some(y) => out.push_str(&format!("\nboundary year: {y}\n")),
+            None => out.push_str("\nboundary year: none — even the most recent year disagrees\n"),
+        }
+        out
+    }
+}
+
+/// The §6 boundary walk, made mechanical. For each year in `snapshots`, most
+/// recent first: replay only that year's documents (`ImportOptions` bounded
+/// to 1 January .. 31 December of that year) on top of an opening balance
+/// taken from the *prior* year's own snapshot (when one is given), against a
+/// fresh **scratch, in-memory `Ledger`** — one per year, and never `ledger`,
+/// the caller's real one, which this function only borrows and never writes
+/// to. Every scratch ledger is built the normal way, through
+/// [`import_replica`] and [`apply_opening_balance`], so the replay a human
+/// would get by actually running those commands against a fresh database is
+/// exactly what this function checks.
+///
+/// Stops at the first year (walking backwards) whose replayed 31 December
+/// trial balance disagrees with `qbo_tb` on the §7 tiers — everything
+/// earlier is not examined, because §6 turns it into one opening balance
+/// entry rather than replaying it. Returns the earliest agreeing year via
+/// [`import::boundary_year`] plus each examined year's diff.
+pub fn boundary_walk(
+    ledger: &Ledger,
+    replica: &Store,
+    realm: &RealmId,
+    company: &str,
+    snapshots: &[(i32, Vec<report::QboTbRow>)],
+    tiers: &report::TierRules,
+    now: DateTime<Utc>,
+) -> Result<BoundaryReport, PipelineError> {
+    // `ledger` is taken so a caller can pass the same handle it uses for
+    // everything else; the walk itself never reads or writes it — see the
+    // doc comment above.
+    let _ = ledger;
+
+    let mut years_sorted: Vec<i32> = snapshots.iter().map(|(year, _)| *year).collect();
+    years_sorted.sort_unstable();
+    let rows_for = |year: i32| -> Option<&Vec<report::QboTbRow>> {
+        snapshots
+            .iter()
+            .find(|(y, _)| *y == year)
+            .map(|(_, rows)| rows)
+    };
+
+    let mut years = Vec::new();
+
+    for year in years_sorted.into_iter().rev() {
+        let scratch = Ledger::open_in_memory()?;
+        scratch.create_company(company, company, Some(realm.as_str()), now)?;
+
+        let from = NaiveDate::from_ymd_opt(year, 1, 1).expect("1 January is always a valid date");
+        let to = NaiveDate::from_ymd_opt(year, 12, 31).expect("31 December is always a valid date");
+        let options = ImportOptions {
+            from: Some(from),
+            to: Some(to),
+        };
+        import_replica(&scratch, replica, realm, company, &options, now)?;
+
+        if let Some(prior_rows) = rows_for(year - 1) {
+            let as_of = NaiveDate::from_ymd_opt(year - 1, 12, 31)
+                .expect("31 December is always a valid date");
+            apply_opening_balance(&scratch, company, as_of, prior_rows, now)?;
+        }
+
+        let qbo_rows = rows_for(year).expect("year was read from snapshots itself");
+        let tb = report::trial_balance(&scratch, company, to)?;
+        let diff = report::tb_diff(&tb, qbo_rows, tiers)?;
+        let agrees = diff.must_failures.is_empty();
+
+        years.push(YearAgreement { year, agrees, diff });
+
+        if !agrees {
+            break;
+        }
+    }
+
+    let agreements: Vec<(i32, import::TbAgreement)> = years
+        .iter()
+        .map(|year| {
+            (
+                year.year,
+                import::TbAgreement {
+                    agrees: year.agrees,
+                },
+            )
+        })
+        .collect();
+    let boundary_year = import::boundary_year(&agreements);
+
+    Ok(BoundaryReport {
+        years,
+        boundary_year,
+    })
 }

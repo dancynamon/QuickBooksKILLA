@@ -235,3 +235,172 @@ fn init_import_tb_tax_and_tbdiff_end_to_end() {
     let no_args = run(&[]);
     assert_eq!(no_args.status.code(), Some(2));
 }
+
+#[test]
+fn init_is_idempotent_a_second_run_succeeds_and_leaves_the_chart_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("ledger.sqlite");
+
+    let first = run(&[
+        "init",
+        "--db",
+        db.to_str().unwrap(),
+        "--company",
+        "aquamentor",
+        "--name",
+        "Aquamentor LLC",
+        "--realm",
+        realm().as_str(),
+    ]);
+    assert!(
+        first.status.success(),
+        "first init failed: {}",
+        stdout(&first)
+    );
+
+    // A second call for the same company id — a different display name, to
+    // prove it updates rather than merely no-opping — still exits 0.
+    let second = run(&[
+        "init",
+        "--db",
+        db.to_str().unwrap(),
+        "--company",
+        "aquamentor",
+        "--name",
+        "Aquamentor LLC (renamed)",
+        "--realm",
+        realm().as_str(),
+    ]);
+    assert!(
+        second.status.success(),
+        "second init must succeed, not error on a duplicate company: {}",
+        stdout(&second)
+    );
+
+    // The chart is unaffected either way: `tb` still renders a balanced,
+    // empty book rather than erroring on a doubled-up seed.
+    let tb = run(&[
+        "tb",
+        "--db",
+        db.to_str().unwrap(),
+        "--company",
+        "aquamentor",
+        "--as-of",
+        "2026-12-31",
+    ]);
+    assert!(tb.status.success(), "tb failed: {}", stdout(&tb));
+}
+
+#[test]
+fn opening_and_boundary_subcommands_run_end_to_end() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("ledger.sqlite");
+    let replica = dir.path().join("replica.sqlite");
+    build_replica(&replica);
+
+    let init = run(&[
+        "init",
+        "--db",
+        db.to_str().unwrap(),
+        "--company",
+        "aquamentor",
+        "--name",
+        "Aquamentor LLC",
+        "--realm",
+        realm().as_str(),
+    ]);
+    assert!(init.status.success(), "init failed: {}", stdout(&init));
+
+    let import = run(&[
+        "import",
+        "--db",
+        db.to_str().unwrap(),
+        "--company",
+        "aquamentor",
+        "--replica",
+        replica.to_str().unwrap(),
+        "--realm",
+        realm().as_str(),
+    ]);
+    assert!(
+        import.status.success(),
+        "import failed: {}",
+        stdout(&import)
+    );
+
+    // -- opening: post, then a second run with the same figures is skipped --
+    let csv_path = dir.path().join("tb-2025.csv");
+    std::fs::write(
+        &csv_path,
+        "qbo_account_id,name,balance\nBANK1,Checking,999.00\n",
+    )
+    .unwrap();
+
+    let opening_first = run(&[
+        "opening",
+        "--db",
+        db.to_str().unwrap(),
+        "--company",
+        "aquamentor",
+        "--as-of",
+        "2025-12-31",
+        "--qbo-csv",
+        csv_path.to_str().unwrap(),
+    ]);
+    assert!(
+        opening_first.status.success(),
+        "opening failed: {}",
+        stdout(&opening_first)
+    );
+    assert!(stdout(&opening_first).contains("posted"));
+
+    let opening_second = run(&[
+        "opening",
+        "--db",
+        db.to_str().unwrap(),
+        "--company",
+        "aquamentor",
+        "--as-of",
+        "2025-12-31",
+        "--qbo-csv",
+        csv_path.to_str().unwrap(),
+    ]);
+    assert!(opening_second.status.success());
+    assert!(
+        stdout(&opening_second).contains("skipped"),
+        "{}",
+        stdout(&opening_second)
+    );
+
+    // -- boundary: a directory of tb-YYYY.csv snapshots ----------------------
+    let snapshots_dir = dir.path().join("snapshots");
+    std::fs::create_dir(&snapshots_dir).unwrap();
+    std::fs::copy(&csv_path, snapshots_dir.join("tb-2025.csv")).unwrap();
+    std::fs::write(
+        snapshots_dir.join("tb-2026.csv"),
+        "qbo_account_id,name,balance\nBANK1,Checking,999.00\n",
+    )
+    .unwrap();
+
+    let boundary = run(&[
+        "boundary",
+        "--db",
+        db.to_str().unwrap(),
+        "--company",
+        "aquamentor",
+        "--replica",
+        replica.to_str().unwrap(),
+        "--realm",
+        realm().as_str(),
+        "--snapshots",
+        snapshots_dir.to_str().unwrap(),
+    ]);
+    assert!(
+        boundary.status.success(),
+        "boundary failed: {}",
+        stdout(&boundary)
+    );
+    let boundary_out = stdout(&boundary);
+    assert!(boundary_out.contains("BOUNDARY WALK"), "{boundary_out}");
+    assert!(boundary_out.contains("boundary year"), "{boundary_out}");
+}

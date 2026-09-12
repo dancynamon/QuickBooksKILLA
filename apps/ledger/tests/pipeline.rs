@@ -5,9 +5,10 @@
 //! idempotence, re-run replacement) has one clean number to check.
 
 use chrono::{NaiveDate, TimeZone, Utc};
+use ledger::chart;
 use ledger::import::ImportOptions;
-use ledger::pipeline::import_replica;
-use ledger::report::{self, TrialBalance};
+use ledger::pipeline::{apply_opening_balance, boundary_walk, import_replica};
+use ledger::report::{self, TierRules, TrialBalance};
 use ledger::store::Ledger;
 use ledger_core::Money;
 use qbo_local::domain::{EntityType, RealmId};
@@ -521,4 +522,374 @@ fn changing_one_entity_and_re_running_reverses_and_reposts_only_that_document() 
     // The original entry, its reversal, and the new entry.
     assert_eq!(entries.len(), 3);
     assert!(entries.iter().all(|(_, _, posted)| *posted));
+}
+
+// ---------------------------------------------------------------------------
+// Non-posting documents on re-run (§6): an unchanged Estimate is skipped,
+// never re-saved as a fresh version.
+// ---------------------------------------------------------------------------
+
+/// A minimal replica with one non-posting document: an Estimate for a
+/// service item, nothing else. Chosen small and separate from
+/// `seeded_replica` so this test's counts do not entangle with the posting
+/// documents there.
+fn estimate_replica() -> Store {
+    let store = Store::open_in_memory().unwrap();
+    store.register_realm(&realm(), "Aquamentor", now()).unwrap();
+
+    seed(
+        &store,
+        mirrored(
+            EntityType::Customer,
+            "31",
+            json!({ "Id": "31", "DisplayName": "Blue Harbor Swim Club", "Active": true, "Taxable": true }),
+        ),
+    );
+    seed(
+        &store,
+        mirrored(
+            EntityType::Class,
+            "4",
+            json!({ "Id": "4", "Name": "Foam Products", "Active": true }),
+        ),
+    );
+    seed(
+        &store,
+        mirrored(
+            EntityType::Account,
+            "INC1",
+            json!({ "Id": "INC1", "Name": "Sales", "AccountType": "Income",
+                    "AccountSubType": "SalesOfProductIncome", "Active": true }),
+        ),
+    );
+    seed(
+        &store,
+        mirrored(
+            EntityType::Item,
+            "999",
+            json!({ "Id": "999", "Name": "Custom Job", "Type": "Service",
+                    "IncomeAccountRef": { "value": "INC1" }, "ClassRef": { "value": "4" }, "Active": true }),
+        ),
+    );
+    seed(
+        &store,
+        mirrored(
+            EntityType::Estimate,
+            "EST-1",
+            json!({
+                "Id": "EST-1", "DocNumber": "1001", "TxnDate": "2026-07-14",
+                "CustomerRef": { "value": "31" }, "TotalAmt": 500.00,
+                "Line": [
+                    {
+                        "Id": "1", "LineNum": 1, "Amount": 500.00,
+                        "DetailType": "SalesItemLineDetail",
+                        "SalesItemLineDetail": {
+                            "ItemRef": { "value": "999" }, "Qty": 1, "UnitPrice": 500.00
+                        }
+                    },
+                    { "Amount": 500.00, "DetailType": "SubTotalLineDetail", "SubTotalLineDetail": {} }
+                ]
+            }),
+        ),
+    );
+
+    store
+}
+
+#[test]
+fn a_second_run_does_not_resave_an_unchanged_estimate() {
+    let replica = estimate_replica();
+    let ledger = new_ledger();
+    let document_id = "qbo:Estimate:EST-1";
+
+    let first = import_replica(
+        &ledger,
+        &replica,
+        &realm(),
+        "aquamentor",
+        &ImportOptions::default(),
+        now(),
+    )
+    .unwrap();
+    assert_eq!(first.translated, 1);
+    assert_eq!(first.non_posting, 1);
+    assert_eq!(first.posted, 0);
+    assert_eq!(first.skipped_unchanged, 0);
+    assert!(first.rejected.is_empty(), "rejected: {:?}", first.rejected);
+    assert_eq!(
+        ledger
+            .document_version_count("aquamentor", document_id)
+            .unwrap(),
+        1
+    );
+
+    let second = import_replica(
+        &ledger,
+        &replica,
+        &realm(),
+        "aquamentor",
+        &ImportOptions::default(),
+        now(),
+    )
+    .unwrap();
+    assert_eq!(second.translated, 1);
+    assert_eq!(
+        second.non_posting, 0,
+        "the unchanged estimate is skipped, not re-saved"
+    );
+    assert_eq!(second.skipped_unchanged, 1);
+    assert!(second.rejected.is_empty());
+
+    assert_eq!(
+        ledger
+            .document_version_count("aquamentor", document_id)
+            .unwrap(),
+        1,
+        "an unchanged estimate must not gain a second document_versions row"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Opening balances wired into the pipeline (§6)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn apply_opening_balance_is_idempotent_and_replaces_on_change() {
+    let ledger = new_ledger();
+    ledger
+        .set_account_source_ref("aquamentor", chart::CHECKING, "35")
+        .unwrap();
+    ledger
+        .set_account_source_ref("aquamentor", chart::ACCOUNTS_RECEIVABLE, "79")
+        .unwrap();
+
+    let as_of = NaiveDate::from_ymd_opt(2022, 12, 31).unwrap();
+    let rows = vec![
+        report::QboTbRow {
+            qbo_account_id: "35".to_string(),
+            name: "Checking".to_string(),
+            balance: Money::from_minor(1_000_000),
+        },
+        report::QboTbRow {
+            qbo_account_id: "79".to_string(),
+            name: "Accounts Receivable".to_string(),
+            balance: Money::from_minor(250_000),
+        },
+    ];
+
+    let first = apply_opening_balance(&ledger, "aquamentor", as_of, &rows, now()).unwrap();
+    assert!(!first.skipped_unchanged);
+    assert!(!first.replaced);
+    assert_eq!(
+        ledger
+            .document_version_count("aquamentor", &first.document_id)
+            .unwrap(),
+        1
+    );
+
+    // Re-run, identical rows: skipped, no new version, nothing reversed.
+    let second = apply_opening_balance(&ledger, "aquamentor", as_of, &rows, now()).unwrap();
+    assert!(second.skipped_unchanged);
+    assert!(!second.replaced);
+    assert_eq!(second.document_id, first.document_id);
+    assert_eq!(
+        ledger
+            .document_version_count("aquamentor", &second.document_id)
+            .unwrap(),
+        1,
+        "an unchanged re-run must not add a document_versions row"
+    );
+
+    // Re-run, one row changed: reversed and reposted as a new version.
+    let changed_rows = vec![
+        report::QboTbRow {
+            qbo_account_id: "35".to_string(),
+            name: "Checking".to_string(),
+            balance: Money::from_minor(1_100_000),
+        },
+        report::QboTbRow {
+            qbo_account_id: "79".to_string(),
+            name: "Accounts Receivable".to_string(),
+            balance: Money::from_minor(250_000),
+        },
+    ];
+    let third =
+        apply_opening_balance(&ledger, "aquamentor", as_of, &changed_rows, later_now()).unwrap();
+    assert!(third.replaced);
+    assert!(!third.skipped_unchanged);
+    assert_eq!(
+        ledger
+            .document_version_count("aquamentor", &third.document_id)
+            .unwrap(),
+        2
+    );
+
+    let trial_balance = tb(&ledger, as_of);
+    assert_eq!(
+        balance(&trial_balance, chart::CHECKING),
+        Money::from_minor(1_100_000)
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The boundary-year walk (§6)
+// ---------------------------------------------------------------------------
+
+/// Two years of activity on the same account, so a snapshot per year is
+/// enough to drive the walk: a $500.00 journal entry in 2024 and a $300.00
+/// one in 2025, each debiting Accounts Receivable and crediting an account
+/// mapped onto 3950 opening balance equity — a tier the §7 diff always skips
+/// (`LEDGER-DESIGN.md` §7 "expected to differ, not diffed"), so the fixture's
+/// AR side is the only thing the diff can possibly disagree on.
+fn two_year_replica() -> Store {
+    let store = Store::open_in_memory().unwrap();
+    store.register_realm(&realm(), "Aquamentor", now()).unwrap();
+
+    seed(
+        &store,
+        mirrored(
+            EntityType::Account,
+            "AR1",
+            json!({ "Id": "AR1", "Name": "Accounts Receivable", "AccountType": "Accounts Receivable", "Active": true }),
+        ),
+    );
+    seed(
+        &store,
+        mirrored(
+            EntityType::Account,
+            "OBE1",
+            json!({ "Id": "OBE1", "Name": "Opening Balance Equity", "AccountType": "Equity",
+                    "AccountSubType": "OpeningBalanceEquity", "Active": true }),
+        ),
+    );
+
+    seed(
+        &store,
+        mirrored(
+            EntityType::JournalEntry,
+            "JE-2024",
+            json!({
+                "Id": "JE-2024", "TxnDate": "2024-06-01", "TotalAmt": 500.00,
+                "Line": [
+                    { "Amount": 500.00, "DetailType": "JournalEntryLineDetail",
+                      "JournalEntryLineDetail": { "PostingType": "Debit", "AccountRef": { "value": "AR1" } } },
+                    { "Amount": 500.00, "DetailType": "JournalEntryLineDetail",
+                      "JournalEntryLineDetail": { "PostingType": "Credit", "AccountRef": { "value": "OBE1" } } }
+                ]
+            }),
+        ),
+    );
+    seed(
+        &store,
+        mirrored(
+            EntityType::JournalEntry,
+            "JE-2025",
+            json!({
+                "Id": "JE-2025", "TxnDate": "2025-06-01", "TotalAmt": 300.00,
+                "Line": [
+                    { "Amount": 300.00, "DetailType": "JournalEntryLineDetail",
+                      "JournalEntryLineDetail": { "PostingType": "Debit", "AccountRef": { "value": "AR1" } } },
+                    { "Amount": 300.00, "DetailType": "JournalEntryLineDetail",
+                      "JournalEntryLineDetail": { "PostingType": "Credit", "AccountRef": { "value": "OBE1" } } }
+                ]
+            }),
+        ),
+    );
+
+    store
+}
+
+#[test]
+fn boundary_walk_stops_at_the_first_disagreement_and_names_the_boundary_year() {
+    let replica = two_year_replica();
+    let real_ledger = new_ledger();
+    let tiers = TierRules::default();
+
+    // 2024 ("year 1"): QBO reports AR at $999.00 as of 31 Dec 2024 —
+    // deliberately wrong. Replaying 2024 alone (no prior-year opening
+    // balance is given) posts exactly $500.00 to AR, so 2024 disagrees.
+    let snap_2024 = vec![report::QboTbRow {
+        qbo_account_id: "AR1".to_string(),
+        name: "Accounts Receivable".to_string(),
+        balance: Money::from_minor(99_900),
+    }];
+    // 2025 ("year 2"): replaying 2025 on top of an opening balance taken
+    // from the (deliberately wrong) 2024 QBO figure gives AR = 999.00 +
+    // 300.00 = 1,299.00 — exactly what this snapshot reports, so 2025 agrees.
+    let snap_2025 = vec![report::QboTbRow {
+        qbo_account_id: "AR1".to_string(),
+        name: "Accounts Receivable".to_string(),
+        balance: Money::from_minor(129_900),
+    }];
+    let snapshots = vec![(2024, snap_2024.clone()), (2025, snap_2025)];
+
+    let walk_report = boundary_walk(
+        &real_ledger,
+        &replica,
+        &realm(),
+        "aquamentor",
+        &snapshots,
+        &tiers,
+        now(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        walk_report.years.len(),
+        2,
+        "the walk examines both years before stopping"
+    );
+    let year_2025 = walk_report
+        .years
+        .iter()
+        .find(|year| year.year == 2025)
+        .unwrap();
+    let year_2024 = walk_report
+        .years
+        .iter()
+        .find(|year| year.year == 2024)
+        .unwrap();
+    assert!(
+        year_2025.agrees,
+        "2025 should agree: {:?}",
+        year_2025.diff.must_failures
+    );
+    assert!(!year_2024.agrees, "2024 should disagree on AR");
+    assert!(
+        year_2024
+            .diff
+            .must_failures
+            .iter()
+            .any(|failure| failure.contains("Accounts receivable")),
+        "expected an AR must-failure for 2024, got {:?}",
+        year_2024.diff.must_failures
+    );
+    assert_eq!(walk_report.boundary_year, Some(2025));
+
+    // The walk never touched `real_ledger` (it only borrowed it): nothing
+    // has been created against "aquamentor" there yet.
+    assert_eq!(real_ledger.oplog_len("aquamentor").unwrap(), 0);
+
+    // Opening balance re-run is skipped: applying the year-1 snapshot as the
+    // real ledger's own opening balance twice only ever posts once.
+    real_ledger
+        .set_account_source_ref("aquamentor", chart::ACCOUNTS_RECEIVABLE, "AR1")
+        .unwrap();
+    let as_of = NaiveDate::from_ymd_opt(2024, 12, 31).unwrap();
+    let first =
+        apply_opening_balance(&real_ledger, "aquamentor", as_of, &snap_2024, now()).unwrap();
+    assert!(!first.skipped_unchanged);
+    let second =
+        apply_opening_balance(&real_ledger, "aquamentor", as_of, &snap_2024, now()).unwrap();
+    assert!(
+        second.skipped_unchanged,
+        "re-applying the same opening balance a second time must be a no-op"
+    );
+    assert_eq!(
+        real_ledger
+            .document_version_count("aquamentor", &second.document_id)
+            .unwrap(),
+        1,
+        "the re-run must not have saved a new document version"
+    );
 }

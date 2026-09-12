@@ -24,6 +24,9 @@ use ledger_core::Money;
 use qbo_local::domain::RealmId;
 use qbo_local::store::Store;
 
+const SNAPSHOT_PREFIX: &str = "tb-";
+const SNAPSHOT_SUFFIX: &str = ".csv";
+
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();
     let command = match parse(&args) {
@@ -103,6 +106,19 @@ enum Command {
         company: String,
         as_of: NaiveDate,
         qbo_csv: PathBuf,
+    },
+    Opening {
+        db: PathBuf,
+        company: String,
+        as_of: NaiveDate,
+        qbo_csv: PathBuf,
+    },
+    Boundary {
+        db: PathBuf,
+        company: String,
+        replica: PathBuf,
+        realm: RealmId,
+        snapshots: PathBuf,
     },
     Gl {
         db: PathBuf,
@@ -236,12 +252,16 @@ USAGE:
     ledger bank confirm --db PATH --company ID --line ID --account NUM [--class ID]
     ledger bank close   --db PATH --company ID --statement ID
     ledger bank status  --db PATH --company ID --statement ID
+    ledger opening --db PATH --company ID --as-of YYYY-MM-DD --qbo-csv PATH
+    ledger boundary --db PATH --company ID --replica PATH --realm ID
+                   --snapshots DIR
     ledger --help
 
 SUBCOMMANDS:
     init      Open (creating if absent) a ledger file and seed one company's
-              chart and classes (§2, §3). Not idempotent — an existing
-              company id errors.
+              chart and classes (§2, §3). Idempotent: re-running it for the
+              same company id updates the display name and realm and leaves
+              every already-seeded account and class alone.
     import    Import a qbo-local replica through post() into this ledger
               (§6), printing the pipeline report.
     tb        Print the trial balance as of a date (§7).
@@ -282,16 +302,22 @@ SUBCOMMANDS:
     bank close    The per-statement close (§10): opening plus matched lines
                   must equal closing, with nothing left unmatched.
     bank status   Print a statement's lines: matched, and open proposals.
+    opening   Apply (or idempotently skip/replace) the §6 opening balance
+              entry as of a date, from a QBO trial balance CSV of the same
+              shape tbdiff reads.
+    boundary  Walk the §6 boundary-year procedure against a directory of
+              QBO trial balance CSVs named tb-YYYY.csv, one per year, and
+              print the per-year agreement table and the boundary year.
 
 FLAGS:
     --db PATH            Path to the SQLite ledger file.
     --company ID         Company id (\"aquamentor\" or \"waterline\").
     --name \"Name\"         Company display name (init only).
-    --realm ID            QBO realm id (init: optional; import: required).
-    --replica PATH        Path to the qbo-local replica file (import only).
+    --realm ID            QBO realm id (init: optional; import/boundary: required).
+    --replica PATH        Path to the qbo-local replica file (import, boundary).
     --from YYYY-MM-DD     Start date (import: optional; pnl: required).
     --to YYYY-MM-DD       End date (import: optional; pnl: required).
-    --as-of YYYY-MM-DD    As-of date (tb, bs, tbdiff).
+    --as-of YYYY-MM-DD    As-of date (tb, bs, tbdiff, opening).
     --year YYYY           Calendar year (tax only).
     --quarter 1..4        Calendar quarter (tax only).
     --rate R              Sales tax rate as a decimal fraction, default
@@ -327,6 +353,9 @@ FLAGS:
     --line ID             Bank line id (bank confirm only).
     --class ID            Class to post the confirmed line under (bank
                           confirm only; optional).
+    --qbo-csv PATH        CSV of qbo_account_id,name,balance (tbdiff, opening).
+    --snapshots DIR       Directory of tb-YYYY.csv files, same CSV shape as
+                           --qbo-csv (boundary only).
 
 EXIT CODES:
     0   ok
@@ -457,6 +486,8 @@ fn parse(args: &[String]) -> Result<Command, UsageError> {
         "adjust" => parse_adjust(args),
         "reclass" => parse_reclass(args),
         "bank" => parse_bank(args),
+        "opening" => parse_opening(args),
+        "boundary" => parse_boundary(args),
         other => Err(UsageError::unknown_subcommand(other)),
     }
 }
@@ -1211,6 +1242,19 @@ fn execute(command: Command) -> Result<ExitCode, CommandError> {
             company,
             statement,
         } => run_bank_status(&db, &company, &statement).map(ok),
+        Command::Opening {
+            db,
+            company,
+            as_of,
+            qbo_csv,
+        } => run_opening(&db, &company, as_of, &qbo_csv).map(ok),
+        Command::Boundary {
+            db,
+            company,
+            replica,
+            realm,
+            snapshots,
+        } => run_boundary(&db, &company, &replica, &realm, &snapshots).map(ok),
     }
 }
 
@@ -1447,6 +1491,14 @@ fn render_tax(
     match lines.e_line_level_taxable {
         Some(e) => out.push_str(&format!("  E  taxable, line level: {}\n", fmt_money(e))),
         None => out.push_str("  E  taxable, line level: n/a\n"),
+    }
+    // Non-zero is expected when C is derived from a rounded B (D23), not
+    // necessarily an error — it is what Dan checks before filing.
+    if let Some(variance) = lines.variance {
+        out.push_str(&format!(
+            "     variance (E - C)  : {}\n",
+            fmt_money(variance)
+        ));
     }
     out.push_str("\nST-50 mapping:\n");
     for (line, amount) in lines.st50 {
@@ -1925,6 +1977,130 @@ fn fmt_money(amount: Money) -> String {
     format!("{sign}{}.{:02}", abs / 100, abs % 100)
 }
 
+fn parse_opening(mut args: Args<'_>) -> Result<Command, UsageError> {
+    let mut db = None;
+    let mut company = None;
+    let mut as_of = None;
+    let mut qbo_csv = None;
+    while let Some(flag) = args.next() {
+        match flag.as_str() {
+            "--db" => db = Some(PathBuf::from(next_value(&mut args, "--db")?)),
+            "--company" => company = Some(next_value(&mut args, "--company")?),
+            "--as-of" => as_of = Some(parse_date(&next_value(&mut args, "--as-of")?, "--as-of")?),
+            "--qbo-csv" => qbo_csv = Some(PathBuf::from(next_value(&mut args, "--qbo-csv")?)),
+            other => return Err(UsageError::unknown_flag(other)),
+        }
+    }
+    Ok(Command::Opening {
+        db: db.ok_or_else(|| UsageError::missing_flag("--db"))?,
+        company: company.ok_or_else(|| UsageError::missing_flag("--company"))?,
+        as_of: as_of.ok_or_else(|| UsageError::missing_flag("--as-of"))?,
+        qbo_csv: qbo_csv.ok_or_else(|| UsageError::missing_flag("--qbo-csv"))?,
+    })
+}
+
+fn parse_boundary(mut args: Args<'_>) -> Result<Command, UsageError> {
+    let mut db = None;
+    let mut company = None;
+    let mut replica = None;
+    let mut realm = None;
+    let mut snapshots = None;
+    while let Some(flag) = args.next() {
+        match flag.as_str() {
+            "--db" => db = Some(PathBuf::from(next_value(&mut args, "--db")?)),
+            "--company" => company = Some(next_value(&mut args, "--company")?),
+            "--replica" => replica = Some(PathBuf::from(next_value(&mut args, "--replica")?)),
+            "--realm" => realm = Some(parse_realm(&next_value(&mut args, "--realm")?)?),
+            "--snapshots" => snapshots = Some(PathBuf::from(next_value(&mut args, "--snapshots")?)),
+            other => return Err(UsageError::unknown_flag(other)),
+        }
+    }
+    Ok(Command::Boundary {
+        db: db.ok_or_else(|| UsageError::missing_flag("--db"))?,
+        company: company.ok_or_else(|| UsageError::missing_flag("--company"))?,
+        replica: replica.ok_or_else(|| UsageError::missing_flag("--replica"))?,
+        realm: realm.ok_or_else(|| UsageError::missing_flag("--realm"))?,
+        snapshots: snapshots.ok_or_else(|| UsageError::missing_flag("--snapshots"))?,
+    })
+}
+
+fn run_opening(
+    db: &std::path::Path,
+    company: &str,
+    as_of: NaiveDate,
+    qbo_csv: &std::path::Path,
+) -> Result<(), CommandError> {
+    let ledger = Ledger::open(db).map_err(runtime)?;
+    let rows = read_qbo_csv(qbo_csv).map_err(runtime)?;
+    let report = pipeline::apply_opening_balance(&ledger, company, as_of, &rows, Utc::now())
+        .map_err(runtime)?;
+    let verdict = if report.skipped_unchanged {
+        "skipped (unchanged)"
+    } else if report.replaced {
+        "replaced"
+    } else {
+        "posted"
+    };
+    println!(
+        "opening balance {} for {company} as of {as_of}: {verdict}",
+        report.document_id
+    );
+    Ok(())
+}
+
+fn run_boundary(
+    db: &std::path::Path,
+    company: &str,
+    replica: &std::path::Path,
+    realm: &RealmId,
+    snapshots_dir: &std::path::Path,
+) -> Result<(), CommandError> {
+    let ledger = Ledger::open(db).map_err(runtime)?;
+    let store = Store::open(replica).map_err(runtime)?;
+    let snapshots = read_snapshots_dir(snapshots_dir).map_err(runtime)?;
+    let report = pipeline::boundary_walk(
+        &ledger,
+        &store,
+        realm,
+        company,
+        &snapshots,
+        &TierRules::default(),
+        Utc::now(),
+    )
+    .map_err(runtime)?;
+    print!("{}", report.render_text(company));
+    Ok(())
+}
+
+/// Every `tb-YYYY.csv` file directly inside `dir`, each read with
+/// [`read_qbo_csv`] — the same CSV shape `tbdiff` and `opening` use — and
+/// paired with the year its filename names. Any other file in the directory
+/// is ignored rather than rejected, so a stray `README` or a `.DS_Store`
+/// does not block the walk.
+fn read_snapshots_dir(dir: &std::path::Path) -> Result<Vec<(i32, Vec<QboTbRow>)>, String> {
+    let mut out = Vec::new();
+    let entries = fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("{}: {e}", dir.display()))?;
+        let path = entry.path();
+        let Some(file_name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        let Some(year_str) = file_name
+            .strip_prefix(SNAPSHOT_PREFIX)
+            .and_then(|s| s.strip_suffix(SNAPSHOT_SUFFIX))
+        else {
+            continue;
+        };
+        let year: i32 = year_str
+            .parse()
+            .map_err(|_| format!("{}: not tb-YYYY.csv", path.display()))?;
+        out.push((year, read_qbo_csv(&path)?));
+    }
+    out.sort_by_key(|(year, _)| *year);
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2264,6 +2440,73 @@ mod tests {
                 qbo_csv: PathBuf::from("qbo.csv"),
             }
         );
+    }
+
+    #[test]
+    fn opening_parses() {
+        let command = parse(&args(&[
+            "opening",
+            "--db",
+            "l.sqlite",
+            "--company",
+            "aquamentor",
+            "--as-of",
+            "2023-12-31",
+            "--qbo-csv",
+            "tb-2023.csv",
+        ]))
+        .unwrap();
+        assert_eq!(
+            command,
+            Command::Opening {
+                db: PathBuf::from("l.sqlite"),
+                company: "aquamentor".to_string(),
+                as_of: NaiveDate::from_ymd_opt(2023, 12, 31).unwrap(),
+                qbo_csv: PathBuf::from("tb-2023.csv"),
+            }
+        );
+    }
+
+    #[test]
+    fn boundary_parses_and_requires_realm() {
+        let command = parse(&args(&[
+            "boundary",
+            "--db",
+            "l.sqlite",
+            "--company",
+            "aquamentor",
+            "--replica",
+            "r.sqlite",
+            "--realm",
+            "1234567890123456",
+            "--snapshots",
+            "snaps",
+        ]))
+        .unwrap();
+        assert_eq!(
+            command,
+            Command::Boundary {
+                db: PathBuf::from("l.sqlite"),
+                company: "aquamentor".to_string(),
+                replica: PathBuf::from("r.sqlite"),
+                realm: RealmId::parse("1234567890123456").unwrap(),
+                snapshots: PathBuf::from("snaps"),
+            }
+        );
+
+        let err = parse(&args(&[
+            "boundary",
+            "--db",
+            "l.sqlite",
+            "--company",
+            "aquamentor",
+            "--replica",
+            "r.sqlite",
+            "--snapshots",
+            "snaps",
+        ]))
+        .unwrap_err();
+        assert!(err.reason.unwrap().contains("--realm"));
     }
 
     #[test]

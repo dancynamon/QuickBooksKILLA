@@ -375,7 +375,43 @@ Two judgement calls made in build, both Dan's to override:
   second QBO account landing on the same number is reported for mapping rather
   than silently taking or losing the slot.
 
-Known gaps, carried in `ROADMAP.md` §0: opening balances and the boundary-year
-walk are implemented but not wired into the pipeline; `ledger init` is not
-idempotent; non-posting documents are re-saved on every run; §9 line E needs
-per-line taxability on `journal_lines`, which the schema does not carry yet.
+Known gaps, carried in `ROADMAP.md` §0, closed in the same build session that
+follows this one (D23):
+
+- ~~opening balances and the boundary-year walk are implemented but not wired
+  into the pipeline~~ — closed: `pipeline::apply_opening_balance` and
+  `pipeline::boundary_walk`, plus `ledger opening` and `ledger boundary`.
+- ~~`ledger init` is not idempotent~~ — closed: `create_company` upserts the
+  company row and seeds accounts/classes with `ON CONFLICT DO NOTHING`.
+- ~~non-posting documents are re-saved on every run~~ — closed: an unchanged
+  Estimate or PurchaseOrder is now skipped the same way a posting document is.
+- ~~§9 line E needs per-line taxability on `journal_lines`, which the schema
+  does not carry yet~~ — closed: migration 2 (D23).
+
+## D23 — §9 line E exists; a non-zero variance is not by itself a problem
+
+12 Sep 2026, in build.
+
+`journal_lines` gained `is_taxable`, `tax_amount_minor` and `tax_rate`
+(migration 2). `crate::post` sets them on the 4100/4300 income leg an
+Item or Shipping line produces, from the document line's own `is_taxable`
+and, when the document carries tax, that line's share of it
+(`amount × rate`, `RoundingPolicy::TaxCalculation`). `report::sales_tax_lines`
+sums the taxable lines' credits for the quarter as E, and reports `E - C`.
+
+The variance is the point, not a defect to chase to zero. E comes from what
+was actually marked taxable on each line; C comes from B (the 2200 balance)
+divided by the rate, and B itself is already a rounded figure — every tax
+amount posted was rounded per line (banker's rounding, §9), so summing them
+back and dividing by the rate does not, in general, reproduce the exact
+pre-tax subtotal to the cent. A cent or two of variance most quarters is
+therefore expected and uninteresting; what §9 asks Dan to look at is a
+variance that is *large* relative to volume — the sign of a taxable line
+invoiced with no tax, an exempt customer charged tax, or a tax adjustment
+posted straight to 2200 rather than through a document line.
+
+*Rejected: rounding C the same way B was rounded so the two always match to
+the cent.* That would make line E's whole reason for existing — catching a
+line that disagrees with the tax account — invisible exactly when rounding
+is the only thing separating them, which is the common case, not the rare
+one.

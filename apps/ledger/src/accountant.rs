@@ -671,6 +671,9 @@ pub fn propose_reclassify(
         credit: original.debit,
         memo: Some(format!("reclassify: reverse {entry_id} line {line_no}")),
         entity: original.entity.clone(),
+        is_taxable: original.is_taxable,
+        tax_amount: original.tax_amount,
+        tax_rate: original.tax_rate,
     };
     let repost = JournalLine {
         line_no: 2,
@@ -683,6 +686,9 @@ pub fn propose_reclassify(
             new_account.0
         )),
         entity: original.entity.clone(),
+        is_taxable: original.is_taxable,
+        tax_amount: original.tax_amount,
+        tax_rate: original.tax_rate,
     };
 
     let description = format!(
