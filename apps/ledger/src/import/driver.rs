@@ -152,7 +152,10 @@ pub fn run(
     Ok(report)
 }
 
-fn parsed_accounts(store: &Store, realm: &RealmId) -> Result<Vec<ParsedAccount>, ImportError> {
+pub(crate) fn parsed_accounts(
+    store: &Store,
+    realm: &RealmId,
+) -> Result<Vec<ParsedAccount>, ImportError> {
     let mut out = Vec::new();
     for entry in store.entity_index(realm, EntityType::Account)? {
         let Some(entity) = store.get_entity(realm, EntityType::Account, &entry.qbo_id)? else {
@@ -167,7 +170,10 @@ fn parsed_accounts(store: &Store, realm: &RealmId) -> Result<Vec<ParsedAccount>,
     Ok(out)
 }
 
-fn parsed_classes(store: &Store, realm: &RealmId) -> Result<Vec<ParsedClass>, ImportError> {
+pub(crate) fn parsed_classes(
+    store: &Store,
+    realm: &RealmId,
+) -> Result<Vec<ParsedClass>, ImportError> {
     let mut out = Vec::new();
     for entry in store.entity_index(realm, EntityType::Class)? {
         let Some(entity) = store.get_entity(realm, EntityType::Class, &entry.qbo_id)? else {
@@ -182,7 +188,7 @@ fn parsed_classes(store: &Store, realm: &RealmId) -> Result<Vec<ParsedClass>, Im
     Ok(out)
 }
 
-fn build_item_contexts(
+pub(crate) fn build_item_contexts(
     store: &Store,
     realm: &RealmId,
     classes: &ClassMapping,
@@ -214,7 +220,10 @@ fn build_item_contexts(
 
 /// §6: `Customer.Taxable == false` or a `ResaleNum` on file — a customer
 /// exempt from tax, for the report layer that is out of scope here.
-fn build_exempt_customers(store: &Store, realm: &RealmId) -> Result<HashSet<String>, ImportError> {
+pub(crate) fn build_exempt_customers(
+    store: &Store,
+    realm: &RealmId,
+) -> Result<HashSet<String>, ImportError> {
     let mut exempt = HashSet::new();
     for entry in store.entity_index(realm, EntityType::Customer)? {
         let Some(entity) = store.get_entity(realm, EntityType::Customer, &entry.qbo_id)? else {

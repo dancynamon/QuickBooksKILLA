@@ -13,10 +13,13 @@
 //! - [`post`]   — §1: the posting-rules table as code
 //! - [`store`]  — §4, §5: schema, invariants, period close, oplog
 //! - [`report`] — §7, §9: trial balance, P&L, balance sheet, the tax lines
-//! - [`import`] — §6: replica to documents, chart mapping, opening balances
+//! - [`import`]   — §6: replica to documents, chart mapping, opening balances
+//! - [`pipeline`] — §6: the importer wired to [`post`] and [`store`] —
+//!   replica in, posted entries out
 
 pub mod chart;
 pub mod import;
+pub mod pipeline;
 pub mod post;
 pub mod report;
 pub mod store;

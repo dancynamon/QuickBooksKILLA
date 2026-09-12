@@ -26,7 +26,23 @@ mod translate;
 pub use accounts::{map_accounts, AccountMapping, MappedAccount};
 pub use classes::{map_classes, ClassMapping, MappedClass};
 pub use driver::{run, ImportError, ImportOptions, ImportReport};
-pub use opening::{boundary_year, opening_balance_entry, QboTbRow, TbAgreement};
+pub use opening::{boundary_year, opening_balance_entry, TbAgreement};
 pub use translate::{
     translate, ClassSource, ItemContext, TranslateContext, TranslateError, Translated,
+};
+
+/// `opening_balance_entry` and the §7 nightly diff (`crate::report`) both once
+/// needed a signed, debit-positive QBO trial balance row keyed by account id;
+/// `crate::report::QboTbRow` is the one surviving definition (D-note, this
+/// commit: the two tracks that each grew one in parallel are unified here).
+pub use crate::report::QboTbRow;
+
+/// Read the replica's chart and class masters and materialise the ledger's
+/// [`AccountMapping`] and [`ClassMapping`] against them, without walking any
+/// documents. [`crate::pipeline::import_replica`] uses this to seed the
+/// ledger's chart before posting a single entry; nothing else in this crate
+/// needs the raw masters, so the fetch itself stays `pub(crate)` on
+/// [`driver`].
+pub(crate) use driver::{
+    build_exempt_customers, build_item_contexts, parsed_accounts, parsed_classes,
 };

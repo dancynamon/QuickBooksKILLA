@@ -13,17 +13,10 @@ use super::accounts::AccountMapping;
 use super::driver::ImportError;
 
 /// One row of a QBO `TrialBalance` report as of a given date — signed,
-/// debit-positive.
-///
-/// `crate::report` is being built in parallel and will define its own
-/// `QboTbRow` for the same purpose (the nightly §7 diff, rather than the §6
-/// opening entry); a later commit unifies the two rather than one importing
-/// from the other while both are still in flight.
-#[derive(Clone, Debug, PartialEq)]
-pub struct QboTbRow {
-    pub qbo_account_id: String,
-    pub balance: Money,
-}
+/// debit-positive. `crate::report::QboTbRow` is the one definition (the §7
+/// nightly diff and this §6 opening entry both need the same shape); this
+/// module re-exports it as `super::QboTbRow` rather than keeping its own.
+pub use crate::report::QboTbRow;
 
 /// Whether a replayed year's trial balance agreed with QBO's own, on the §7
 /// tolerance rules — the boundary walk only needs the verdict, not the diff
@@ -225,14 +218,17 @@ mod tests {
         let rows = vec![
             QboTbRow {
                 qbo_account_id: "35".into(),
+                name: "Checking".into(),
                 balance: Money::from_minor(1_000_000),
             },
             QboTbRow {
                 qbo_account_id: "79".into(),
+                name: "Accounts Receivable".into(),
                 balance: Money::from_minor(250_000),
             },
             QboTbRow {
                 qbo_account_id: "33".into(),
+                name: "Accounts Payable".into(),
                 balance: Money::from_minor(-400_000),
             },
         ];
@@ -262,6 +258,7 @@ mod tests {
     fn zero_balance_rows_are_skipped() {
         let rows = vec![QboTbRow {
             qbo_account_id: "35".into(),
+            name: "Checking".into(),
             balance: Money::ZERO,
         }];
         let company = CompanyId("aquamentor".into());
@@ -276,6 +273,7 @@ mod tests {
     fn an_unmapped_qbo_account_is_an_error_not_a_silent_skip() {
         let rows = vec![QboTbRow {
             qbo_account_id: "999".into(),
+            name: "Unmapped".into(),
             balance: Money::from_minor(100),
         }];
         let company = CompanyId("aquamentor".into());

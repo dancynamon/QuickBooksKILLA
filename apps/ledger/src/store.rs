@@ -764,6 +764,28 @@ impl Ledger {
         })
     }
 
+    /// The `payload_json` of the newest saved version of `document_id`, or
+    /// `None` when the document has never been saved. `crate::pipeline`'s
+    /// re-run check (`LEDGER-DESIGN.md` §6: "re-run replaces derived entries")
+    /// compares this against the freshly translated document to decide
+    /// whether anything actually changed before reversing and reposting.
+    pub fn latest_document_payload(
+        &self,
+        company: &str,
+        document_id: &str,
+    ) -> Result<Option<String>, LedgerError> {
+        self.connection
+            .query_row(
+                "SELECT payload_json FROM document_versions
+                 WHERE company_id = ?1 AND document_id = ?2
+                 ORDER BY version DESC LIMIT 1",
+                params![company, document_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(LedgerError::from)
+    }
+
     pub fn oplog_len(&self, company: &str) -> Result<i64, LedgerError> {
         Ok(self.connection.query_row(
             "SELECT COUNT(*) FROM oplog WHERE company_id = ?1",
