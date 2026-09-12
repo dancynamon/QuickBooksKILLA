@@ -839,6 +839,23 @@ For one entity and one calendar quarter:
 | **D** | Non-taxable sales | `D = A - C`. |
 | **E** | Check: taxable sales from the lines | Sum of line amounts where `is_taxable` is set, over the same quarter, from the document lines rather than from the tax account. Shown next to C with the variance `E - C` in dollars and as a percentage of C. |
 
+### The filing mapping
+
+Dan's worksheet carries the four lines straight onto the New Jersey ST-50
+lines, and the report prints that mapping as a second column so the filing is
+a copy, not a translation:
+
+| ST-50 line | Value | From |
+|---|---|---|
+| Line 1, gross receipts | A | total income |
+| Line 2, receipts not subject to tax | D | `A - C` |
+| Line 3, receipts subject to tax | C | `B / rate` |
+| Lines 4 to 9 | 0.00 | printed as zero; Dan has never had an entry on them (11 Sep 2026) |
+
+The report is frozen per quarter at close (§5 item 5) with the A, B, C, D, E
+values and the rate used, so a later reprint shows what was filed rather than
+what the ledger says now.
+
 The rate is a configuration value, `sales_tax.nj_rate = 0.06625`, per entity,
 effective dated so a historical quarter reprints at the rate in force then. It
 is not a tax engine and there is no per-agency breakdown: one agency, New
