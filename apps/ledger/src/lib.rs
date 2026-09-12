@@ -16,7 +16,10 @@
 //! - [`import`]   — §6: replica to documents, chart mapping, opening balances
 //! - [`pipeline`] — §6: the importer wired to [`post`] and [`store`] —
 //!   replica in, posted entries out
+//! - [`accountant`] — §8: the accountant's read-only role, GL detail and
+//!   exports, and the adjusting-entry request queue
 
+pub mod accountant;
 pub mod chart;
 pub mod import;
 pub mod pipeline;

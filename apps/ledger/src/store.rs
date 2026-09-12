@@ -9,6 +9,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use chrono::{DateTime, NaiveDate, Utc};
+use ledger_core::Money;
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use thiserror::Error;
 use uuid::Uuid;
@@ -47,6 +48,8 @@ pub enum LedgerError {
     SchemaTooNew { found: i64, supported: i64 },
     #[error("stored date {0:?} is not a valid date")]
     BadDate(String),
+    #[error("stored timestamp {0:?} is not a valid RFC 3339 timestamp")]
+    BadTimestamp(String),
 }
 
 /// A forward-only, numbered migration. Applied in a transaction, version
@@ -57,10 +60,11 @@ pub struct Migration {
     pub sql: &'static str,
 }
 
-pub const MIGRATIONS: &[Migration] = &[Migration {
-    version: 1,
-    name: "initial ledger schema",
-    sql: r#"
+pub const MIGRATIONS: &[Migration] = &[
+    Migration {
+        version: 1,
+        name: "initial ledger schema",
+        sql: r#"
 CREATE TABLE companies (
     company_id        TEXT PRIMARY KEY,
     display_name      TEXT NOT NULL,
@@ -263,7 +267,28 @@ BEGIN
     SELECT RAISE(ABORT, 'posted journal line cannot be deleted');
 END;
 "#,
-}];
+    },
+    Migration {
+        version: 2,
+        name: "accountant mode: adjusting-entry request queue (§8)",
+        sql: r#"
+CREATE TABLE adjustment_requests (
+    company_id      TEXT NOT NULL,
+    request_id      TEXT NOT NULL,
+    requested_by    TEXT NOT NULL,
+    requested_at    TEXT NOT NULL,
+    description     TEXT NOT NULL,
+    lines_json      TEXT NOT NULL,
+    state           TEXT NOT NULL CHECK (state IN ('proposed','approved','rejected','posted')),
+    decided_by      TEXT,
+    decided_at      TEXT,
+    decision_note   TEXT,
+    posted_entry_id TEXT,
+    PRIMARY KEY (company_id, request_id)
+) STRICT;
+"#,
+    },
+];
 
 pub fn latest_version() -> i64 {
     MIGRATIONS.iter().map(|m| m.version).max().unwrap_or(0)
@@ -311,6 +336,110 @@ pub struct DocumentVersionId {
 }
 
 pub type EntryId = String;
+
+// ---------------------------------------------------------------------------
+// Accountant mode (§8): the adjustment-request queue, and read helpers for
+// the general ledger detail and audit trail. `crate::accountant` owns the
+// business rules (balance and class-rule validation, the propose/decide state
+// machine); this module owns only the table and the raw reads/writes, same
+// discipline as every other table above.
+// ---------------------------------------------------------------------------
+
+/// `adjustment_requests.state`. `Approved` is in the `CHECK` constraint for a
+/// future two-step approve-then-post split; today [`crate::accountant`]'s
+/// approve path goes straight through to `Posted`, since approving an
+/// accountant's request *is* posting it (§8).
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub enum AdjustmentState {
+    Proposed,
+    Approved,
+    Rejected,
+    Posted,
+}
+
+impl AdjustmentState {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            AdjustmentState::Proposed => "proposed",
+            AdjustmentState::Approved => "approved",
+            AdjustmentState::Rejected => "rejected",
+            AdjustmentState::Posted => "posted",
+        }
+    }
+
+    pub fn parse(raw: &str) -> Option<AdjustmentState> {
+        match raw {
+            "proposed" => Some(AdjustmentState::Proposed),
+            "approved" => Some(AdjustmentState::Approved),
+            "rejected" => Some(AdjustmentState::Rejected),
+            "posted" => Some(AdjustmentState::Posted),
+            _ => None,
+        }
+    }
+}
+
+/// One row of `adjustment_requests`, exactly as stored. `lines_json` is the
+/// caller's problem to deserialise (it is a `Vec<crate::types::JournalLine>`
+/// in practice, but this module does not depend on that shape).
+#[derive(Clone, Debug, PartialEq)]
+pub struct AdjustmentRequestRow {
+    pub request_id: String,
+    pub requested_by: String,
+    pub requested_at: DateTime<Utc>,
+    pub description: String,
+    pub lines_json: String,
+    pub state: AdjustmentState,
+    pub decided_by: Option<String>,
+    pub decided_at: Option<DateTime<Utc>>,
+    pub decision_note: Option<String>,
+    pub posted_entry_id: Option<String>,
+}
+
+/// One row of `close_history`, for the accountant's read-only close-history
+/// view (§8 "Close history log").
+#[derive(Clone, Debug, PartialEq)]
+pub struct CloseHistoryRow {
+    pub seq: i64,
+    pub at: DateTime<Utc>,
+    pub actor: String,
+    pub moved_from: String,
+    pub moved_to: String,
+    pub is_reopen: bool,
+    pub note: String,
+}
+
+/// A posted entry together with who posted it and when, read off the oplog
+/// row that produced its source document (§8 "Audit trail").
+#[derive(Clone, Debug, PartialEq)]
+pub struct PostedEntryWithActor {
+    pub entry_id: EntryId,
+    pub entry: JournalEntry,
+    pub actor_id: String,
+    pub command_kind: String,
+    pub command_at: DateTime<Utc>,
+}
+
+/// One posted `journal_lines` row joined to its account and entry, for the
+/// GL detail report (§8 "GL detail"). Ordered by [`Ledger::gl_lines`] so that
+/// a caller can compute a running balance per account in one pass.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GlLineRow {
+    pub account_id: AccountId,
+    pub number: String,
+    pub name: String,
+    pub entry_id: EntryId,
+    pub entry_date: NaiveDate,
+    pub source_type: DocKind,
+    pub source_id: String,
+    pub line_memo: Option<String>,
+    pub entry_memo: Option<String>,
+    pub class_id: Option<ClassId>,
+    pub entity: Option<ContactRef>,
+    pub is_flagged: bool,
+    pub reversal_of: Option<String>,
+    pub debit: Money,
+    pub credit: Money,
+}
 
 /// The ledger. Owns the connection; nothing outside this module can reach it.
 pub struct Ledger {
@@ -1000,6 +1129,248 @@ impl Ledger {
             })
             .collect()
     }
+
+    // -----------------------------------------------------------------------
+    // Accountant mode (§8): adjustment requests, close history, GL and audit
+    // reads. Business rules live in `crate::accountant`; these are plain CRUD
+    // and joins, same as the rest of this module.
+    // -----------------------------------------------------------------------
+
+    /// Inserts a new request in state `'proposed'`. `request_id` is generated
+    /// by the caller (a UUIDv7, matching every other id in this file).
+    pub fn insert_adjustment_request(
+        &self,
+        company: &str,
+        request_id: &str,
+        requested_by: &str,
+        requested_at: DateTime<Utc>,
+        description: &str,
+        lines_json: &str,
+    ) -> Result<(), LedgerError> {
+        self.connection.execute(
+            "INSERT INTO adjustment_requests
+                 (company_id, request_id, requested_by, requested_at, description,
+                  lines_json, state, decided_by, decided_at, decision_note, posted_entry_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'proposed', NULL, NULL, NULL, NULL)",
+            params![
+                company,
+                request_id,
+                requested_by,
+                requested_at.to_rfc3339(),
+                description,
+                lines_json,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn adjustment_request(
+        &self,
+        company: &str,
+        request_id: &str,
+    ) -> Result<Option<AdjustmentRequestRow>, LedgerError> {
+        self.connection
+            .query_row(
+                &format!(
+                    "{ADJUSTMENT_COLUMNS} FROM adjustment_requests \
+                     WHERE company_id = ?1 AND request_id = ?2"
+                ),
+                params![company, request_id],
+                row_to_adjustment_request,
+            )
+            .optional()
+            .map_err(LedgerError::from)
+    }
+
+    pub fn list_adjustment_requests(
+        &self,
+        company: &str,
+        state: Option<AdjustmentState>,
+    ) -> Result<Vec<AdjustmentRequestRow>, LedgerError> {
+        match state {
+            Some(state) => {
+                let mut stmt = self.connection.prepare(&format!(
+                    "{ADJUSTMENT_COLUMNS} FROM adjustment_requests \
+                     WHERE company_id = ?1 AND state = ?2 ORDER BY requested_at, request_id"
+                ))?;
+                let rows = stmt
+                    .query_map(params![company, state.as_str()], row_to_adjustment_request)?
+                    .collect::<Result<Vec<_>, rusqlite::Error>>()?;
+                Ok(rows)
+            }
+            None => {
+                let mut stmt = self.connection.prepare(&format!(
+                    "{ADJUSTMENT_COLUMNS} FROM adjustment_requests \
+                     WHERE company_id = ?1 ORDER BY requested_at, request_id"
+                ))?;
+                let rows = stmt
+                    .query_map(params![company], row_to_adjustment_request)?
+                    .collect::<Result<Vec<_>, rusqlite::Error>>()?;
+                Ok(rows)
+            }
+        }
+    }
+
+    /// Records a decision. Plain CRUD: it does not check that the request was
+    /// still `'proposed'` — the caller (`crate::accountant::decide_adjustment`)
+    /// reads the row first and refuses a second decision itself, so that
+    /// "already decided" is one clear error rather than a silent overwrite.
+    #[allow(clippy::too_many_arguments)]
+    pub fn decide_adjustment_request(
+        &self,
+        company: &str,
+        request_id: &str,
+        decided_by: &str,
+        decided_at: DateTime<Utc>,
+        note: &str,
+        new_state: AdjustmentState,
+        posted_entry_id: Option<&str>,
+    ) -> Result<(), LedgerError> {
+        self.connection.execute(
+            "UPDATE adjustment_requests
+             SET state = ?3, decided_by = ?4, decided_at = ?5, decision_note = ?6, posted_entry_id = ?7
+             WHERE company_id = ?1 AND request_id = ?2",
+            params![
+                company,
+                request_id,
+                new_state.as_str(),
+                decided_by,
+                decided_at.to_rfc3339(),
+                note,
+                posted_entry_id,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// The full close history, oldest first, reopens flagged (§5, §8 "Close
+    /// history log": readable but not writable through this method).
+    pub fn close_history(&self, company: &str) -> Result<Vec<CloseHistoryRow>, LedgerError> {
+        let mut stmt = self.connection.prepare(
+            "SELECT seq, at, actor, moved_from, moved_to, is_reopen, note
+             FROM close_history WHERE company_id = ?1 ORDER BY seq",
+        )?;
+        let raw = stmt
+            .query_map(params![company], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, i64>(5)?,
+                    row.get::<_, String>(6)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, rusqlite::Error>>()?;
+
+        raw.into_iter()
+            .map(|(seq, at, actor, moved_from, moved_to, is_reopen, note)| {
+                Ok(CloseHistoryRow {
+                    seq,
+                    at: parse_datetime(&at)?,
+                    actor,
+                    moved_from,
+                    moved_to,
+                    is_reopen: is_reopen != 0,
+                    note,
+                })
+            })
+            .collect()
+    }
+
+    /// Every posted entry dated after `since`, each with the actor and
+    /// command that produced its source document, flagged entries first
+    /// (§8 "Audit trail"). `since` is normally the last close's period end;
+    /// [`crate::accountant::audit_trail`] works out the default.
+    pub fn posted_entries_since(
+        &self,
+        company: &str,
+        since: NaiveDate,
+    ) -> Result<Vec<PostedEntryWithActor>, LedgerError> {
+        let mut stmt = self.connection.prepare(
+            "SELECT e.entry_id, o.actor_id, o.kind, o.applied_at
+             FROM journal_entries e
+             JOIN document_versions dv
+                 ON dv.company_id = e.company_id
+                AND dv.document_id = e.source_id
+                AND dv.version = e.source_version
+             JOIN oplog o ON o.company_id = dv.company_id AND o.command_id = dv.command_id
+             WHERE e.company_id = ?1 AND e.is_posted = 1 AND e.entry_date > ?2
+             ORDER BY e.is_flagged DESC, e.entry_date, e.entry_id",
+        )?;
+        let headers = stmt
+            .query_map(params![company, since.to_string()], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, rusqlite::Error>>()?;
+
+        headers
+            .into_iter()
+            .map(|(entry_id, actor_id, command_kind, applied_at)| {
+                let (entry, _is_posted) = self.entry(company, &entry_id)?;
+                Ok(PostedEntryWithActor {
+                    entry_id,
+                    entry,
+                    actor_id,
+                    command_kind,
+                    command_at: parse_datetime(&applied_at)?,
+                })
+            })
+            .collect()
+    }
+
+    /// Every posted `journal_lines` row with `entry_date <= to`, ordered by
+    /// account number then date then entry then line — everything
+    /// [`crate::accountant::general_ledger`] needs to compute an opening
+    /// balance (lines before its `from`) and a running balance per account
+    /// in one pass, with no second query.
+    pub fn gl_lines(
+        &self,
+        company: &str,
+        to: NaiveDate,
+        account: Option<&AccountId>,
+    ) -> Result<Vec<GlLineRow>, LedgerError> {
+        const COLUMNS: &str = "a.account_id, a.number, a.name, e.entry_id, e.entry_date, \
+            e.source_type, e.source_id, l.memo, e.memo, l.class_id, l.entity_type, \
+            l.entity_id, e.is_flagged, e.reversal_of_id, l.debit_minor, l.credit_minor";
+        const JOIN: &str = "FROM journal_lines l \
+            JOIN journal_entries e ON e.company_id = l.company_id AND e.entry_id = l.entry_id \
+            JOIN accounts a ON a.company_id = l.company_id AND a.account_id = l.account_id";
+        const ORDER: &str = " ORDER BY a.number, e.entry_date, e.entry_id, l.line_no";
+
+        let rows = if let Some(account_id) = account {
+            let sql = format!(
+                "SELECT {COLUMNS} {JOIN} \
+                 WHERE l.company_id = ?1 AND e.is_posted = 1 AND e.entry_date <= ?2 \
+                   AND a.account_id = ?3{ORDER}"
+            );
+            let mut stmt = self.connection.prepare(&sql)?;
+            let rows = stmt
+                .query_map(
+                    params![company, to.to_string(), account_id.0],
+                    row_to_gl_line,
+                )?
+                .collect::<Result<Vec<_>, rusqlite::Error>>()?;
+            rows
+        } else {
+            let sql = format!(
+                "SELECT {COLUMNS} {JOIN} \
+                 WHERE l.company_id = ?1 AND e.is_posted = 1 AND e.entry_date <= ?2{ORDER}"
+            );
+            let mut stmt = self.connection.prepare(&sql)?;
+            let rows = stmt
+                .query_map(params![company, to.to_string()], row_to_gl_line)?
+                .collect::<Result<Vec<_>, rusqlite::Error>>()?;
+            rows
+        };
+        Ok(rows)
+    }
 }
 
 /// `entry_date, memo, source_type, source_id, source_version, reversal_of_id,
@@ -1019,6 +1390,8 @@ type EntryHeaderRow = (
 const ACCOUNT_COLUMNS: &str = "SELECT account_id, number, name, classification, subtype, \
      parent_id, normal_balance, is_contra, is_active, needs_mapping, source_ref";
 const CLASS_COLUMNS: &str = "SELECT class_id, name, parent_id, is_active, source_ref";
+const ADJUSTMENT_COLUMNS: &str = "SELECT request_id, requested_by, requested_at, description, \
+     lines_json, state, decided_by, decided_at, decision_note, posted_entry_id";
 
 fn row_to_account(row: &Row<'_>) -> rusqlite::Result<Account> {
     let classification_raw: String = row.get(3)?;
@@ -1102,6 +1475,84 @@ fn parse_contact_kind(raw: &str, col: usize) -> rusqlite::Result<ContactKind> {
 fn parse_date(raw: &str) -> Result<NaiveDate, LedgerError> {
     raw.parse::<NaiveDate>()
         .map_err(|_| LedgerError::BadDate(raw.to_string()))
+}
+
+fn parse_datetime(raw: &str) -> Result<DateTime<Utc>, LedgerError> {
+    DateTime::parse_from_rfc3339(raw)
+        .map(|dt| dt.with_timezone(&Utc))
+        .map_err(|_| LedgerError::BadTimestamp(raw.to_string()))
+}
+
+/// Same as [`parse_date`], but for use inside a `rusqlite` row mapper, whose
+/// closure must return `rusqlite::Result`.
+fn parse_date_col(raw: &str, col: usize) -> rusqlite::Result<NaiveDate> {
+    parse_date(raw).map_err(|_| {
+        rusqlite::Error::InvalidColumnType(col, "date".into(), rusqlite::types::Type::Text)
+    })
+}
+
+/// Same as [`parse_datetime`], but for use inside a `rusqlite` row mapper.
+fn parse_datetime_col(raw: &str, col: usize) -> rusqlite::Result<DateTime<Utc>> {
+    parse_datetime(raw).map_err(|_| {
+        rusqlite::Error::InvalidColumnType(col, "timestamp".into(), rusqlite::types::Type::Text)
+    })
+}
+
+fn row_to_adjustment_request(row: &Row<'_>) -> rusqlite::Result<AdjustmentRequestRow> {
+    let state_raw: String = row.get(5)?;
+    let state = AdjustmentState::parse(&state_raw).ok_or_else(|| {
+        rusqlite::Error::InvalidColumnType(5, "state".into(), rusqlite::types::Type::Text)
+    })?;
+    let requested_at: String = row.get(2)?;
+    let decided_at: Option<String> = row.get(7)?;
+
+    Ok(AdjustmentRequestRow {
+        request_id: row.get(0)?,
+        requested_by: row.get(1)?,
+        requested_at: parse_datetime_col(&requested_at, 2)?,
+        description: row.get(3)?,
+        lines_json: row.get(4)?,
+        state,
+        decided_by: row.get(6)?,
+        decided_at: decided_at.map(|s| parse_datetime_col(&s, 7)).transpose()?,
+        decision_note: row.get(8)?,
+        posted_entry_id: row.get(9)?,
+    })
+}
+
+fn row_to_gl_line(row: &Row<'_>) -> rusqlite::Result<GlLineRow> {
+    let source_type_raw: String = row.get(5)?;
+    let source_type = DocKind::parse(&source_type_raw).ok_or_else(|| {
+        rusqlite::Error::InvalidColumnType(5, "source_type".into(), rusqlite::types::Type::Text)
+    })?;
+    let entry_date: String = row.get(4)?;
+    let entity_type: Option<String> = row.get(10)?;
+    let entity_id: Option<String> = row.get(11)?;
+    let entity = match (entity_type, entity_id) {
+        (Some(kind), Some(id)) => Some(ContactRef {
+            kind: parse_contact_kind(&kind, 10)?,
+            id,
+        }),
+        _ => None,
+    };
+
+    Ok(GlLineRow {
+        account_id: AccountId(row.get(0)?),
+        number: row.get(1)?,
+        name: row.get(2)?,
+        entry_id: row.get(3)?,
+        entry_date: parse_date_col(&entry_date, 4)?,
+        source_type,
+        source_id: row.get(6)?,
+        line_memo: row.get(7)?,
+        entry_memo: row.get(8)?,
+        class_id: row.get::<_, Option<String>>(9)?.map(ClassId),
+        entity,
+        is_flagged: row.get::<_, i64>(12)? != 0,
+        reversal_of: row.get(13)?,
+        debit: Money::from_minor(row.get(14)?),
+        credit: Money::from_minor(row.get(15)?),
+    })
 }
 
 fn flip(side: Side) -> Side {

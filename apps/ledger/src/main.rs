@@ -13,10 +13,12 @@ use std::str::FromStr;
 use chrono::{NaiveDate, Utc};
 use rust_decimal::Decimal;
 
+use ledger::accountant::{self, AdjustmentRequest, AuditRow, GlDetail};
 use ledger::import::ImportOptions;
 use ledger::pipeline;
 use ledger::report::{self, BalanceSheet, Pnl, QboTbRow, SalesTaxLines, TierRules, TrialBalance};
-use ledger::store::Ledger;
+use ledger::store::{AdjustmentState, Ledger};
+use ledger::types::{AccountId, ClassId, JournalLine, Side};
 use ledger_core::Money;
 use qbo_local::domain::RealmId;
 use qbo_local::store::Store;
@@ -101,6 +103,53 @@ enum Command {
         as_of: NaiveDate,
         qbo_csv: PathBuf,
     },
+    Gl {
+        db: PathBuf,
+        company: String,
+        from: NaiveDate,
+        to: NaiveDate,
+        account: Option<String>,
+    },
+    Audit {
+        db: PathBuf,
+        company: String,
+        since: Option<NaiveDate>,
+    },
+    Export {
+        db: PathBuf,
+        company: String,
+        as_of: NaiveDate,
+        dir: PathBuf,
+    },
+    AdjustPropose {
+        db: PathBuf,
+        company: String,
+        by: String,
+        desc: String,
+        lines: Vec<JournalLine>,
+    },
+    AdjustList {
+        db: PathBuf,
+        company: String,
+        state: Option<String>,
+    },
+    AdjustDecide {
+        db: PathBuf,
+        company: String,
+        id: String,
+        by: String,
+        note: String,
+        approve: bool,
+    },
+    Reclass {
+        db: PathBuf,
+        company: String,
+        entry: String,
+        line_no: i64,
+        account: String,
+        class: Option<String>,
+        by: String,
+    },
 }
 
 const DEFAULT_TAX_RATE: &str = "0.06625";
@@ -119,6 +168,17 @@ USAGE:
     ledger close   --db PATH --company ID --period-end YYYY-MM-DD --note \"...\"
     ledger reopen  --db PATH --company ID --period-end YYYY-MM-DD --note \"...\"
     ledger tbdiff  --db PATH --company ID --as-of YYYY-MM-DD --qbo-csv PATH
+    ledger gl      --db PATH --company ID --from YYYY-MM-DD --to YYYY-MM-DD
+                   [--account NUMBER]
+    ledger audit   --db PATH --company ID [--since YYYY-MM-DD]
+    ledger export  --db PATH --company ID --as-of YYYY-MM-DD --dir PATH
+    ledger adjust propose --db PATH --company ID --by NAME --desc \"...\"
+                   --line ACCOUNT:dr|cr:AMOUNT[:CLASS] [--line ...]
+    ledger adjust list    --db PATH --company ID [--state STATE]
+    ledger adjust approve --db PATH --company ID --id ID --by NAME --note \"...\"
+    ledger adjust reject  --db PATH --company ID --id ID --by NAME --note \"...\"
+    ledger reclass --db PATH --company ID --entry ID --line N --account NUMBER
+                   [--class CLASS] --by NAME
     ledger --help
 
 SUBCOMMANDS:
@@ -138,6 +198,22 @@ SUBCOMMANDS:
     tbdiff    Diff this ledger's trial balance against a QBO trial balance
               CSV (qbo_account_id,name,balance; first line is a header) and
               print the §7 report.
+    gl        Print GL detail between two dates, one section per account
+              with a running balance, or one account with --account (§8).
+    audit     Print every posting since the last close, or since --since
+              (§8), flagged entries first, with actor and timestamp.
+    export    Write the year end handoff pack (trial balance, P&L, balance
+              sheet, GL, close history) as CSV into --dir (§8).
+    adjust    Manage the adjusting-entry request queue (§8):
+              propose  — validate and queue a request (rejected immediately
+                         if unbalanced or a line breaks the §3 class rule).
+              list     — list requests, optionally filtered by --state
+                         (proposed, approved, rejected, posted).
+              approve  — post the request's lines as a flagged journal entry.
+              reject   — record the decision; nothing posts.
+    reclass   Propose an adjusting entry that reclassifies one posted line
+              to a different account/class (§8 \"Reclassify tool\"). Always a
+              proposal — it never touches the original entry.
 
 FLAGS:
     --db PATH            Path to the SQLite ledger file.
@@ -155,6 +231,23 @@ FLAGS:
     --period-end YYYY-MM-DD  The period's last day (close, reopen).
     --note \"...\"          Required note (close, reopen).
     --qbo-csv PATH        CSV of qbo_account_id,name,balance (tbdiff only).
+    --account NUMBER      Restrict GL detail to one account (gl only).
+    --since YYYY-MM-DD    Audit trail cutoff; default is the last close
+                           (audit only).
+    --dir PATH            Directory to write the export pack into (export
+                           only); created if it does not exist.
+    --by NAME              The accountant or Dan, whoever is acting (adjust,
+                           reclass).
+    --desc \"...\"          Adjustment description (adjust propose only).
+    --line SPEC            One journal line, ACCOUNT:dr|cr:AMOUNT[:CLASS];
+                           repeatable (adjust propose only).
+    --state STATE          Filter by state: proposed, approved, rejected,
+                           posted (adjust list only).
+    --id ID                Request id (adjust approve, adjust reject).
+    --note \"...\"          Decision note (adjust approve, adjust reject).
+    --entry ID             Posted entry id to reclassify from (reclass only).
+    --class CLASS          New class (reclass only; omit for a balance-sheet
+                           account).
 
 EXIT CODES:
     0   ok
@@ -256,6 +349,11 @@ fn parse(args: &[String]) -> Result<Command, UsageError> {
         "close" => parse_close(args),
         "reopen" => parse_reopen(args),
         "tbdiff" => parse_tbdiff(args),
+        "gl" => parse_gl(args),
+        "audit" => parse_audit(args),
+        "export" => parse_export(args),
+        "adjust" => parse_adjust(args),
+        "reclass" => parse_reclass(args),
         other => Err(UsageError::unknown_subcommand(other)),
     }
 }
@@ -480,6 +578,225 @@ fn parse_tbdiff(mut args: Args<'_>) -> Result<Command, UsageError> {
     })
 }
 
+fn parse_gl(mut args: Args<'_>) -> Result<Command, UsageError> {
+    let mut db = None;
+    let mut company = None;
+    let mut from = None;
+    let mut to = None;
+    let mut account = None;
+    while let Some(flag) = args.next() {
+        match flag.as_str() {
+            "--db" => db = Some(PathBuf::from(next_value(&mut args, "--db")?)),
+            "--company" => company = Some(next_value(&mut args, "--company")?),
+            "--from" => from = Some(parse_date(&next_value(&mut args, "--from")?, "--from")?),
+            "--to" => to = Some(parse_date(&next_value(&mut args, "--to")?, "--to")?),
+            "--account" => account = Some(next_value(&mut args, "--account")?),
+            other => return Err(UsageError::unknown_flag(other)),
+        }
+    }
+    Ok(Command::Gl {
+        db: db.ok_or_else(|| UsageError::missing_flag("--db"))?,
+        company: company.ok_or_else(|| UsageError::missing_flag("--company"))?,
+        from: from.ok_or_else(|| UsageError::missing_flag("--from"))?,
+        to: to.ok_or_else(|| UsageError::missing_flag("--to"))?,
+        account,
+    })
+}
+
+fn parse_audit(mut args: Args<'_>) -> Result<Command, UsageError> {
+    let mut db = None;
+    let mut company = None;
+    let mut since = None;
+    while let Some(flag) = args.next() {
+        match flag.as_str() {
+            "--db" => db = Some(PathBuf::from(next_value(&mut args, "--db")?)),
+            "--company" => company = Some(next_value(&mut args, "--company")?),
+            "--since" => since = Some(parse_date(&next_value(&mut args, "--since")?, "--since")?),
+            other => return Err(UsageError::unknown_flag(other)),
+        }
+    }
+    Ok(Command::Audit {
+        db: db.ok_or_else(|| UsageError::missing_flag("--db"))?,
+        company: company.ok_or_else(|| UsageError::missing_flag("--company"))?,
+        since,
+    })
+}
+
+fn parse_export(mut args: Args<'_>) -> Result<Command, UsageError> {
+    let mut db = None;
+    let mut company = None;
+    let mut as_of = None;
+    let mut dir = None;
+    while let Some(flag) = args.next() {
+        match flag.as_str() {
+            "--db" => db = Some(PathBuf::from(next_value(&mut args, "--db")?)),
+            "--company" => company = Some(next_value(&mut args, "--company")?),
+            "--as-of" => as_of = Some(parse_date(&next_value(&mut args, "--as-of")?, "--as-of")?),
+            "--dir" => dir = Some(PathBuf::from(next_value(&mut args, "--dir")?)),
+            other => return Err(UsageError::unknown_flag(other)),
+        }
+    }
+    Ok(Command::Export {
+        db: db.ok_or_else(|| UsageError::missing_flag("--db"))?,
+        company: company.ok_or_else(|| UsageError::missing_flag("--company"))?,
+        as_of: as_of.ok_or_else(|| UsageError::missing_flag("--as-of"))?,
+        dir: dir.ok_or_else(|| UsageError::missing_flag("--dir"))?,
+    })
+}
+
+/// `ACCOUNT:dr|cr:AMOUNT[:CLASS]`, one journal line for `adjust propose`.
+fn parse_line_spec(raw: &str, line_no: i64) -> Result<JournalLine, UsageError> {
+    let parts: Vec<&str> = raw.split(':').collect();
+    let [account, side, amount, rest @ ..] = parts.as_slice() else {
+        return Err(UsageError::invalid_value("--line", raw));
+    };
+    if rest.len() > 1 {
+        return Err(UsageError::invalid_value("--line", raw));
+    }
+    let side = match side.to_ascii_lowercase().as_str() {
+        "dr" | "debit" => Side::Debit,
+        "cr" | "credit" => Side::Credit,
+        _ => return Err(UsageError::invalid_value("--line", raw)),
+    };
+    let decimal =
+        Decimal::from_str(amount).map_err(|_| UsageError::invalid_value("--line", raw))?;
+    let amount = ledger_core::round_money(decimal, ledger_core::RoundingPolicy::LineExtension)
+        .map_err(|_| UsageError::invalid_value("--line", raw))?;
+    let class = rest.first().map(|c| ClassId(c.to_string()));
+
+    let line = match side {
+        Side::Debit => JournalLine::debit(line_no, AccountId(account.to_string()), amount),
+        Side::Credit => JournalLine::credit(line_no, AccountId(account.to_string()), amount),
+    };
+    Ok(line.with_class(class))
+}
+
+fn parse_adjust(mut args: Args<'_>) -> Result<Command, UsageError> {
+    let Some(sub) = args.next() else {
+        return Err(UsageError::usage());
+    };
+    match sub.as_str() {
+        "propose" => parse_adjust_propose(args),
+        "list" => parse_adjust_list(args),
+        "approve" => parse_adjust_decide(args, true),
+        "reject" => parse_adjust_decide(args, false),
+        other => Err(UsageError::unknown_subcommand(other)),
+    }
+}
+
+fn parse_adjust_propose(mut args: Args<'_>) -> Result<Command, UsageError> {
+    let mut db = None;
+    let mut company = None;
+    let mut by = None;
+    let mut desc = None;
+    let mut lines_raw: Vec<String> = Vec::new();
+    while let Some(flag) = args.next() {
+        match flag.as_str() {
+            "--db" => db = Some(PathBuf::from(next_value(&mut args, "--db")?)),
+            "--company" => company = Some(next_value(&mut args, "--company")?),
+            "--by" => by = Some(next_value(&mut args, "--by")?),
+            "--desc" => desc = Some(next_value(&mut args, "--desc")?),
+            "--line" => lines_raw.push(next_value(&mut args, "--line")?),
+            other => return Err(UsageError::unknown_flag(other)),
+        }
+    }
+    if lines_raw.is_empty() {
+        return Err(UsageError::missing_flag("--line"));
+    }
+    let lines = lines_raw
+        .iter()
+        .enumerate()
+        .map(|(i, raw)| parse_line_spec(raw, (i + 1) as i64))
+        .collect::<Result<Vec<_>, UsageError>>()?;
+    Ok(Command::AdjustPropose {
+        db: db.ok_or_else(|| UsageError::missing_flag("--db"))?,
+        company: company.ok_or_else(|| UsageError::missing_flag("--company"))?,
+        by: by.ok_or_else(|| UsageError::missing_flag("--by"))?,
+        desc: desc.ok_or_else(|| UsageError::missing_flag("--desc"))?,
+        lines,
+    })
+}
+
+fn parse_adjust_list(mut args: Args<'_>) -> Result<Command, UsageError> {
+    let mut db = None;
+    let mut company = None;
+    let mut state = None;
+    while let Some(flag) = args.next() {
+        match flag.as_str() {
+            "--db" => db = Some(PathBuf::from(next_value(&mut args, "--db")?)),
+            "--company" => company = Some(next_value(&mut args, "--company")?),
+            "--state" => state = Some(next_value(&mut args, "--state")?),
+            other => return Err(UsageError::unknown_flag(other)),
+        }
+    }
+    Ok(Command::AdjustList {
+        db: db.ok_or_else(|| UsageError::missing_flag("--db"))?,
+        company: company.ok_or_else(|| UsageError::missing_flag("--company"))?,
+        state,
+    })
+}
+
+fn parse_adjust_decide(mut args: Args<'_>, approve: bool) -> Result<Command, UsageError> {
+    let mut db = None;
+    let mut company = None;
+    let mut id = None;
+    let mut by = None;
+    let mut note = None;
+    while let Some(flag) = args.next() {
+        match flag.as_str() {
+            "--db" => db = Some(PathBuf::from(next_value(&mut args, "--db")?)),
+            "--company" => company = Some(next_value(&mut args, "--company")?),
+            "--id" => id = Some(next_value(&mut args, "--id")?),
+            "--by" => by = Some(next_value(&mut args, "--by")?),
+            "--note" => note = Some(next_value(&mut args, "--note")?),
+            other => return Err(UsageError::unknown_flag(other)),
+        }
+    }
+    Ok(Command::AdjustDecide {
+        db: db.ok_or_else(|| UsageError::missing_flag("--db"))?,
+        company: company.ok_or_else(|| UsageError::missing_flag("--company"))?,
+        id: id.ok_or_else(|| UsageError::missing_flag("--id"))?,
+        by: by.ok_or_else(|| UsageError::missing_flag("--by"))?,
+        note: note.ok_or_else(|| UsageError::missing_flag("--note"))?,
+        approve,
+    })
+}
+
+fn parse_reclass(mut args: Args<'_>) -> Result<Command, UsageError> {
+    let mut db = None;
+    let mut company = None;
+    let mut entry = None;
+    let mut line = None;
+    let mut account = None;
+    let mut class = None;
+    let mut by = None;
+    while let Some(flag) = args.next() {
+        match flag.as_str() {
+            "--db" => db = Some(PathBuf::from(next_value(&mut args, "--db")?)),
+            "--company" => company = Some(next_value(&mut args, "--company")?),
+            "--entry" => entry = Some(next_value(&mut args, "--entry")?),
+            "--line" => line = Some(next_value(&mut args, "--line")?),
+            "--account" => account = Some(next_value(&mut args, "--account")?),
+            "--class" => class = Some(next_value(&mut args, "--class")?),
+            "--by" => by = Some(next_value(&mut args, "--by")?),
+            other => return Err(UsageError::unknown_flag(other)),
+        }
+    }
+    let line = line.ok_or_else(|| UsageError::missing_flag("--line"))?;
+    let line_no = line
+        .parse::<i64>()
+        .map_err(|_| UsageError::invalid_value("--line", &line))?;
+    Ok(Command::Reclass {
+        db: db.ok_or_else(|| UsageError::missing_flag("--db"))?,
+        company: company.ok_or_else(|| UsageError::missing_flag("--company"))?,
+        entry: entry.ok_or_else(|| UsageError::missing_flag("--entry"))?,
+        line_no,
+        account: account.ok_or_else(|| UsageError::missing_flag("--account"))?,
+        class,
+        by: by.ok_or_else(|| UsageError::missing_flag("--by"))?,
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Execution
 // ---------------------------------------------------------------------------
@@ -545,6 +862,56 @@ fn execute(command: Command) -> Result<ExitCode, CommandError> {
             as_of,
             qbo_csv,
         } => run_tbdiff(&db, &company, as_of, &qbo_csv),
+        Command::Gl {
+            db,
+            company,
+            from,
+            to,
+            account,
+        } => run_gl(&db, &company, from, to, account).map(ok),
+        Command::Audit { db, company, since } => run_audit(&db, &company, since).map(ok),
+        Command::Export {
+            db,
+            company,
+            as_of,
+            dir,
+        } => run_export(&db, &company, as_of, &dir).map(ok),
+        Command::AdjustPropose {
+            db,
+            company,
+            by,
+            desc,
+            lines,
+        } => run_adjust_propose(&db, &company, &by, &desc, lines).map(ok),
+        Command::AdjustList { db, company, state } => {
+            run_adjust_list(&db, &company, state.as_deref()).map(ok)
+        }
+        Command::AdjustDecide {
+            db,
+            company,
+            id,
+            by,
+            note,
+            approve,
+        } => run_adjust_decide(&db, &company, &id, &by, &note, approve).map(ok),
+        Command::Reclass {
+            db,
+            company,
+            entry,
+            line_no,
+            account,
+            class,
+            by,
+        } => run_reclass(
+            &db,
+            &company,
+            &entry,
+            line_no,
+            &account,
+            class.as_deref(),
+            &by,
+        )
+        .map(ok),
     }
 }
 
@@ -882,6 +1249,199 @@ fn read_qbo_csv(path: &std::path::Path) -> Result<Vec<QboTbRow>, String> {
         });
     }
     Ok(rows)
+}
+
+// -- gl -----------------------------------------------------------------
+
+fn run_gl(
+    db: &std::path::Path,
+    company: &str,
+    from: NaiveDate,
+    to: NaiveDate,
+    account: Option<String>,
+) -> Result<(), CommandError> {
+    let ledger = Ledger::open(db).map_err(runtime)?;
+    let account_id = account.map(AccountId);
+    let gl = accountant::general_ledger(&ledger, company, from, to, account_id.as_ref())
+        .map_err(runtime)?;
+    print!("{}", render_gl(&gl, company, from, to));
+    Ok(())
+}
+
+fn render_gl(gl: &GlDetail, company: &str, from: NaiveDate, to: NaiveDate) -> String {
+    let mut out = String::new();
+    out.push_str(&format!("GL DETAIL   {company}   {from} .. {to}\n"));
+    for section in &gl.sections {
+        out.push_str(&format!(
+            "\n{} {}   opening {}\n",
+            section.number,
+            section.name,
+            fmt_money(section.opening_balance)
+        ));
+        for line in &section.lines {
+            out.push_str(&format!(
+                "  {}  {:<10}  {:<10}  dr {:>12}  cr {:>12}  bal {:>12}{}\n",
+                line.entry_date,
+                line.entry_id,
+                line.source_type.as_str(),
+                fmt_money(line.debit),
+                fmt_money(line.credit),
+                fmt_money(line.running_balance),
+                if line.is_flagged { "  [flagged]" } else { "" },
+            ));
+        }
+        out.push_str(&format!(
+            "  closing {}\n",
+            fmt_money(section.closing_balance)
+        ));
+    }
+    out
+}
+
+// -- audit ----------------------------------------------------------------
+
+fn run_audit(
+    db: &std::path::Path,
+    company: &str,
+    since: Option<NaiveDate>,
+) -> Result<(), CommandError> {
+    let ledger = Ledger::open(db).map_err(runtime)?;
+    let rows = accountant::audit_trail(&ledger, company, since).map_err(runtime)?;
+    print!("{}", render_audit(&rows, company));
+    Ok(())
+}
+
+fn render_audit(rows: &[AuditRow], company: &str) -> String {
+    let mut out = String::new();
+    out.push_str(&format!("AUDIT TRAIL   {company}\n\n"));
+    for row in rows {
+        out.push_str(&format!(
+            "{}  {}  {}  {}  by {} ({}) at {}{}\n",
+            row.entry_date,
+            row.entry_id,
+            row.source_type.as_str(),
+            row.memo.as_deref().unwrap_or(""),
+            row.actor,
+            row.command_kind,
+            row.at.to_rfc3339(),
+            if row.is_flagged { "  [flagged]" } else { "" },
+        ));
+    }
+    out
+}
+
+// -- export ---------------------------------------------------------------
+
+fn run_export(
+    db: &std::path::Path,
+    company: &str,
+    as_of: NaiveDate,
+    dir: &std::path::Path,
+) -> Result<(), CommandError> {
+    let ledger = Ledger::open(db).map_err(runtime)?;
+    let paths = accountant::export_pack(&ledger, company, as_of, dir).map_err(runtime)?;
+    for path in paths {
+        println!("wrote {}", path.display());
+    }
+    Ok(())
+}
+
+// -- adjust -----------------------------------------------------------------
+
+fn render_adjustment(request: &AdjustmentRequest) -> String {
+    format!(
+        "{}  {:?}  by {} at {}{}{}\n",
+        request.request_id,
+        request.state,
+        request.requested_by,
+        request.requested_at.to_rfc3339(),
+        if request.period_closed {
+            "  [period_closed]"
+        } else {
+            ""
+        },
+        request
+            .posted_entry_id
+            .as_ref()
+            .map(|id| format!("  entry {id}"))
+            .unwrap_or_default(),
+    )
+}
+
+fn run_adjust_propose(
+    db: &std::path::Path,
+    company: &str,
+    by: &str,
+    desc: &str,
+    lines: Vec<JournalLine>,
+) -> Result<(), CommandError> {
+    let ledger = Ledger::open(db).map_err(runtime)?;
+    let request = accountant::propose_adjustment(&ledger, company, by, desc, lines, Utc::now())
+        .map_err(runtime)?;
+    print!("{}", render_adjustment(&request));
+    Ok(())
+}
+
+fn run_adjust_list(
+    db: &std::path::Path,
+    company: &str,
+    state: Option<&str>,
+) -> Result<(), CommandError> {
+    let ledger = Ledger::open(db).map_err(runtime)?;
+    let state = state
+        .map(|raw| {
+            AdjustmentState::parse(raw).ok_or_else(|| runtime(format!("unknown state {raw:?}")))
+        })
+        .transpose()?;
+    let requests = accountant::list_adjustments(&ledger, company, state).map_err(runtime)?;
+    for request in &requests {
+        print!("{}", render_adjustment(request));
+    }
+    Ok(())
+}
+
+fn run_adjust_decide(
+    db: &std::path::Path,
+    company: &str,
+    id: &str,
+    by: &str,
+    note: &str,
+    approve: bool,
+) -> Result<(), CommandError> {
+    let ledger = Ledger::open(db).map_err(runtime)?;
+    let request =
+        accountant::decide_adjustment(&ledger, company, id, by, approve, note, Utc::now())
+            .map_err(runtime)?;
+    print!("{}", render_adjustment(&request));
+    Ok(())
+}
+
+// -- reclass ----------------------------------------------------------------
+
+#[allow(clippy::too_many_arguments)]
+fn run_reclass(
+    db: &std::path::Path,
+    company: &str,
+    entry: &str,
+    line_no: i64,
+    account: &str,
+    class: Option<&str>,
+    by: &str,
+) -> Result<(), CommandError> {
+    let ledger = Ledger::open(db).map_err(runtime)?;
+    let request = accountant::propose_reclassify(
+        &ledger,
+        company,
+        entry,
+        line_no,
+        AccountId(account.to_string()),
+        class.map(|c| ClassId(c.to_string())),
+        by,
+        Utc::now(),
+    )
+    .map_err(runtime)?;
+    print!("{}", render_adjustment(&request));
+    Ok(())
 }
 
 fn fmt_money(amount: Money) -> String {
