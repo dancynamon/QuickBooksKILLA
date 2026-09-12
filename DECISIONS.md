@@ -320,3 +320,18 @@ can be checked against the lines for the first time.
 
 *Rejected: a per-agency, per-tax-code liability engine. New Jersey at one rate
 is the whole filing today; the rate is a config value in case that changes.*
+
+## D20 — Four ledger policies decided: W2, W3, W4, W12
+
+12 Sep 2026, Dan, each as the draft recommended.
+
+- **W2** Raw-material bills capitalise to inventory; cost reaches COGS when a
+  build consumes the material.
+- **W3** A vendor credit reduces the landed cost of the lot it relates to.
+- **W4** Build variance plugs to a manufacturing-variance account; finished
+  goods carry build-sheet standard cost.
+- **W12** Inventory is valued at moving weighted average.
+
+*Rejected: expensing material on purchase (what QBO does for Dan today), which
+makes a large foam order distort two months of margin; FIFO, which needs lot
+tracking on every cut for a material where lots are interchangeable.*

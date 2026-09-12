@@ -1141,9 +1141,9 @@ a fact to verify rather than a policy to choose.
 | # | § | Item | Decides | Blocks |
 |---|---|---|---|---|
 | W1 | 0 | Books are accrual, cash basis is a report time transformation, materially equal rather than to the cent | Joel | The report layer's cash path, and the parallel run bar |
-| W2 | 1 | Raw material bills capitalise to inventory rather than expensing | Dan | Ledger engine, ROADMAP §B' start |
-| W3 | 1 | Vendor credit reduces material cost rather than other income | Dan | Ledger engine, §11 landed cost |
-| W4 | 1 | Build variance plugs to 5100 rather than being spread over unit cost | Dan | Ledger engine, §11 |
+| W2 | 1 | Raw material bills capitalise to inventory rather than expensing | **Decided, Dan, 12 Sep 2026: yes** | Ledger engine, ROADMAP §B' start |
+| W3 | 1 | Vendor credit reduces material cost rather than other income | **Decided, Dan, 12 Sep 2026: yes** | Ledger engine, §11 landed cost |
+| W4 | 1 | Build variance plugs to 5100 rather than being spread over unit cost | **Decided, Dan, 12 Sep 2026: yes** | Ledger engine, §11 |
 | W5 | 1 | Sales tax is a liability at the invoice date, not the payment date | Joel | §9, and the 2200 posting rule |
 | W6 | 1 | Shipping charged to customers is income, not contra freight | Dan | §9 line A, chart of accounts |
 | W7 | 1 | Freight is taxable in NJ when the goods are taxable | Joel | §9 line E |
@@ -1151,7 +1151,7 @@ a fact to verify rather than a policy to choose.
 | W9 | 1 | Discounts are contra income (4900) | Joel | §9 line A |
 | W10 | 1 | Credit memos and refunds debit returns and allowances (4950) | Joel | Chart of accounts, P&L shape |
 | W11 | 1 | Bad debt written off direct to expense, no allowance | Joel | §5 close checklist |
-| W12 | 1 | Inventory at moving weighted average rather than FIFO | Joel | §11, §6 import variances, §7 tiers |
+| W12 | 1 | Inventory at moving weighted average rather than FIFO | **Decided, Dan, 12 Sep 2026: yes** | §11, §6 import variances, §7 tiers |
 | W13 | 1 | Merchant fees gross as expense rather than netted | Dan | Authorize.net settlement import |
 | W14 | 2 | Account numbering scheme, and whether QBO names are preserved | Joel | Import mapping table |
 | W15 | 3 | The six class list, and cnc/uv appearing in both books | Dan | Import, and it cannot be backfilled |
