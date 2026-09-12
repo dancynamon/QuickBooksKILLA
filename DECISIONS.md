@@ -353,3 +353,29 @@ tracking on every cut for a material where lots are interchangeable.*
 Every import-gating item (W2, W3, W4, W12, W15, W16) is now decided. The ledger
 engine and the replica import (ROADMAP §B') are unblocked on Dan's side; the
 sixteen Joel items remain open and none of them gate the start of §B'.
+
+## D22 — Ledger engine built in four parallel tracks against a shared contract
+
+12 Sep 2026, in build.
+
+`apps/ledger` went from a stub to an engine in one session: a shared
+`types.rs` and `chart.rs` were written first, then the store (§4, §5, §7,
+§9), the posting function (§1) and the importer (§6) were built in parallel
+against them, and a fourth pass wired import to post to store and added the
+`ledger` binary.
+
+Two judgement calls made in build, both Dan's to override:
+
+- **A re-run replaces, never duplicates.** A document whose saved payload is
+  unchanged is skipped; one whose payload changed has its old entries reversed
+  as of the new `txn_date` and is reposted. Import is therefore safe to run
+  nightly against a moving replica.
+- **Seed-chart accounts take the QBO id the import maps onto them**, first
+  writer wins, so the §7 diff can join 1200, 2200 and the bank accounts. A
+  second QBO account landing on the same number is reported for mapping rather
+  than silently taking or losing the slot.
+
+Known gaps, carried in `ROADMAP.md` §0: opening balances and the boundary-year
+walk are implemented but not wired into the pipeline; `ledger init` is not
+idempotent; non-posting documents are re-saved on every run; §9 line E needs
+per-line taxability on `journal_lines`, which the schema does not carry yet.

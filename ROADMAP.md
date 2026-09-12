@@ -32,7 +32,7 @@ to goal 2 rather than a detour. Three consequences run through the phases:
 
 ## 0. Where it stands
 
-`cargo test --workspace`: 288 tests, all offline, all green. Clippy clean.
+`cargo test --workspace`: 412 tests, all offline, all green. Clippy clean.
 
 Everything that can be built **without Intuit credentials** has been built:
 money and rounding, realm scoping, SQLite replica with projection and
@@ -56,7 +56,7 @@ Everything **not** built needs credentials, Intuit's docs, or a UI toolchain:
 | Read-only query API over `Store` | B | **built 11 Sep** |
 | UI shell and read screens | B | stack decision, §B |
 | `LEDGER-DESIGN.md` | B | **drafted 11 Sep**; Dan's six gating items decided 12 Sep (D20, D21); Joel's sixteen open |
-| Ledger engine, import from replica | B' | **unblocked 12 Sep**; buildable offline against the replica |
+| Ledger engine, import from replica | B' | **built 12 Sep**: store, posting rules, reports, importer, `ledger` CLI; opening balances and the boundary walk against live QBO trial balances remain |
 | Write UI into own store, export via outbox | D | C |
 | Statement import, sales-tax reports, accountant mode, Authorize.net, MCP server | G | scoped in §G |
 

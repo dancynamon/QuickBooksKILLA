@@ -9,7 +9,9 @@ Two projects, one workspace:
   removes the network from the interaction path so every read is a local query
   and every write commits locally and syncs in the background.
 - **`apps/ledger`** — the long-term project. A double-entry general ledger that
-  eventually replaces QBO. Stub only; not started.
+  replaces QBO at cutover (`ROADMAP.md` §F). Engine, posting rules, reports and
+  the replica importer are built; the UI, statement import and accountant mode
+  are not. Designed in `LEDGER-DESIGN.md`.
 - **`crates/ledger-core`** — money type and rounding policy, shared by both.
   Deliberately nothing else — see `DECISIONS.md` D3.
 
@@ -34,9 +36,10 @@ in its §13 come back answered.
 ## Build
 
 ```sh
-cargo test          # 288 tests, all offline
+cargo test          # 412 tests, all offline
 cargo clippy --all-targets
-cargo run --bin qbo-local
+cargo run --bin qbo-local -- --help
+cargo run --bin ledger -- --help
 ```
 
 The test suite never touches the network. That is a requirement rather than a
@@ -69,6 +72,29 @@ Built and tested:
 
 Not built yet: the HTTP transport behind the client trait, the OAuth flow, the
 keychain token backend, the Tauri shell and its front-end. See `ROADMAP.md`.
+
+## Current state — the ledger
+
+`apps/ledger`, built against `LEDGER-DESIGN.md`:
+
+- The §2 chart as constants and a seed; the §3 class list
+- The §1 posting-rules table as one pure function, every document kind except
+  the three manufacturing rows, which wait for cutover (§11)
+- The §4 schema with its invariants enforced in SQLite: one non-zero side per
+  line, balanced-on-post trigger, posted entries immutable except `cleared_at`
+- The §5 period gate: a closed period rejects, reopening is loud (D7)
+- Trial balance, P&L by class, balance sheet, the §9 four-line sales tax
+  report with the ST-50 mapping, and the §7 tiered trial balance diff
+- The §6 importer: replica accounts and classes mapped onto the chart
+  (unmapped ones created and flagged, never dropped), every document
+  translated from raw JSON and posted through the same function the UI will
+  use, idempotent and re-runnable, changed documents reversed and reposted
+- A `ledger` binary: `init`, `import`, `tb`, `pnl`, `bs`, `tax`, `close`,
+  `reopen`, `tbdiff`
+
+Not built yet: opening balances wired into the import, the boundary-year walk
+against live QBO trial balances, statement import and reconciliation (§10),
+accountant mode (§8), manufacturing costing (§11), the UI.
 
 The first live authentication run should happen wherever the OAuth credentials
 already live, rather than moving them onto another machine.
