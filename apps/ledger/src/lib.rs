@@ -18,8 +18,11 @@
 //!   replica in, posted entries out
 //! - [`accountant`] — §8: the accountant's read-only role, GL detail and
 //!   exports, and the adjusting-entry request queue
+//! - [`bank`]     — §10: statement import, matching, proposals, the
+//!   per-statement close
 
 pub mod accountant;
+pub mod bank;
 pub mod chart;
 pub mod import;
 pub mod pipeline;

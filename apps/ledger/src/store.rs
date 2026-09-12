@@ -50,6 +50,19 @@ pub enum LedgerError {
     BadDate(String),
     #[error("stored timestamp {0:?} is not a valid RFC 3339 timestamp")]
     BadTimestamp(String),
+    #[error(transparent)]
+    Post(#[from] crate::post::PostError),
+    /// §10 close checklist: `opening_balance + sum(matched lines) !=
+    /// closing_balance`, or an unmatched line remains. Nothing is changed.
+    #[error("statement does not close: off by {difference:?} with {unmatched} unmatched line(s)")]
+    StatementDoesNotClose { difference: Money, unmatched: usize },
+    /// §10: "A closed statement's lines cannot be re-matched."
+    #[error("bank statement {statement_id} is closed")]
+    StatementClosed { statement_id: String },
+    /// [`Ledger::confirm_proposal`] on a line that is not currently a
+    /// pending proposal (already resolved, or never matched at all).
+    #[error("bank line {line_id} is not a pending proposal")]
+    NotAProposal { line_id: String },
 }
 
 /// A forward-only, numbered migration. Applied in a transaction, version
@@ -288,6 +301,54 @@ CREATE TABLE adjustment_requests (
 ) STRICT;
 "#,
     },
+    Migration {
+        version: 3,
+        name: "bank statements and lines (§10)",
+        sql: r#"
+CREATE TABLE bank_statements (
+    company_id            TEXT NOT NULL REFERENCES companies(company_id),
+    statement_id          TEXT NOT NULL,
+    account_id            TEXT NOT NULL,
+    period_start          TEXT NOT NULL,
+    period_end            TEXT NOT NULL,
+    opening_balance_minor INTEGER NOT NULL,
+    closing_balance_minor INTEGER NOT NULL,
+    imported_at           TEXT NOT NULL,
+    closed_at             TEXT,
+    PRIMARY KEY (company_id, statement_id),
+    FOREIGN KEY (company_id, account_id) REFERENCES accounts(company_id, account_id)
+) STRICT;
+
+CREATE TABLE bank_lines (
+    company_id       TEXT NOT NULL,
+    line_id          TEXT NOT NULL,
+    statement_id     TEXT NOT NULL,
+    account_id       TEXT NOT NULL,
+    posted_on        TEXT NOT NULL,
+    amount_minor     INTEGER NOT NULL,
+    description      TEXT NOT NULL,
+    external_id      TEXT,
+    matched_entry_id TEXT,
+    matched_line_no  INTEGER,
+    match_kind       TEXT CHECK (match_kind IS NULL OR match_kind IN ('exact','settlement','proposed','manual')),
+    matched_at       TEXT,
+    PRIMARY KEY (company_id, line_id),
+    FOREIGN KEY (company_id, statement_id) REFERENCES bank_statements(company_id, statement_id),
+    FOREIGN KEY (company_id, account_id) REFERENCES accounts(company_id, account_id),
+    FOREIGN KEY (company_id, matched_entry_id) REFERENCES journal_entries(company_id, entry_id)
+) STRICT;
+
+-- D15/§10: the same bank/card feed is re-imported often (statements overlap
+-- at the edges); this is what makes a re-import harmless. Scoped to the
+-- account rather than the statement, since a duplicate line is a duplicate
+-- regardless of which statement's window it fell into.
+CREATE UNIQUE INDEX idx_bank_lines_external
+    ON bank_lines(company_id, account_id, external_id)
+    WHERE external_id IS NOT NULL;
+
+CREATE INDEX idx_bank_lines_statement ON bank_lines(company_id, statement_id);
+"#,
+    },
 ];
 
 pub fn latest_version() -> i64 {
@@ -439,6 +500,36 @@ pub struct GlLineRow {
     pub reversal_of: Option<String>,
     pub debit: Money,
     pub credit: Money,
+}
+
+/// One row of `bank_statements` (§10).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BankStatementRow {
+    pub statement_id: String,
+    pub account_id: AccountId,
+    pub period_start: NaiveDate,
+    pub period_end: NaiveDate,
+    pub opening_balance: Money,
+    pub closing_balance: Money,
+    pub imported_at: String,
+    pub closed_at: Option<String>,
+}
+
+/// One row of `bank_lines` (§10). `match_kind` is `None` until
+/// [`Ledger::match_statement`] has run at least once over the statement.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BankLineRow {
+    pub line_id: String,
+    pub statement_id: String,
+    pub account_id: AccountId,
+    pub posted_on: NaiveDate,
+    pub amount: Money,
+    pub description: String,
+    pub external_id: Option<String>,
+    pub matched_entry_id: Option<String>,
+    pub matched_line_no: Option<i64>,
+    pub match_kind: Option<String>,
+    pub matched_at: Option<String>,
 }
 
 /// The ledger. Owns the connection; nothing outside this module can reach it.
@@ -1164,6 +1255,43 @@ impl Ledger {
         Ok(())
     }
 
+    // -----------------------------------------------------------------------
+    // Bank statements and lines (§10) — schema and plain reads/writes only.
+    // The matching rules, parsers and the per-statement close live in
+    // `crate::bank`, built on top of these.
+    // -----------------------------------------------------------------------
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_bank_statement(
+        &self,
+        company: &str,
+        statement_id: &str,
+        account: &AccountId,
+        period_start: NaiveDate,
+        period_end: NaiveDate,
+        opening_balance: Money,
+        closing_balance: Money,
+        now: DateTime<Utc>,
+    ) -> Result<(), LedgerError> {
+        self.connection.execute(
+            "INSERT INTO bank_statements
+                 (company_id, statement_id, account_id, period_start, period_end,
+                  opening_balance_minor, closing_balance_minor, imported_at, closed_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, NULL)",
+            params![
+                company,
+                statement_id,
+                account.0,
+                period_start.to_string(),
+                period_end.to_string(),
+                opening_balance.minor(),
+                closing_balance.minor(),
+                now.to_rfc3339(),
+            ],
+        )?;
+        Ok(())
+    }
+
     pub fn adjustment_request(
         &self,
         company: &str,
@@ -1371,6 +1499,292 @@ impl Ledger {
         };
         Ok(rows)
     }
+
+    pub fn bank_statement(
+        &self,
+        company: &str,
+        statement_id: &str,
+    ) -> Result<BankStatementRow, LedgerError> {
+        self.connection
+            .query_row(
+                "SELECT statement_id, account_id, period_start, period_end,
+                        opening_balance_minor, closing_balance_minor, imported_at, closed_at
+                 FROM bank_statements WHERE company_id = ?1 AND statement_id = ?2",
+                params![company, statement_id],
+                row_to_bank_statement,
+            )
+            .optional()?
+            .ok_or(LedgerError::NotFound)
+    }
+
+    pub fn close_bank_statement(
+        &self,
+        company: &str,
+        statement_id: &str,
+        now: DateTime<Utc>,
+    ) -> Result<(), LedgerError> {
+        let changed = self.connection.execute(
+            "UPDATE bank_statements SET closed_at = ?3
+             WHERE company_id = ?1 AND statement_id = ?2",
+            params![company, statement_id, now.to_rfc3339()],
+        )?;
+        if changed == 0 {
+            return Err(LedgerError::NotFound);
+        }
+        Ok(())
+    }
+
+    /// Inserts one bank line unless `(account, external_id)` already exists
+    /// for this company (§10: "what makes re-importing the same file
+    /// harmless"). `external_id` of `None` never dedupes — every line
+    /// without one is inserted. Returns whether it was actually inserted.
+    #[allow(clippy::too_many_arguments)]
+    pub fn insert_bank_line_if_new(
+        &self,
+        company: &str,
+        line_id: &str,
+        statement_id: &str,
+        account: &AccountId,
+        posted_on: NaiveDate,
+        amount: Money,
+        description: &str,
+        external_id: Option<&str>,
+    ) -> Result<bool, LedgerError> {
+        if let Some(external_id) = external_id {
+            let exists: i64 = self.connection.query_row(
+                "SELECT COUNT(*) FROM bank_lines
+                 WHERE company_id = ?1 AND account_id = ?2 AND external_id = ?3",
+                params![company, account.0, external_id],
+                |row| row.get(0),
+            )?;
+            if exists > 0 {
+                return Ok(false);
+            }
+        }
+        self.connection.execute(
+            "INSERT INTO bank_lines
+                 (company_id, line_id, statement_id, account_id, posted_on, amount_minor,
+                  description, external_id, matched_entry_id, matched_line_no, match_kind,
+                  matched_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, NULL, NULL, NULL, NULL)",
+            params![
+                company,
+                line_id,
+                statement_id,
+                account.0,
+                posted_on.to_string(),
+                amount.minor(),
+                description,
+                external_id,
+            ],
+        )?;
+        Ok(true)
+    }
+
+    pub fn list_bank_lines(
+        &self,
+        company: &str,
+        statement_id: &str,
+    ) -> Result<Vec<BankLineRow>, LedgerError> {
+        let mut stmt = self.connection.prepare(
+            "SELECT line_id, statement_id, account_id, posted_on, amount_minor, description,
+                    external_id, matched_entry_id, matched_line_no, match_kind, matched_at
+             FROM bank_lines WHERE company_id = ?1 AND statement_id = ?2
+             ORDER BY posted_on, line_id",
+        )?;
+        let rows = stmt
+            .query_map(params![company, statement_id], row_to_bank_line)?
+            .collect::<Result<Vec<_>, rusqlite::Error>>()?;
+        Ok(rows)
+    }
+
+    pub fn bank_line(&self, company: &str, line_id: &str) -> Result<BankLineRow, LedgerError> {
+        self.connection
+            .query_row(
+                "SELECT line_id, statement_id, account_id, posted_on, amount_minor, description,
+                        external_id, matched_entry_id, matched_line_no, match_kind, matched_at
+                 FROM bank_lines WHERE company_id = ?1 AND line_id = ?2",
+                params![company, line_id],
+                row_to_bank_line,
+            )
+            .optional()?
+            .ok_or(LedgerError::NotFound)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn set_bank_line_match(
+        &self,
+        company: &str,
+        line_id: &str,
+        match_kind: &str,
+        entry_id: Option<&str>,
+        line_no: Option<i64>,
+        now: DateTime<Utc>,
+    ) -> Result<(), LedgerError> {
+        let changed = self.connection.execute(
+            "UPDATE bank_lines SET match_kind = ?3, matched_entry_id = ?4,
+                    matched_line_no = ?5, matched_at = ?6
+             WHERE company_id = ?1 AND line_id = ?2",
+            params![
+                company,
+                line_id,
+                match_kind,
+                entry_id,
+                line_no,
+                now.to_rfc3339()
+            ],
+        )?;
+        if changed == 0 {
+            return Err(LedgerError::NotFound);
+        }
+        Ok(())
+    }
+
+    /// The one permitted update on a posted line (§4): stamps `cleared_at`.
+    pub fn clear_journal_line(
+        &self,
+        company: &str,
+        entry_id: &str,
+        line_no: i64,
+        now: DateTime<Utc>,
+    ) -> Result<(), LedgerError> {
+        let changed = self.connection.execute(
+            "UPDATE journal_lines SET cleared_at = ?4
+             WHERE company_id = ?1 AND entry_id = ?2 AND line_no = ?3",
+            params![company, entry_id, line_no, now.to_rfc3339()],
+        )?;
+        if changed == 0 {
+            return Err(LedgerError::NotFound);
+        }
+        Ok(())
+    }
+
+    pub fn is_line_cleared(
+        &self,
+        company: &str,
+        entry_id: &str,
+        line_no: i64,
+    ) -> Result<bool, LedgerError> {
+        let cleared: Option<Option<String>> = self
+            .connection
+            .query_row(
+                "SELECT cleared_at FROM journal_lines
+                 WHERE company_id = ?1 AND entry_id = ?2 AND line_no = ?3",
+                params![company, entry_id, line_no],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()?;
+        Ok(cleared.flatten().is_some())
+    }
+
+    /// §10 match rule 2 ("exact"): posted, uncleared lines on `account` at
+    /// exactly `side`/`amount`, dated within `[from, to]`, on an entry whose
+    /// `source_type` is one of `source_types` — the design's "an unmatched
+    /// payment, deposit, bill payment, or purchase", which deliberately
+    /// excludes a Settlement entry's own bank leg so rule 3 has something
+    /// distinct to match. `source_types` is always a small internal
+    /// constant, never external input.
+    #[allow(clippy::too_many_arguments)]
+    pub fn uncleared_lines_matching(
+        &self,
+        company: &str,
+        account: &AccountId,
+        side: Side,
+        amount: Money,
+        source_types: &[&str],
+        from: NaiveDate,
+        to: NaiveDate,
+    ) -> Result<Vec<(EntryId, i64, NaiveDate)>, LedgerError> {
+        if source_types.is_empty() {
+            return Ok(Vec::new());
+        }
+        let column = match side {
+            Side::Debit => "debit_minor",
+            Side::Credit => "credit_minor",
+        };
+        let list = source_types
+            .iter()
+            .map(|kind| format!("'{kind}'"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            "SELECT l.entry_id, l.line_no, e.entry_date
+             FROM journal_lines l
+             JOIN journal_entries e ON e.company_id = l.company_id AND e.entry_id = l.entry_id
+             WHERE l.company_id = ?1 AND l.account_id = ?2 AND l.{column} = ?3
+               AND l.cleared_at IS NULL AND e.is_posted = 1
+               AND e.entry_date BETWEEN ?4 AND ?5 AND e.source_type IN ({list})
+             ORDER BY e.entry_date, l.entry_id, l.line_no"
+        );
+        let mut stmt = self.connection.prepare(&sql)?;
+        let rows = stmt
+            .query_map(
+                params![
+                    company,
+                    account.0,
+                    amount.minor(),
+                    from.to_string(),
+                    to.to_string()
+                ],
+                |row| {
+                    let entry_id: String = row.get(0)?;
+                    let line_no: i64 = row.get(1)?;
+                    let entry_date: String = row.get(2)?;
+                    Ok((entry_id, line_no, entry_date))
+                },
+            )?
+            .collect::<Result<Vec<_>, rusqlite::Error>>()?;
+        rows.into_iter()
+            .map(|(entry_id, line_no, date)| Ok((entry_id, line_no, parse_date(&date)?)))
+            .collect()
+    }
+
+    /// §10 match rule 3 ("settlement"): entries of one of `source_types`
+    /// whose credit lines on `account` (1160, in practice) sum to `amount`
+    /// for the entry, dated within `[from, to]`. `source_types` is always a
+    /// small internal constant, never external input.
+    pub fn entries_with_credit_sum(
+        &self,
+        company: &str,
+        account: &str,
+        amount: Money,
+        source_types: &[&str],
+        from: NaiveDate,
+        to: NaiveDate,
+    ) -> Result<Vec<EntryId>, LedgerError> {
+        if source_types.is_empty() {
+            return Ok(Vec::new());
+        }
+        let list = source_types
+            .iter()
+            .map(|kind| format!("'{kind}'"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            "SELECT l.entry_id
+             FROM journal_lines l
+             JOIN journal_entries e ON e.company_id = l.company_id AND e.entry_id = l.entry_id
+             WHERE l.company_id = ?1 AND l.account_id = ?2 AND e.is_posted = 1
+               AND e.entry_date BETWEEN ?3 AND ?4 AND e.source_type IN ({list})
+             GROUP BY l.entry_id
+             HAVING SUM(l.credit_minor) = ?5
+             ORDER BY l.entry_id"
+        );
+        let mut stmt = self.connection.prepare(&sql)?;
+        let rows = stmt
+            .query_map(
+                params![
+                    company,
+                    account,
+                    from.to_string(),
+                    to.to_string(),
+                    amount.minor()
+                ],
+                |row| row.get::<_, String>(0),
+            )?
+            .collect::<Result<Vec<_>, rusqlite::Error>>()?;
+        Ok(rows)
+    }
 }
 
 /// `entry_date, memo, source_type, source_id, source_version, reversal_of_id,
@@ -1445,6 +1859,48 @@ fn row_to_journal_line(row: &Row<'_>) -> rusqlite::Result<JournalLine> {
         credit: ledger_core::Money::from_minor(row.get(4)?),
         memo: row.get(5)?,
         entity,
+    })
+}
+
+fn row_to_bank_statement(row: &Row<'_>) -> rusqlite::Result<BankStatementRow> {
+    let period_start: String = row.get(2)?;
+    let period_end: String = row.get(3)?;
+    Ok(BankStatementRow {
+        statement_id: row.get(0)?,
+        account_id: AccountId(row.get(1)?),
+        period_start: period_start.parse().map_err(|_| {
+            rusqlite::Error::InvalidColumnType(
+                2,
+                "period_start".into(),
+                rusqlite::types::Type::Text,
+            )
+        })?,
+        period_end: period_end.parse().map_err(|_| {
+            rusqlite::Error::InvalidColumnType(3, "period_end".into(), rusqlite::types::Type::Text)
+        })?,
+        opening_balance: Money::from_minor(row.get(4)?),
+        closing_balance: Money::from_minor(row.get(5)?),
+        imported_at: row.get(6)?,
+        closed_at: row.get(7)?,
+    })
+}
+
+fn row_to_bank_line(row: &Row<'_>) -> rusqlite::Result<BankLineRow> {
+    let posted_on: String = row.get(3)?;
+    Ok(BankLineRow {
+        line_id: row.get(0)?,
+        statement_id: row.get(1)?,
+        account_id: AccountId(row.get(2)?),
+        posted_on: posted_on.parse().map_err(|_| {
+            rusqlite::Error::InvalidColumnType(3, "posted_on".into(), rusqlite::types::Type::Text)
+        })?,
+        amount: Money::from_minor(row.get(4)?),
+        description: row.get(5)?,
+        external_id: row.get(6)?,
+        matched_entry_id: row.get(7)?,
+        matched_line_no: row.get(8)?,
+        match_kind: row.get(9)?,
+        matched_at: row.get(10)?,
     })
 }
 

@@ -14,10 +14,11 @@ use chrono::{NaiveDate, Utc};
 use rust_decimal::Decimal;
 
 use ledger::accountant::{self, AdjustmentRequest, AuditRow, GlDetail};
+use ledger::bank::{self, MatchRules, NewStatement};
 use ledger::import::ImportOptions;
 use ledger::pipeline;
 use ledger::report::{self, BalanceSheet, Pnl, QboTbRow, SalesTaxLines, TierRules, TrialBalance};
-use ledger::store::{AdjustmentState, Ledger};
+use ledger::store::{AdjustmentState, Ledger, LedgerError};
 use ledger::types::{AccountId, ClassId, JournalLine, Side};
 use ledger_core::Money;
 use qbo_local::domain::RealmId;
@@ -150,6 +151,55 @@ enum Command {
         class: Option<String>,
         by: String,
     },
+    BankImport {
+        db: PathBuf,
+        company: String,
+        account: String,
+        file: PathBuf,
+        format: BankFormat,
+        profile: BankProfileName,
+        opening: Money,
+        closing: Money,
+        from: NaiveDate,
+        to: NaiveDate,
+    },
+    BankMatch {
+        db: PathBuf,
+        company: String,
+        statement: String,
+    },
+    BankConfirm {
+        db: PathBuf,
+        company: String,
+        line: String,
+        account: String,
+        class: Option<String>,
+    },
+    BankClose {
+        db: PathBuf,
+        company: String,
+        statement: String,
+    },
+    BankStatus {
+        db: PathBuf,
+        company: String,
+        statement: String,
+    },
+}
+
+/// `ledger bank import --format`. §10: the files the bank and Chase already
+/// generate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BankFormat {
+    Csv,
+    Ofx,
+}
+
+/// `ledger bank import --profile`, csv only.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BankProfileName {
+    Chase,
+    Generic,
 }
 
 const DEFAULT_TAX_RATE: &str = "0.06625";
@@ -179,6 +229,13 @@ USAGE:
     ledger adjust reject  --db PATH --company ID --id ID --by NAME --note \"...\"
     ledger reclass --db PATH --company ID --entry ID --line N --account NUMBER
                    [--class CLASS] --by NAME
+    ledger bank import  --db PATH --company ID --account NUM --file PATH
+                        [--format csv|ofx] [--profile chase|generic]
+                        --opening X --closing Y --from YYYY-MM-DD --to YYYY-MM-DD
+    ledger bank match   --db PATH --company ID --statement ID
+    ledger bank confirm --db PATH --company ID --line ID --account NUM [--class ID]
+    ledger bank close   --db PATH --company ID --statement ID
+    ledger bank status  --db PATH --company ID --statement ID
     ledger --help
 
 SUBCOMMANDS:
@@ -214,6 +271,17 @@ SUBCOMMANDS:
     reclass   Propose an adjusting entry that reclassifies one posted line
               to a different account/class (§8 \"Reclassify tool\"). Always a
               proposal — it never touches the original entry.
+    bank import   Read a CSV or OFX/QFX statement export into `bank_lines`
+                  (§10). A line whose (account, external_id) is already on
+                  file is skipped, never duplicated.
+    bank match    Run the §10 match rules over a statement's unmatched
+                  lines: exact, then settlement, then a proposal.
+    bank confirm  Post a confirmed proposal as a `BankLine` document to the
+                  given account (and optional class), and mark the line
+                  matched.
+    bank close    The per-statement close (§10): opening plus matched lines
+                  must equal closing, with nothing left unmatched.
+    bank status   Print a statement's lines: matched, and open proposals.
 
 FLAGS:
     --db PATH            Path to the SQLite ledger file.
@@ -248,10 +316,22 @@ FLAGS:
     --entry ID             Posted entry id to reclassify from (reclass only).
     --class CLASS          New class (reclass only; omit for a balance-sheet
                            account).
+    --account NUM         Bank/card account number, e.g. 1100 (bank import,
+                          bank confirm).
+    --file PATH           Statement export to read (bank import only).
+    --format csv|ofx      Statement file format, default csv (bank import).
+    --profile chase|generic  CSV column layout, default chase (bank import).
+    --opening X           Statement opening balance (bank import only).
+    --closing Y           Statement closing balance (bank import only).
+    --statement ID        Bank statement id (bank match, close, status).
+    --line ID             Bank line id (bank confirm only).
+    --class ID            Class to post the confirmed line under (bank
+                          confirm only; optional).
 
 EXIT CODES:
     0   ok
-    1   runtime error, or tbdiff found a must-match failure (§7)
+    1   runtime error, tbdiff found a must-match failure (§7), or a bank
+        statement does not close (§10)
     2   usage error (this message)
 ";
 
@@ -332,6 +412,28 @@ fn parse_decimal(raw: &str, flag: &str) -> Result<Decimal, UsageError> {
     Decimal::from_str(raw).map_err(|_| UsageError::invalid_value(flag, raw))
 }
 
+fn parse_money(raw: &str, flag: &str) -> Result<Money, UsageError> {
+    let decimal = parse_decimal(raw, flag)?;
+    ledger_core::round_money(decimal, ledger_core::RoundingPolicy::MirroredAmount)
+        .map_err(|_| UsageError::invalid_value(flag, raw))
+}
+
+fn parse_bank_format(raw: &str, flag: &str) -> Result<BankFormat, UsageError> {
+    match raw {
+        "csv" => Ok(BankFormat::Csv),
+        "ofx" => Ok(BankFormat::Ofx),
+        _ => Err(UsageError::invalid_value(flag, raw)),
+    }
+}
+
+fn parse_bank_profile(raw: &str, flag: &str) -> Result<BankProfileName, UsageError> {
+    match raw {
+        "chase" => Ok(BankProfileName::Chase),
+        "generic" => Ok(BankProfileName::Generic),
+        _ => Err(UsageError::invalid_value(flag, raw)),
+    }
+}
+
 fn parse(args: &[String]) -> Result<Command, UsageError> {
     let mut args = args.iter();
     let Some(subcommand) = args.next() else {
@@ -354,8 +456,168 @@ fn parse(args: &[String]) -> Result<Command, UsageError> {
         "export" => parse_export(args),
         "adjust" => parse_adjust(args),
         "reclass" => parse_reclass(args),
+        "bank" => parse_bank(args),
         other => Err(UsageError::unknown_subcommand(other)),
     }
+}
+
+fn parse_bank(mut args: Args<'_>) -> Result<Command, UsageError> {
+    let Some(sub) = args.next() else {
+        return Err(UsageError::new(
+            "bank requires a subcommand (import, match, confirm, close, status)",
+        ));
+    };
+    match sub.as_str() {
+        "import" => parse_bank_import(args),
+        "match" => parse_bank_match(args),
+        "confirm" => parse_bank_confirm(args),
+        "close" => parse_bank_close(args),
+        "status" => parse_bank_status(args),
+        other => Err(UsageError::unknown_subcommand(&format!("bank {other}"))),
+    }
+}
+
+#[allow(clippy::too_many_lines)]
+fn parse_bank_import(mut args: Args<'_>) -> Result<Command, UsageError> {
+    let mut db = None;
+    let mut company = None;
+    let mut account = None;
+    let mut file = None;
+    let mut format = None;
+    let mut profile = None;
+    let mut opening = None;
+    let mut closing = None;
+    let mut from = None;
+    let mut to = None;
+    while let Some(flag) = args.next() {
+        match flag.as_str() {
+            "--db" => db = Some(PathBuf::from(next_value(&mut args, "--db")?)),
+            "--company" => company = Some(next_value(&mut args, "--company")?),
+            "--account" => account = Some(next_value(&mut args, "--account")?),
+            "--file" => file = Some(PathBuf::from(next_value(&mut args, "--file")?)),
+            "--format" => {
+                format = Some(parse_bank_format(
+                    &next_value(&mut args, "--format")?,
+                    "--format",
+                )?)
+            }
+            "--profile" => {
+                profile = Some(parse_bank_profile(
+                    &next_value(&mut args, "--profile")?,
+                    "--profile",
+                )?)
+            }
+            "--opening" => {
+                opening = Some(parse_money(
+                    &next_value(&mut args, "--opening")?,
+                    "--opening",
+                )?)
+            }
+            "--closing" => {
+                closing = Some(parse_money(
+                    &next_value(&mut args, "--closing")?,
+                    "--closing",
+                )?)
+            }
+            "--from" => from = Some(parse_date(&next_value(&mut args, "--from")?, "--from")?),
+            "--to" => to = Some(parse_date(&next_value(&mut args, "--to")?, "--to")?),
+            other => return Err(UsageError::unknown_flag(other)),
+        }
+    }
+    Ok(Command::BankImport {
+        db: db.ok_or_else(|| UsageError::missing_flag("--db"))?,
+        company: company.ok_or_else(|| UsageError::missing_flag("--company"))?,
+        account: account.ok_or_else(|| UsageError::missing_flag("--account"))?,
+        file: file.ok_or_else(|| UsageError::missing_flag("--file"))?,
+        format: format.unwrap_or(BankFormat::Csv),
+        profile: profile.unwrap_or(BankProfileName::Chase),
+        opening: opening.ok_or_else(|| UsageError::missing_flag("--opening"))?,
+        closing: closing.ok_or_else(|| UsageError::missing_flag("--closing"))?,
+        from: from.ok_or_else(|| UsageError::missing_flag("--from"))?,
+        to: to.ok_or_else(|| UsageError::missing_flag("--to"))?,
+    })
+}
+
+fn parse_bank_match(mut args: Args<'_>) -> Result<Command, UsageError> {
+    let mut db = None;
+    let mut company = None;
+    let mut statement = None;
+    while let Some(flag) = args.next() {
+        match flag.as_str() {
+            "--db" => db = Some(PathBuf::from(next_value(&mut args, "--db")?)),
+            "--company" => company = Some(next_value(&mut args, "--company")?),
+            "--statement" => statement = Some(next_value(&mut args, "--statement")?),
+            other => return Err(UsageError::unknown_flag(other)),
+        }
+    }
+    Ok(Command::BankMatch {
+        db: db.ok_or_else(|| UsageError::missing_flag("--db"))?,
+        company: company.ok_or_else(|| UsageError::missing_flag("--company"))?,
+        statement: statement.ok_or_else(|| UsageError::missing_flag("--statement"))?,
+    })
+}
+
+fn parse_bank_confirm(mut args: Args<'_>) -> Result<Command, UsageError> {
+    let mut db = None;
+    let mut company = None;
+    let mut line = None;
+    let mut account = None;
+    let mut class = None;
+    while let Some(flag) = args.next() {
+        match flag.as_str() {
+            "--db" => db = Some(PathBuf::from(next_value(&mut args, "--db")?)),
+            "--company" => company = Some(next_value(&mut args, "--company")?),
+            "--line" => line = Some(next_value(&mut args, "--line")?),
+            "--account" => account = Some(next_value(&mut args, "--account")?),
+            "--class" => class = Some(next_value(&mut args, "--class")?),
+            other => return Err(UsageError::unknown_flag(other)),
+        }
+    }
+    Ok(Command::BankConfirm {
+        db: db.ok_or_else(|| UsageError::missing_flag("--db"))?,
+        company: company.ok_or_else(|| UsageError::missing_flag("--company"))?,
+        line: line.ok_or_else(|| UsageError::missing_flag("--line"))?,
+        account: account.ok_or_else(|| UsageError::missing_flag("--account"))?,
+        class,
+    })
+}
+
+fn parse_bank_close(mut args: Args<'_>) -> Result<Command, UsageError> {
+    let mut db = None;
+    let mut company = None;
+    let mut statement = None;
+    while let Some(flag) = args.next() {
+        match flag.as_str() {
+            "--db" => db = Some(PathBuf::from(next_value(&mut args, "--db")?)),
+            "--company" => company = Some(next_value(&mut args, "--company")?),
+            "--statement" => statement = Some(next_value(&mut args, "--statement")?),
+            other => return Err(UsageError::unknown_flag(other)),
+        }
+    }
+    Ok(Command::BankClose {
+        db: db.ok_or_else(|| UsageError::missing_flag("--db"))?,
+        company: company.ok_or_else(|| UsageError::missing_flag("--company"))?,
+        statement: statement.ok_or_else(|| UsageError::missing_flag("--statement"))?,
+    })
+}
+
+fn parse_bank_status(mut args: Args<'_>) -> Result<Command, UsageError> {
+    let mut db = None;
+    let mut company = None;
+    let mut statement = None;
+    while let Some(flag) = args.next() {
+        match flag.as_str() {
+            "--db" => db = Some(PathBuf::from(next_value(&mut args, "--db")?)),
+            "--company" => company = Some(next_value(&mut args, "--company")?),
+            "--statement" => statement = Some(next_value(&mut args, "--statement")?),
+            other => return Err(UsageError::unknown_flag(other)),
+        }
+    }
+    Ok(Command::BankStatus {
+        db: db.ok_or_else(|| UsageError::missing_flag("--db"))?,
+        company: company.ok_or_else(|| UsageError::missing_flag("--company"))?,
+        statement: statement.ok_or_else(|| UsageError::missing_flag("--statement"))?,
+    })
 }
 
 fn parse_init(mut args: Args<'_>) -> Result<Command, UsageError> {
@@ -912,6 +1174,43 @@ fn execute(command: Command) -> Result<ExitCode, CommandError> {
             &by,
         )
         .map(ok),
+        Command::BankImport {
+            db,
+            company,
+            account,
+            file,
+            format,
+            profile,
+            opening,
+            closing,
+            from,
+            to,
+        } => run_bank_import(
+            &db, &company, &account, &file, format, profile, opening, closing, from, to,
+        )
+        .map(ok),
+        Command::BankMatch {
+            db,
+            company,
+            statement,
+        } => run_bank_match(&db, &company, &statement).map(ok),
+        Command::BankConfirm {
+            db,
+            company,
+            line,
+            account,
+            class,
+        } => run_bank_confirm(&db, &company, &line, &account, class.as_deref()).map(ok),
+        Command::BankClose {
+            db,
+            company,
+            statement,
+        } => run_bank_close(&db, &company, &statement),
+        Command::BankStatus {
+            db,
+            company,
+            statement,
+        } => run_bank_status(&db, &company, &statement).map(ok),
     }
 }
 
@@ -1441,6 +1740,181 @@ fn run_reclass(
     )
     .map_err(runtime)?;
     print!("{}", render_adjustment(&request));
+    Ok(())
+}
+
+// -- bank -----------------------------------------------------------------
+
+#[allow(clippy::too_many_arguments)]
+fn run_bank_import(
+    db: &std::path::Path,
+    company: &str,
+    account: &str,
+    file: &std::path::Path,
+    format: BankFormat,
+    profile: BankProfileName,
+    opening: Money,
+    closing: Money,
+    from: NaiveDate,
+    to: NaiveDate,
+) -> Result<(), CommandError> {
+    let ledger = Ledger::open(db).map_err(runtime)?;
+    let text = fs::read_to_string(file).map_err(|e| runtime(format!("{}: {e}", file.display())))?;
+    let lines = match format {
+        BankFormat::Csv => {
+            let csv_profile = match profile {
+                BankProfileName::Chase => bank::CsvProfile::chase(),
+                BankProfileName::Generic => bank::CsvProfile::generic(),
+            };
+            bank::parse_csv(&text, &csv_profile).map_err(runtime)?
+        }
+        BankFormat::Ofx => bank::parse_ofx(&text).map_err(runtime)?,
+    };
+
+    let account_id = AccountId(account.to_string());
+    let statement = NewStatement {
+        period_start: from,
+        period_end: to,
+        opening_balance: opening,
+        closing_balance: closing,
+        lines,
+    };
+    let report = ledger
+        .import_statement(company, &account_id, statement, Utc::now())
+        .map_err(runtime)?;
+    println!(
+        "imported statement {} - inserted {}, skipped (duplicate) {}",
+        report.statement_id, report.inserted, report.skipped_duplicate
+    );
+    Ok(())
+}
+
+fn run_bank_match(
+    db: &std::path::Path,
+    company: &str,
+    statement: &str,
+) -> Result<(), CommandError> {
+    let ledger = Ledger::open(db).map_err(runtime)?;
+    let report = ledger
+        .match_statement(company, statement, &MatchRules::default(), Utc::now())
+        .map_err(runtime)?;
+    println!("exact matches      : {}", report.exact);
+    println!("settlement matches : {}", report.settlement);
+    println!("proposals          : {}", report.proposals.len());
+    for proposal in &report.proposals {
+        println!(
+            "  - {} -> {} ({:?}, {})",
+            proposal.line_id, proposal.suggested_account.0, proposal.kind, proposal.reason
+        );
+    }
+    Ok(())
+}
+
+fn run_bank_confirm(
+    db: &std::path::Path,
+    company: &str,
+    line: &str,
+    account: &str,
+    class: Option<&str>,
+) -> Result<(), CommandError> {
+    let ledger = Ledger::open(db).map_err(runtime)?;
+    let account_id = AccountId(account.to_string());
+    let class_id = class.map(|c| ClassId(c.to_string()));
+    let entry_id = ledger
+        .confirm_proposal(company, line, &account_id, class_id, Utc::now())
+        .map_err(runtime)?;
+    println!("confirmed {line} -> posted entry {entry_id}");
+    Ok(())
+}
+
+fn run_bank_close(
+    db: &std::path::Path,
+    company: &str,
+    statement: &str,
+) -> Result<ExitCode, CommandError> {
+    let ledger = Ledger::open(db).map_err(runtime)?;
+    match ledger.close_statement(company, statement, Utc::now()) {
+        Ok(close) => {
+            println!(
+                "closed statement {} at {}",
+                close.statement_id, close.closed_at
+            );
+            Ok(ExitCode::SUCCESS)
+        }
+        Err(LedgerError::StatementDoesNotClose {
+            difference,
+            unmatched,
+        }) => {
+            println!(
+                "statement {statement} does not close: off by {} with {unmatched} unmatched line(s)",
+                fmt_money(difference)
+            );
+            Ok(ExitCode::from(1))
+        }
+        Err(err) => Err(runtime(err)),
+    }
+}
+
+fn run_bank_status(
+    db: &std::path::Path,
+    company: &str,
+    statement: &str,
+) -> Result<(), CommandError> {
+    let ledger = Ledger::open(db).map_err(runtime)?;
+    let lines = ledger
+        .list_bank_lines(company, statement)
+        .map_err(runtime)?;
+
+    println!("BANK STATEMENT   {statement}\n");
+    println!(
+        "{:<38}{:<12}{:>12}  {:<10}description",
+        "line", "posted", "amount", "match"
+    );
+    for line in &lines {
+        println!(
+            "{:<38}{:<12}{:>12}  {:<10}{}",
+            line.line_id,
+            line.posted_on,
+            fmt_money(line.amount),
+            line.match_kind.as_deref().unwrap_or("unmatched"),
+            line.description,
+        );
+    }
+
+    let matched = lines
+        .iter()
+        .filter(|line| {
+            matches!(
+                line.match_kind.as_deref(),
+                Some("exact") | Some("settlement") | Some("manual")
+            )
+        })
+        .count();
+    let proposed: Vec<_> = lines
+        .iter()
+        .filter(|line| line.match_kind.as_deref() == Some("proposed"))
+        .collect();
+    let unresolved = lines
+        .iter()
+        .filter(|line| line.match_kind.is_none())
+        .count();
+    println!(
+        "\nmatched: {matched}   proposals: {}   unresolved (not yet matched): {unresolved}",
+        proposed.len()
+    );
+
+    if !proposed.is_empty() {
+        println!("\nPROPOSALS:");
+        for line in proposed {
+            let (account, reason) = bank::suggest_account(&line.description);
+            println!(
+                "  - {} {} suggests {} ({reason})",
+                line.line_id,
+                fmt_money(line.amount),
+                account.0
+            );
+        }
+    }
     Ok(())
 }
 
