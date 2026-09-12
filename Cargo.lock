@@ -371,7 +371,18 @@ dependencies = [
 name = "ledger"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "ledger-core",
+ "proptest",
+ "qbo-local",
+ "rusqlite",
+ "rust_decimal",
+ "rust_decimal_macros",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "uuid",
 ]
 
 [[package]]
