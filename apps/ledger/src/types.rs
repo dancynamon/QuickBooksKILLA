@@ -227,6 +227,19 @@ pub struct JournalLine {
     pub credit: Money,
     pub memo: Option<String>,
     pub entity: Option<ContactRef>,
+    /// §9 line E: whether the document line this leg came from was marked
+    /// taxable. `false` for every balance-sheet leg and every leg `post`
+    /// builds outside `revenue_legs`'s Item/Shipping lines — only an income
+    /// leg carries this at all.
+    pub is_taxable: bool,
+    /// This line's own share of the document's tax (`amount × rate`,
+    /// `RoundingPolicy::TaxCalculation`), so B can be proven line by line
+    /// (`LEDGER-DESIGN.md` §9). `None` when the line is not taxable or the
+    /// document carries no tax.
+    pub tax_amount: Option<Money>,
+    /// The rate in force on the document's `txn_date`, alongside
+    /// `tax_amount`. `None` under the same conditions as `tax_amount`.
+    pub tax_rate: Option<Decimal>,
 }
 
 impl JournalLine {
@@ -239,6 +252,9 @@ impl JournalLine {
             credit: Money::ZERO,
             memo: None,
             entity: None,
+            is_taxable: false,
+            tax_amount: None,
+            tax_rate: None,
         }
     }
 
@@ -251,6 +267,9 @@ impl JournalLine {
             credit: amount,
             memo: None,
             entity: None,
+            is_taxable: false,
+            tax_amount: None,
+            tax_rate: None,
         }
     }
 
@@ -261,6 +280,21 @@ impl JournalLine {
 
     pub fn with_entity(mut self, entity: Option<ContactRef>) -> Self {
         self.entity = entity;
+        self
+    }
+
+    /// §9 line E: attach per-line taxability and this line's own share of
+    /// the document's tax. `debit`/`credit` leave these at `false`/`None`;
+    /// only `crate::post`'s income legs (4100/4300) call this.
+    pub fn with_tax(
+        mut self,
+        is_taxable: bool,
+        tax_amount: Option<Money>,
+        tax_rate: Option<Decimal>,
+    ) -> Self {
+        self.is_taxable = is_taxable;
+        self.tax_amount = tax_amount;
+        self.tax_rate = tax_rate;
         self
     }
 }
@@ -323,6 +357,9 @@ impl JournalEntry {
                     credit: line.debit,
                     memo: line.memo.clone(),
                     entity: line.entity.clone(),
+                    is_taxable: line.is_taxable,
+                    tax_amount: line.tax_amount,
+                    tax_rate: line.tax_rate,
                 })
                 .collect(),
         }

@@ -415,13 +415,19 @@ pub struct SalesTaxLines {
     pub b_tax_collected: Money,
     pub c_taxable_sales: Money,
     pub d_nontaxable_sales: Money,
-    /// `None`: `journal_lines` carries no per-line taxable-amount today —
-    /// §9 line E needs `is_taxable` and an extended amount captured on the
-    /// posted line, which this schema does not yet have (`LEDGER-DESIGN.md`
-    /// §9 "What the line level data needs"). Once a line carries that, this
-    /// becomes `Sum(line amounts where is_taxable)` over the same quarter.
+    /// §9 line E: credits less debits on 4xxx (income) lines marked
+    /// `is_taxable`, for the quarter — `journal_lines.is_taxable` (D23) is
+    /// what makes this computable at all; before it, `crate::post` had
+    /// nowhere to record which posted line came from a taxable document
+    /// line. Always `Some` now that the schema carries it; kept as an
+    /// `Option` because a caller reading a pre-D23 ledger row is a real
+    /// distinction worth typing for, not because this report can produce
+    /// `None` going forward.
     pub e_line_level_taxable: Option<Money>,
-    /// `E - C`. Only computable once `e_line_level_taxable` is `Some`.
+    /// `E - C`, `Some` alongside `e_line_level_taxable`. §9: a non-zero
+    /// variance here is *expected* whenever C is derived from a rounded B
+    /// (D23) rather than a bug to chase to zero on its own — it is the
+    /// number Dan checks before filing, not one that must always read zero.
     pub variance: Option<Money>,
     /// ST-50 lines 1 through 3: `(1, A)`, `(2, D)`, `(3, C)`.
     pub st50: [(u8, Money); 3],
@@ -443,16 +449,40 @@ pub fn sales_tax_lines(
     let b_dollars = Decimal::new(b.minor(), 2);
     let c = round_money(b_dollars / rate, RoundingPolicy::LineExtension)?;
     let d = a.checked_sub(c)?;
+    let e = line_level_taxable(ledger, company, from, to)?;
+    let variance = e.checked_sub(c)?;
 
     Ok(SalesTaxLines {
         a_total_income: a,
         b_tax_collected: b,
         c_taxable_sales: c,
         d_nontaxable_sales: d,
-        e_line_level_taxable: None,
-        variance: None,
+        e_line_level_taxable: Some(e),
+        variance: Some(variance),
         st50: [(1, a), (2, d), (3, c)],
     })
+}
+
+/// §9 line E: credits less debits on 4xxx (income) lines marked
+/// `is_taxable`, for the quarter — from the document lines themselves rather
+/// than from the tax account C is derived from.
+fn line_level_taxable(
+    ledger: &Ledger,
+    company: &str,
+    from: NaiveDate,
+    to: NaiveDate,
+) -> Result<Money, LedgerError> {
+    let (debit_minor, credit_minor): (i64, i64) = ledger.conn().query_row(
+        "SELECT COALESCE(SUM(l.debit_minor), 0), COALESCE(SUM(l.credit_minor), 0)
+         FROM journal_lines l
+         JOIN journal_entries e ON e.company_id = l.company_id AND e.entry_id = l.entry_id
+         JOIN accounts a ON a.company_id = l.company_id AND a.account_id = l.account_id
+         WHERE l.company_id = ?1 AND e.is_posted = 1 AND e.entry_date BETWEEN ?2 AND ?3
+           AND a.classification = 'Income' AND l.is_taxable = 1",
+        params![company, from.to_string(), to.to_string()],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    Ok(Money::from_minor(credit_minor).checked_sub(Money::from_minor(debit_minor))?)
 }
 
 fn quarter_bounds(year: i32, q: u32) -> (NaiveDate, NaiveDate) {

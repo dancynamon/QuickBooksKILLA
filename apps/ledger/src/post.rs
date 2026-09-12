@@ -36,7 +36,7 @@ use ledger_core::{round_money, Money, MoneyError, RoundingPolicy};
 use crate::chart;
 use crate::types::{
     AccountId, ClassId, ContactRef, DocKind, DocLine, ItemAccounts, JournalEntry, JournalLine,
-    LedgerDocument, LineKind, PostingContext, Side,
+    LedgerDocument, LineKind, PostingContext, Side, TaxDetail,
 };
 
 /// What [`post`] produces. Estimates and purchase orders are the contract,
@@ -126,6 +126,29 @@ struct Leg {
     entity: Option<ContactRef>,
     side: Side,
     amount: Money,
+    /// §9 line E, carried through to the [`JournalLine`] this leg becomes.
+    /// `false`/`None` for everything but an income leg `revenue_legs` builds
+    /// from an Item or Shipping line — see [`Leg::with_tax`].
+    is_taxable: bool,
+    tax_amount: Option<Money>,
+    tax_rate: Option<Decimal>,
+}
+
+impl Leg {
+    /// Attaches §9 line-E taxability to an income leg: the document line's
+    /// own `is_taxable`, and this line's share of the document's tax
+    /// (`None` unless the line is taxable and the document carries tax).
+    fn with_tax(
+        mut self,
+        is_taxable: bool,
+        tax_amount: Option<Money>,
+        tax_rate: Option<Decimal>,
+    ) -> Self {
+        self.is_taxable = is_taxable;
+        self.tax_amount = tax_amount;
+        self.tax_rate = tax_rate;
+        self
+    }
 }
 
 fn debit(
@@ -140,6 +163,9 @@ fn debit(
         entity,
         side: Side::Debit,
         amount,
+        is_taxable: false,
+        tax_amount: None,
+        tax_rate: None,
     }
 }
 
@@ -155,7 +181,30 @@ fn credit(
         entity,
         side: Side::Credit,
         amount,
+        is_taxable: false,
+        tax_amount: None,
+        tax_rate: None,
     }
+}
+
+/// §9: this line's own share of the document's tax (`amount × rate`,
+/// rounded as a tax calculation) paired with the rate that produced it, or
+/// `None` when the line is not taxable or the document carries no tax at
+/// all. A non-taxable line contributed nothing to the tax total, so it has
+/// no share to attribute.
+fn line_tax(
+    line: &DocLine,
+    tax: Option<&TaxDetail>,
+) -> Result<Option<(Money, Decimal)>, PostError> {
+    if !line.is_taxable {
+        return Ok(None);
+    }
+    let Some(tax) = tax else {
+        return Ok(None);
+    };
+    let amount = Decimal::new(line.amount.minor(), 2);
+    let extended = round_money(amount * tax.rate, RoundingPolicy::TaxCalculation)?;
+    Ok(Some((extended, tax.rate)))
 }
 
 fn acct(number: &str) -> AccountId {
@@ -292,7 +341,15 @@ fn revenue_legs(
                 let item = lookup_item(ctx, &line.item_id)?;
                 let account = acct(chart::SALES_INCOME);
                 let class = class_for(line, item, header, &account)?;
-                legs.push(credit(account, line.amount, class.clone(), None));
+                let (tax_amount, tax_rate) = match line_tax(line, doc.tax.as_ref())? {
+                    Some((amount, rate)) => (Some(amount), Some(rate)),
+                    None => (None, None),
+                };
+                legs.push(credit(account, line.amount, class.clone(), None).with_tax(
+                    line.is_taxable,
+                    tax_amount,
+                    tax_rate,
+                ));
                 total = total.checked_add(line.amount)?;
                 post_inventory_cogs(&mut legs, line, item, class)?;
             }
@@ -300,7 +357,15 @@ fn revenue_legs(
                 let item = lookup_item(ctx, &line.item_id)?;
                 let account = acct(chart::SHIPPING_INCOME);
                 let class = class_for(line, item, header, &account)?;
-                legs.push(credit(account, line.amount, class, None));
+                let (tax_amount, tax_rate) = match line_tax(line, doc.tax.as_ref())? {
+                    Some((amount, rate)) => (Some(amount), Some(rate)),
+                    None => (None, None),
+                };
+                legs.push(credit(account, line.amount, class, None).with_tax(
+                    line.is_taxable,
+                    tax_amount,
+                    tax_rate,
+                ));
                 total = total.checked_add(line.amount)?;
             }
             LineKind::Discount => {
@@ -691,6 +756,9 @@ fn post_journal_entry(doc: &LedgerDocument) -> Result<Vec<Leg>, PostError> {
             entity: line.entity.clone(),
             side,
             amount: line.amount,
+            is_taxable: false,
+            tax_amount: None,
+            tax_rate: None,
         });
     }
 
@@ -783,11 +851,16 @@ fn post_settlement(doc: &LedgerDocument, ctx: &PostingContext) -> Result<Vec<Leg
     Ok(legs)
 }
 
-/// Merges legs sharing an (account, class, entity, side) key into one
-/// [`JournalLine`] and numbers what remains from 1. Linear rather than
-/// hashed: a posted entry has at most a handful of distinct legs, and
-/// [`ContactRef`] carries no [`std::hash::Hash`] impl by design (it is not
-/// used as a map key anywhere else in this crate either).
+/// Merges legs sharing an (account, class, entity, side, is_taxable) key
+/// into one [`JournalLine`] and numbers what remains from 1. `is_taxable` is
+/// in the key alongside the rest (§9 line E): two Item lines of the same
+/// class still merge when both are taxable or both are not, but a taxable
+/// and a non-taxable line on the same account and class stay two lines, so
+/// the taxable one's flag and its tax share are never averaged away into an
+/// untaxed sibling's. Linear rather than hashed: a posted entry has at most
+/// a handful of distinct legs, and [`ContactRef`] carries no
+/// [`std::hash::Hash`] impl by design (it is not used as a map key anywhere
+/// else in this crate either).
 fn merge_legs(legs: Vec<Leg>) -> Result<Vec<JournalLine>, PostError> {
     let mut merged: Vec<Leg> = Vec::new();
     for leg in legs {
@@ -799,8 +872,17 @@ fn merge_legs(legs: Vec<Leg>) -> Result<Vec<JournalLine>, PostError> {
                 && existing.class == leg.class
                 && existing.entity == leg.entity
                 && existing.side == leg.side
+                && existing.is_taxable == leg.is_taxable
         }) {
-            Some(existing) => existing.amount = existing.amount.checked_add(leg.amount)?,
+            Some(existing) => {
+                existing.amount = existing.amount.checked_add(leg.amount)?;
+                existing.tax_amount = match (existing.tax_amount, leg.tax_amount) {
+                    (Some(a), Some(b)) => Some(a.checked_add(b)?),
+                    (Some(a), None) => Some(a),
+                    (None, tax_amount) => tax_amount,
+                };
+                existing.tax_rate = existing.tax_rate.or(leg.tax_rate);
+            }
             None => merged.push(leg),
         }
     }
@@ -817,6 +899,7 @@ fn merge_legs(legs: Vec<Leg>) -> Result<Vec<JournalLine>, PostError> {
         };
         line.class = leg.class;
         line.entity = leg.entity;
+        line = line.with_tax(leg.is_taxable, leg.tax_amount, leg.tax_rate);
         lines.push(line);
         line_no += 1;
     }

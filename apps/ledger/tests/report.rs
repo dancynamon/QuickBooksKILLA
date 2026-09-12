@@ -9,11 +9,12 @@
 
 use chrono::{DateTime, NaiveDate, Utc};
 use ledger::chart;
+use ledger::post::{post as post_doc, Posting};
 use ledger::report::{self, QboTbRow, Tier, TierRules};
 use ledger::store::{CommandMeta, DocumentVersionId, Ledger};
 use ledger::types::{
     AccountId, Application, ClassId, ContactKind, ContactRef, DocKind, DocLine, JournalEntry,
-    JournalLine, LedgerDocument, LineKind,
+    JournalLine, LedgerDocument, LineKind, PostingConfig, PostingContext, TaxDetail,
 };
 use ledger_core::Money;
 use rust_decimal_macros::dec;
@@ -343,8 +344,11 @@ fn sales_tax_lines_reproduces_a_b_c_d_and_the_st50_mapping() {
     assert_eq!(lines.b_tax_collected, Money::from_minor(6625));
     assert_eq!(lines.c_taxable_sales, Money::from_minor(100000));
     assert_eq!(lines.d_nontaxable_sales, Money::from_minor(50000));
-    assert_eq!(lines.e_line_level_taxable, None);
-    assert_eq!(lines.variance, None);
+    // Neither fixture invoice's lines were posted with `is_taxable` set (they
+    // are built by hand, straight to `post_entry`, not through `post::post`),
+    // so E is zero and the variance against C is the whole of C.
+    assert_eq!(lines.e_line_level_taxable, Some(Money::ZERO));
+    assert_eq!(lines.variance, Some(Money::from_minor(-100000)));
     assert_eq!(
         lines.st50,
         [
@@ -420,4 +424,130 @@ fn tb_diff_flags_a_must_tier_delta_accepts_ar_as_1200_plus_2300_and_skips_3950()
         "3950 must be excluded from the total-equity comparison"
     );
     assert_eq!(equity_row.tier, Tier::Must);
+}
+
+// ---------------------------------------------------------------------------
+// §9 line E: per-line taxability, posted through `post::post` itself rather
+// than hand-built entries, then read back from the store and reported on.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn per_line_taxability_persists_and_drives_sales_tax_line_e() {
+    let ledger = Ledger::open_in_memory().unwrap();
+    ledger
+        .create_company("aquamentor", "Aquamentor LLC", None, now())
+        .unwrap();
+
+    let doc = LedgerDocument {
+        document_id: "inv-tax-1".to_string(),
+        kind: DocKind::Invoice,
+        number: Some("INV-TAX-1".to_string()),
+        txn_date: ymd(2026, 4, 15),
+        due_date: None,
+        contact: Some(ContactRef {
+            kind: ContactKind::Customer,
+            id: "cust-1".to_string(),
+        }),
+        header_class: None,
+        lines: vec![
+            // A taxable $1,000.00 foam sale.
+            DocLine {
+                line_no: 1,
+                kind: LineKind::Item,
+                amount: Money::from_minor(100000),
+                class: Some(ClassId("foam".to_string())),
+                item_id: None,
+                account: None,
+                is_taxable: true,
+                qty: None,
+                unit_cost: None,
+                description: Some("taxable foam sale".to_string()),
+                posting: None,
+                entity: None,
+            },
+            // A $500.00 out-of-state exempt chair sale on the same invoice.
+            DocLine {
+                line_no: 2,
+                kind: LineKind::Item,
+                amount: Money::from_minor(50000),
+                class: Some(ClassId("chair".to_string())),
+                item_id: None,
+                account: None,
+                is_taxable: false,
+                qty: None,
+                unit_cost: None,
+                description: Some("exempt chair sale".to_string()),
+                posting: None,
+                entity: None,
+            },
+        ],
+        tax: Some(TaxDetail {
+            total_tax: Money::from_minor(6625),
+            taxable_base: Money::from_minor(100000),
+            rate: dec!(0.06625),
+        }),
+        deposit_to: None,
+        pay_from: None,
+        applications: Vec::<Application>::new(),
+        unapplied: Money::ZERO,
+        is_voided: false,
+        source_ref: None,
+        memo: None,
+    };
+
+    let version = ledger
+        .save_document(
+            "aquamentor",
+            &doc,
+            CommandMeta {
+                actor_id: "dan".to_string(),
+                kind: "save_invoice".to_string(),
+                hlc: "hlc-1".to_string(),
+            },
+            now(),
+        )
+        .unwrap();
+
+    let ctx = PostingContext {
+        items: Default::default(),
+        customers: Default::default(),
+        config: PostingConfig::default(),
+    };
+    let Posting::Entry(entry) = post_doc(&doc, version.version, &ctx).unwrap() else {
+        panic!("an invoice with lines always posts an entry");
+    };
+    ledger.post_entry("aquamentor", &entry, now()).unwrap();
+
+    // The persisted 4100 lines each carry their own flags: the taxable line
+    // its share of the tax and the rate, the exempt one neither.
+    let for_doc = ledger
+        .entries_for_document("aquamentor", "inv-tax-1")
+        .unwrap();
+    assert_eq!(for_doc.len(), 1);
+    let stored = &for_doc[0].1;
+
+    let taxable_line = stored
+        .lines
+        .iter()
+        .find(|line| line.class.as_ref().map(|c| c.0.as_str()) == Some("foam"))
+        .expect("the taxable line's own 4100 line");
+    assert!(taxable_line.is_taxable);
+    assert_eq!(taxable_line.tax_amount, Some(Money::from_minor(6625)));
+    assert_eq!(taxable_line.tax_rate, Some(dec!(0.06625)));
+
+    let exempt_line = stored
+        .lines
+        .iter()
+        .find(|line| line.class.as_ref().map(|c| c.0.as_str()) == Some("chair"))
+        .expect("the exempt line's own 4100 line");
+    assert!(!exempt_line.is_taxable);
+    assert_eq!(exempt_line.tax_amount, None);
+    assert_eq!(exempt_line.tax_rate, None);
+
+    // §9 line E: only the taxable line's amount counts, and it matches C
+    // exactly here because B was computed from the same $1,000.00 base.
+    let lines = report::sales_tax_lines(&ledger, "aquamentor", (2026, 2), dec!(0.06625)).unwrap();
+    assert_eq!(lines.e_line_level_taxable, Some(Money::from_minor(100000)));
+    assert_eq!(lines.c_taxable_sales, Money::from_minor(100000));
+    assert_eq!(lines.variance, Some(Money::ZERO));
 }

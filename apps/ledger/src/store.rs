@@ -6,10 +6,12 @@
 //! check first". [`Ledger`] owns the [`rusqlite::Connection`]; nothing outside
 //! this module can issue raw SQL against it.
 
+use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use chrono::{DateTime, NaiveDate, Utc};
 use rusqlite::{params, Connection, OptionalExtension, Row};
+use rust_decimal::Decimal;
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -57,10 +59,11 @@ pub struct Migration {
     pub sql: &'static str,
 }
 
-pub const MIGRATIONS: &[Migration] = &[Migration {
-    version: 1,
-    name: "initial ledger schema",
-    sql: r#"
+pub const MIGRATIONS: &[Migration] = &[
+    Migration {
+        version: 1,
+        name: "initial ledger schema",
+        sql: r#"
 CREATE TABLE companies (
     company_id        TEXT PRIMARY KEY,
     display_name      TEXT NOT NULL,
@@ -263,7 +266,48 @@ BEGIN
     SELECT RAISE(ABORT, 'posted journal line cannot be deleted');
 END;
 "#,
-}];
+    },
+    Migration {
+        version: 2,
+        name: "line-level taxability on journal_lines (§9 line E)",
+        sql: r#"
+ALTER TABLE journal_lines ADD COLUMN is_taxable INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE journal_lines ADD COLUMN tax_amount_minor INTEGER;
+ALTER TABLE journal_lines ADD COLUMN tax_rate TEXT;
+
+-- Migration 1's immutability trigger predates these columns; replaced here
+-- (never edited in place, D "never edit one that has shipped") so a posted
+-- line's tax fields are covered by the same immutability guarantee as
+-- everything but cleared_at.
+DROP TRIGGER trg_journal_lines_no_edit_when_posted;
+
+CREATE TRIGGER trg_journal_lines_no_edit_when_posted
+BEFORE UPDATE ON journal_lines
+FOR EACH ROW
+WHEN (
+    NEW.line_no          IS NOT OLD.line_no OR
+    NEW.account_id       IS NOT OLD.account_id OR
+    NEW.class_id         IS NOT OLD.class_id OR
+    NEW.debit_minor      IS NOT OLD.debit_minor OR
+    NEW.credit_minor     IS NOT OLD.credit_minor OR
+    NEW.memo             IS NOT OLD.memo OR
+    NEW.entity_type      IS NOT OLD.entity_type OR
+    NEW.entity_id        IS NOT OLD.entity_id OR
+    NEW.is_taxable       IS NOT OLD.is_taxable OR
+    NEW.tax_amount_minor IS NOT OLD.tax_amount_minor OR
+    NEW.tax_rate         IS NOT OLD.tax_rate
+) AND EXISTS (
+    SELECT 1 FROM journal_entries e
+    WHERE e.company_id = OLD.company_id
+      AND e.entry_id   = OLD.entry_id
+      AND e.is_posted  = 1
+)
+BEGIN
+    SELECT RAISE(ABORT, 'posted journal line is immutable except cleared_at');
+END;
+"#,
+    },
+];
 
 pub fn latest_version() -> i64 {
     MIGRATIONS.iter().map(|m| m.version).max().unwrap_or(0)
@@ -416,9 +460,16 @@ impl Ledger {
     // Chart of accounts and classes (§2, §3)
     // -----------------------------------------------------------------------
 
-    /// Seeds a new company with [`chart::seed_chart`] and its class list.
+    /// Seeds a company with [`chart::seed_chart`] and its class list.
     /// `"aquamentor"` gets [`chart::AQUAMENTOR_CLASSES`], `"waterline"` gets
     /// [`chart::WATERLINE_CLASSES`]; any other id gets the Aquamentor list.
+    ///
+    /// Idempotent: a second call for a `company` id that already exists
+    /// updates `display_name` and `realm_id` (never `created_at`) rather than
+    /// erroring, and every seeded account and class is inserted only if it is
+    /// not already there — an existing row's `source_ref`, `is_contra`, or
+    /// anything else a prior `ledger import` run may have set is never
+    /// touched by a re-run of `init`.
     pub fn create_company(
         &self,
         company: &str,
@@ -430,7 +481,10 @@ impl Ledger {
 
         tx.execute(
             "INSERT INTO companies (company_id, display_name, realm_id, created_at)
-             VALUES (?1, ?2, ?3, ?4)",
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(company_id) DO UPDATE SET
+                 display_name = excluded.display_name,
+                 realm_id     = excluded.realm_id",
             params![company, display_name, realm_id, now.to_rfc3339()],
         )?;
 
@@ -444,7 +498,8 @@ impl Ledger {
                 "INSERT INTO accounts
                      (company_id, account_id, number, name, classification, subtype,
                       parent_id, normal_balance, is_contra, is_active, needs_mapping, source_ref)
-                 VALUES (?1, ?2, ?2, ?3, ?4, NULL, NULL, ?5, ?6, 1, 0, NULL)",
+                 VALUES (?1, ?2, ?2, ?3, ?4, NULL, NULL, ?5, ?6, 1, 0, NULL)
+                 ON CONFLICT(company_id, account_id) DO NOTHING",
                 params![
                     company,
                     seed.number,
@@ -464,7 +519,8 @@ impl Ledger {
         for (id, name) in classes {
             tx.execute(
                 "INSERT INTO classes (company_id, class_id, name, parent_id, is_active, source_ref)
-                 VALUES (?1, ?2, ?3, NULL, 1, NULL)",
+                 VALUES (?1, ?2, ?3, NULL, 1, NULL)
+                 ON CONFLICT(company_id, class_id) DO NOTHING",
                 params![company, id, name],
             )?;
         }
@@ -805,6 +861,21 @@ impl Ledger {
             .map_err(LedgerError::from)
     }
 
+    /// The number of versions saved for `document_id` — most directly useful
+    /// for proving a pipeline re-run's skip-when-unchanged path did not add
+    /// one (`LEDGER-DESIGN.md` §6).
+    pub fn document_version_count(
+        &self,
+        company: &str,
+        document_id: &str,
+    ) -> Result<i64, LedgerError> {
+        Ok(self.connection.query_row(
+            "SELECT COUNT(*) FROM document_versions WHERE company_id = ?1 AND document_id = ?2",
+            params![company, document_id],
+            |row| row.get(0),
+        )?)
+    }
+
     pub fn oplog_len(&self, company: &str) -> Result<i64, LedgerError> {
         Ok(self.connection.query_row(
             "SELECT COUNT(*) FROM oplog WHERE company_id = ?1",
@@ -869,8 +940,9 @@ impl Ledger {
             tx.execute(
                 "INSERT INTO journal_lines
                      (company_id, entry_id, line_no, account_id, class_id, debit_minor,
-                      credit_minor, memo, entity_type, entity_id, cleared_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, NULL)",
+                      credit_minor, memo, entity_type, entity_id, cleared_at,
+                      is_taxable, tax_amount_minor, tax_rate)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, NULL, ?11, ?12, ?13)",
                 params![
                     company,
                     entry_id,
@@ -882,6 +954,9 @@ impl Ledger {
                     line.memo,
                     line.entity.as_ref().map(|e| contact_kind_str(e.kind)),
                     line.entity.as_ref().map(|e| e.id.clone()),
+                    i64::from(line.is_taxable),
+                    line.tax_amount.map(|amount| amount.minor()),
+                    line.tax_rate.map(|rate| rate.to_string()),
                 ],
             )?;
         }
@@ -957,7 +1032,7 @@ impl Ledger {
 
         let mut stmt = self.connection.prepare(
             "SELECT line_no, account_id, class_id, debit_minor, credit_minor, memo,
-                    entity_type, entity_id
+                    entity_type, entity_id, is_taxable, tax_amount_minor, tax_rate
              FROM journal_lines WHERE company_id = ?1 AND entry_id = ?2 ORDER BY line_no",
         )?;
         let lines = stmt
@@ -1063,6 +1138,20 @@ fn row_to_journal_line(row: &Row<'_>) -> rusqlite::Result<JournalLine> {
         }),
         _ => None,
     };
+    let is_taxable: i64 = row.get(8)?;
+    let tax_amount: Option<i64> = row.get(9)?;
+    let tax_rate_raw: Option<String> = row.get(10)?;
+    let tax_rate = tax_rate_raw
+        .map(|raw| {
+            Decimal::from_str(&raw).map_err(|_| {
+                rusqlite::Error::InvalidColumnType(
+                    10,
+                    "tax_rate".into(),
+                    rusqlite::types::Type::Text,
+                )
+            })
+        })
+        .transpose()?;
 
     Ok(JournalLine {
         line_no: row.get(0)?,
@@ -1072,6 +1161,9 @@ fn row_to_journal_line(row: &Row<'_>) -> rusqlite::Result<JournalLine> {
         credit: ledger_core::Money::from_minor(row.get(4)?),
         memo: row.get(5)?,
         entity,
+        is_taxable: is_taxable != 0,
+        tax_amount: tax_amount.map(ledger_core::Money::from_minor),
+        tax_rate,
     })
 }
 
