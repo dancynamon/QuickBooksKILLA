@@ -549,6 +549,25 @@ impl Ledger {
             .map_err(LedgerError::from)
     }
 
+    /// Record the QBO account id on a seed-chart account the importer mapped
+    /// onto it, so the §7 trial balance diff can join the standard accounts
+    /// (1200, 2200, ...) to QBO's rows. Sets only where nothing is recorded:
+    /// a source ref, once known, is never overwritten (§2, kept forever).
+    /// Returns whether a value was written.
+    pub fn set_account_source_ref(
+        &self,
+        company: &str,
+        number: &str,
+        source_ref: &str,
+    ) -> Result<bool, LedgerError> {
+        let changed = self.connection.execute(
+            "UPDATE accounts SET source_ref = ?3
+             WHERE company_id = ?1 AND number = ?2 AND source_ref IS NULL",
+            params![company, number, source_ref],
+        )?;
+        Ok(changed == 1)
+    }
+
     pub fn list_accounts(&self, company: &str) -> Result<Vec<Account>, LedgerError> {
         let mut stmt = self.connection.prepare(&format!(
             "{ACCOUNT_COLUMNS} FROM accounts WHERE company_id = ?1 ORDER BY number"

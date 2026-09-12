@@ -277,6 +277,31 @@ fn materialize_accounts(
             needs_mapping.push(format!("{} {}", mapped.ledger_number.0, mapped.name));
         }
         if existing.contains(&mapped.ledger_number.0) {
+            // A seed-chart account the mapping landed on: give it the QBO id
+            // so the §7 diff can join it. First writer wins; a second QBO
+            // account mapped onto the same number is a mapping to review,
+            // and it is reported rather than silently taking the slot.
+            if !ledger.set_account_source_ref(
+                company,
+                &mapped.ledger_number.0,
+                &mapped.source_ref,
+            )? && !mapped.needs_mapping
+            {
+                let current = ledger
+                    .list_accounts(company)?
+                    .into_iter()
+                    .find(|account| account.number == mapped.ledger_number.0)
+                    .and_then(|account| account.source_ref);
+                if current.as_deref() != Some(mapped.source_ref.as_str()) {
+                    needs_mapping.push(format!(
+                        "{} {} (QBO {} also maps here; {} holds it)",
+                        mapped.ledger_number.0,
+                        mapped.name,
+                        mapped.source_ref,
+                        current.unwrap_or_default()
+                    ));
+                }
+            }
             continue;
         }
         ledger.add_account(

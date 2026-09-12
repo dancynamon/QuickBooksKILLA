@@ -394,6 +394,20 @@ fn import_replica_posts_translates_and_reports_correctly() {
         .expect("the voided invoice's entry still carries an AR line");
     assert_eq!(ar_line.credit, Money::from_minor(10_000));
     assert_eq!(ar_line.debit, Money::ZERO);
+
+    // Seed-chart accounts the mapping landed on carry the QBO id, so the §7
+    // diff can join 1200 and 1100 to QBO's rows rather than only the
+    // accounts the import had to create.
+    let ar = ledger
+        .account_by_source_ref("aquamentor", "AR1")
+        .unwrap()
+        .expect("AR1 maps onto the seed AR account");
+    assert_eq!(ar.number, "1200");
+    let bank = ledger
+        .account_by_source_ref("aquamentor", "BANK1")
+        .unwrap()
+        .expect("BANK1 maps onto the seed checking account");
+    assert_eq!(bank.number, "1100");
 }
 
 #[test]
