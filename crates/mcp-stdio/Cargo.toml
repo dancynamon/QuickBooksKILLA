@@ -1,0 +1,8 @@
+[package]
+name = "mcp-stdio"
+version = "0.1.0"
+edition.workspace = true
+description = "Hand-rolled JSON-RPC 2.0 / MCP stdio transport, shared by every MCP server in this workspace."
+
+[dependencies]
+serde_json = { workspace = true }

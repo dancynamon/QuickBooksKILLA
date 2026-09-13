@@ -6,6 +6,7 @@ description = "Local SQLite replica of QuickBooks Online with an outbox write qu
 
 [dependencies]
 ledger-core = { path = "../../crates/ledger-core" }
+mcp-stdio = { workspace = true }
 chrono = { workspace = true }
 rusqlite = { workspace = true }
 rust_decimal = { workspace = true }

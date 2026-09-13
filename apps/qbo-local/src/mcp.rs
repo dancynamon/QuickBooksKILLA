@@ -7,13 +7,13 @@
 //! [`crate::store::query`], [`crate::store::search`] and
 //! [`crate::store::lineage`].
 //!
-//! Hand-rolled JSON-RPC 2.0 over newline-delimited stdin/stdout — MCP's own
-//! stdio transport (protocol revision [`PROTOCOL_VERSION`]) — rather than an
-//! async SDK crate: one line in, one line out, `serde_json` is already a
-//! dependency, and there is no other reason for this binary to carry an async
-//! runtime. [`Server::handle_line`] is the whole protocol surface and touches
-//! no I/O itself, so it is unit-tested directly; `bin/qbo-local-mcp.rs` is the
-//! loop that gives it stdin and stdout.
+//! The JSON-RPC 2.0 / MCP stdio transport itself — line framing, error
+//! codes, `initialize`/`initialized`/`ping`/`tools/list`/`tools/call` — lives
+//! in [`mcp_stdio`] and is shared with `ledger-mcp` (`docs/MCP.md`). This
+//! module is [`QboToolSet`]: the [`mcp_stdio::ToolSet`] impl that turns a
+//! `tools/call` into a query against [`crate::store`], plus [`Server`], a
+//! thin wrapper so `bin/qbo-local-mcp.rs` and every existing caller of
+//! `qbo_local::mcp::Server` keep the same two methods they always had.
 //!
 //! Read-only by construction, not by convention:
 //! [`crate::store::Store::open_read_only`] opens the replica with SQLite's own
@@ -22,15 +22,12 @@
 use chrono::NaiveDate;
 use serde_json::{json, Value};
 
+use mcp_stdio::{ServerInfo, ToolSet};
+pub use mcp_stdio::{ToolError, ToolSpec, PROTOCOL_VERSION};
+
 use crate::domain::{ContactType, DocumentType, EntityType, RealmId};
 use crate::store::query::{Page, MAX_PAGE_LIMIT};
 use crate::store::Store;
-
-/// The MCP protocol revision this server speaks. `initialize` echoes the
-/// client's own `protocolVersion` back when it matches this; otherwise it
-/// states this one and lets the client decide whether that is workable,
-/// rather than pretending compatibility it cannot promise.
-pub const PROTOCOL_VERSION: &str = "2025-06-18";
 
 /// How many hits [`Store::search`] returns when a call omits `limit`. Small
 /// enough that an LLM caller reading the text content is not skimming past
@@ -38,151 +35,49 @@ pub const PROTOCOL_VERSION: &str = "2025-06-18";
 /// need a second call.
 const DEFAULT_SEARCH_LIMIT: usize = 20;
 
-/// A tool the server advertises through `tools/list`, in the shape MCP wants
-/// on the wire.
-#[derive(Clone, Debug)]
-pub struct ToolSpec {
-    pub name: &'static str,
-    pub description: &'static str,
-    pub input_schema: Value,
-}
-
-impl ToolSpec {
-    fn to_json(&self) -> Value {
-        json!({
-            "name": self.name,
-            "description": self.description,
-            "inputSchema": self.input_schema,
-        })
-    }
-}
-
-/// A tool-level failure: the *call* reached the server and was refused or
-/// could not be satisfied (a bad argument, an id that does not exist). This is
-/// never a JSON-RPC error — it becomes a successful `tools/call` response with
-/// `isError: true`, per the MCP spec, so the model sees the message as normal
-/// tool output rather than a transport fault.
-#[derive(Debug)]
-pub struct ToolError {
-    message: String,
-}
-
-impl ToolError {
-    fn new(message: impl Into<String>) -> Self {
-        ToolError {
-            message: message.into(),
-        }
-    }
-}
-
-/// The server: one open replica, spoken to over JSON-RPC 2.0. Owns nothing
-/// else — no client state survives a call, so `initialize` is not tracked and
-/// every method is available from the first line read.
-pub struct Server {
+/// The [`mcp_stdio::ToolSet`] over one open replica.
+struct QboToolSet {
     store: Store,
+}
+
+impl ToolSet for QboToolSet {
+    fn tools(&self) -> Vec<ToolSpec> {
+        tools()
+    }
+
+    fn call(&mut self, name: &str, args: Value) -> Result<Value, ToolError> {
+        self.call_tool(name, args)
+    }
+}
+
+/// The server: one open replica, spoken to over JSON-RPC 2.0 via
+/// [`mcp_stdio::Server`]. A thin wrapper — `new` and `handle_line` are the
+/// entire public surface, unchanged from before this module was built on the
+/// shared transport crate.
+pub struct Server {
+    inner: mcp_stdio::Server<QboToolSet>,
 }
 
 impl Server {
     pub fn new(store: Store) -> Self {
-        Server { store }
+        let info = ServerInfo {
+            name: "qbo-local",
+            version: env!("CARGO_PKG_VERSION"),
+        };
+        Server {
+            inner: mcp_stdio::Server::new(QboToolSet { store }, info),
+        }
     }
 
-    /// Handle one line of input and produce at most one line of output.
-    ///
-    /// `None` means exactly what JSON-RPC 2.0 says it means for a
-    /// notification: the caller sent a request with no `id`, and this server
-    /// must not reply — not even with an error, per spec, since there is
-    /// nothing to correlate a reply to.
+    /// Handle one line of input and produce at most one line of output. See
+    /// [`mcp_stdio::Server::handle_line`] for the framing and notification
+    /// rules this delegates to.
     pub fn handle_line(&mut self, line: &str) -> Option<String> {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            return None;
-        }
-
-        let value: Value = match serde_json::from_str(trimmed) {
-            Ok(value) => value,
-            Err(err) => {
-                return Some(error_line(
-                    Value::Null,
-                    -32700,
-                    format!("parse error: {err}"),
-                ))
-            }
-        };
-
-        let has_id = value.get("id").is_some();
-        let id = value.get("id").cloned().unwrap_or(Value::Null);
-
-        let Some(method) = value.get("method").and_then(Value::as_str) else {
-            return has_id.then(|| error_line(id, -32600, "invalid request: missing \"method\""));
-        };
-
-        if method == "notifications/initialized" {
-            return None;
-        }
-
-        let params = value.get("params").cloned().unwrap_or(Value::Null);
-
-        let outcome = match method {
-            "initialize" => Ok(self.handle_initialize(&params)),
-            "ping" => Ok(json!({})),
-            "tools/list" => Ok(handle_tools_list()),
-            "tools/call" => Ok(self.handle_tools_call(&params)),
-            other => Err((-32601, format!("method not found: {other}"))),
-        };
-
-        if !has_id {
-            // A notification for a method this server does happen to know —
-            // still no reply; JSON-RPC 2.0's "no id, no response" rule does
-            // not carve out an exception for a recognised method.
-            return None;
-        }
-
-        Some(match outcome {
-            Ok(result) => success_line(id, result),
-            Err((code, message)) => error_line(id, code, message),
-        })
+        self.inner.handle_line(line)
     }
+}
 
-    fn handle_initialize(&self, params: &Value) -> Value {
-        let requested = params.get("protocolVersion").and_then(Value::as_str);
-        let protocol_version = match requested {
-            Some(version) if version == PROTOCOL_VERSION => version.to_string(),
-            _ => PROTOCOL_VERSION.to_string(),
-        };
-        json!({
-            "protocolVersion": protocol_version,
-            "capabilities": { "tools": {} },
-            "serverInfo": {
-                "name": "qbo-local",
-                "version": env!("CARGO_PKG_VERSION"),
-            },
-        })
-    }
-
-    fn handle_tools_call(&self, params: &Value) -> Value {
-        let name = params.get("name").and_then(Value::as_str).unwrap_or("");
-        let arguments = params
-            .get("arguments")
-            .cloned()
-            .unwrap_or_else(|| json!({}));
-
-        match self.call_tool(name, arguments) {
-            Ok(result) => {
-                let text = serde_json::to_string_pretty(&result)
-                    .expect("a typed tool result always serialises");
-                json!({
-                    "content": [ { "type": "text", "text": text } ],
-                    "structuredContent": result,
-                })
-            }
-            Err(err) => json!({
-                "content": [ { "type": "text", "text": err.message } ],
-                "isError": true,
-            }),
-        }
-    }
-
+impl QboToolSet {
     /// Dispatch one `tools/call` to the query API and serialise its result.
     ///
     /// Every tool takes `realm_id` — checked first, uniformly, so a bad or
@@ -261,10 +156,6 @@ impl Server {
 
         Ok(result)
     }
-}
-
-fn handle_tools_list() -> Value {
-    json!({ "tools": tools().iter().map(ToolSpec::to_json).collect::<Vec<_>>() })
 }
 
 /// Every tool this server exposes. A free function, not a method — the list
@@ -608,28 +499,6 @@ fn to_value<T: serde::Serialize>(
 ) -> Result<Value, ToolError> {
     let value = result.map_err(store_err)?;
     Ok(serde_json::to_value(value).expect("a typed store result always serialises"))
-}
-
-// ---------------------------------------------------------------------------
-// JSON-RPC response lines
-// ---------------------------------------------------------------------------
-
-fn success_line(id: Value, result: Value) -> String {
-    serde_json::to_string(&json!({
-        "jsonrpc": "2.0",
-        "id": id,
-        "result": result,
-    }))
-    .expect("a JSON-RPC response always serialises")
-}
-
-fn error_line(id: Value, code: i64, message: impl Into<String>) -> String {
-    serde_json::to_string(&json!({
-        "jsonrpc": "2.0",
-        "id": id,
-        "error": { "code": code, "message": message.into() },
-    }))
-    .expect("a JSON-RPC response always serialises")
 }
 
 #[cfg(test)]

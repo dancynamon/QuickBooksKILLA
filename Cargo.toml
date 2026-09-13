@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/ledger-core",
+    "crates/mcp-stdio",
     "apps/qbo-local",
     "apps/ledger",
 ]
@@ -10,6 +11,7 @@ members = [
 edition = "2021"
 
 [workspace.dependencies]
+mcp-stdio = { path = "crates/mcp-stdio" }
 chrono = { version = "0.4", features = ["serde"] }
 proptest = "1"
 rusqlite = { version = "0.37", features = ["bundled", "backup"] }
