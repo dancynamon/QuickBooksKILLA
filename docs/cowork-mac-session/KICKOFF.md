@@ -60,10 +60,14 @@ push to any branch other than `claude/modest-allen-82wp1w`:
    (Reports API, accrual) into a CSV and run `ledger tbdiff`. Do not chase the
    variances; record the report verbatim in `DECISIONS.md` as the baseline the
    parallel run starts from.
-8. **Tauri shell**: `apps/desktop` holds the UI split from the prototype with
-   a provider layer; `cargo tauri dev` should open it against the live replica
-   through the `invoke` provider. If it does not build on this Mac, record the
-   exact error and stop there; the UI is M1, not M0.
+8. **Tauri shell**: read `apps/desktop/README.md`. The UI is built and
+   tested (`cd apps/desktop/ui && node --test`); `apps/desktop/commands` is
+   the whole command body; `apps/desktop/src-tauri` is the scaffold, outside
+   the workspace because it only compiles with the Tauri toolchain. Add
+   `apps/desktop/src-tauri` to the workspace members, `cargo tauri dev` with
+   `QBO_LOCAL_DB=.local/replica.db`, and every screen should show the live
+   replica through the `invoke` provider. If it does not build on this Mac,
+   record the exact error and stop there; the UI is M1, not M0.
 
 Constraints that do not relax: `realms.is_write_enabled` stays 0; no write
 path is exercised against production; secrets go to the keychain only; the

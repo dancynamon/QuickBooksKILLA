@@ -36,7 +36,7 @@ in its §13 come back answered.
 ## Build
 
 ```sh
-cargo test          # 561 tests, all offline
+cargo test          # 567 tests, all offline
 cargo clippy --all-targets
 cargo run --bin qbo-local -- --help
 cargo run --bin ledger -- --help
@@ -76,8 +76,13 @@ Built and tested:
   CI with thresholded benchmarks; the `qbo-local-mcp` and `ledger-mcp` servers
   over a shared stdio crate
 
+- `apps/desktop`: the M1 read UI split out of the prototype as ES modules
+  over a provider layer (fixture data in a browser today, Tauri `invoke`
+  on the Mac), a commands crate that is the whole Tauri command body, and the
+  Tauri v2 scaffold, compiled on the Mac only
+
 Not built yet: the keychain token backend (macOS only), the first live sync,
-the Tauri shell. See `ROADMAP.md` and `docs/cowork-mac-session/`.
+the Tauri shell compiled. See `ROADMAP.md` and `docs/cowork-mac-session/`.
 
 ## Current state — the ledger
 
