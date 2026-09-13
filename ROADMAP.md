@@ -32,7 +32,7 @@ to goal 2 rather than a detour. Three consequences run through the phases:
 
 ## 0. Where it stands
 
-`cargo test --workspace`: 567 tests, all offline, all green. Clippy clean.
+`cargo test --workspace`: 669 tests, all offline, all green. Clippy clean.
 
 Everything that can be built **without Intuit credentials** has been built:
 money and rounding, realm scoping, SQLite replica with projection and
@@ -58,7 +58,7 @@ Everything **not** built needs credentials, Intuit's docs, or a UI toolchain:
 | `LEDGER-DESIGN.md` | B | **drafted 11 Sep**; Dan's six gating items decided 12 Sep (D20, D21); Joel's sixteen open |
 | Ledger engine, import from replica | B' | **built 12 Sep**: store, posting rules, reports, importer, opening balances, boundary walk, `ledger` CLI; first real run waits on a live replica |
 | Write UI into own store, export via outbox | D | C |
-| Statement import, sales-tax reports, accountant mode, Authorize.net, MCP server | G | **statement import, the tax report and accountant mode built 12 Sep**; Authorize.net settlement import and the hosted payment link remain |
+| Statement import, sales-tax reports, accountant mode, Authorize.net, MCP server | G | **all built by 13 Sep** except the Authorize.net hosted payment link on the own invoice; nightly parallel-run command and `qbo-local report` built too |
 
 The Rust side has never made one HTTP call to Intuit. That is still the first
 thing to fix.
@@ -294,8 +294,9 @@ books in QBO, each scoped as its own item with its own acceptance:
 
 ## H. After cutover
 
-Manufacturing costing as designed in LEDGER-DESIGN.md: landed cost, build
-sheets, variance, sensitivity. Orders as a shop-floor queue. Vendor credit
+Manufacturing costing as designed in LEDGER-DESIGN.md is **built** (13 Sep,
+`apps/ledger/src/mfg`, `docs/MFG.md`); it is used in earnest only once the
+ledger is the book of record. Orders as a shop-floor queue. Vendor credit
 application and progress invoicing as the prototype shows them. WaterLine's
 realm, same code path, own budget. These are the features QBO never had and are
 the reason for goal 2; they wait only because they are worthless in a book that

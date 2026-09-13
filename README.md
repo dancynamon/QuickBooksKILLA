@@ -36,7 +36,7 @@ in its §13 come back answered.
 ## Build
 
 ```sh
-cargo test          # 567 tests, all offline
+cargo test          # 669 tests, all offline
 cargo clippy --all-targets
 cargo run --bin qbo-local -- --help
 cargo run --bin ledger -- --help
@@ -112,9 +112,22 @@ the Tauri shell compiled. See `ROADMAP.md` and `docs/cowork-mac-session/`.
   `bs`, `tax`, `close`, `reopen`, `tbdiff`, `gl`, `audit`, `export`,
   `adjust`, `reclass`, `bank import|match|confirm|close|status`
 
-Not built yet: manufacturing costing (§11), Authorize.net settlement import,
-PDF exports, the UI. `docs/BANK.md` and `docs/ACCOUNTANT.md` describe the two
-workflows.
+- §11 manufacturing costing: landed cost allocated by board-foot, build
+  sheets with yield as a divisor, builds with priced variance, sensitivity,
+  and the three posting rows that were unsupported (`docs/MFG.md`)
+- Authorize.net settlement import with fee-aware bank matching (D15,
+  `docs/AUTHNET.md`)
+- `ledger verify` (invariants sweep) and `ledger nightly` (the §E parallel-run
+  command, `docs/NIGHTLY.md`); `qbo-local report` pulls QBO's trial balance
+  and aging through the Reports API into the CSVs `tbdiff` and the boundary
+  walk read
+- `ledger-mcp` over the shared stdio crate, and the desktop app's ledger
+  screens (trial balance, P&L, balance sheet, sales tax with the ST-50
+  mapping, GL, audit trail, adjustments, bank reconciliation, period close)
+
+Not built yet: PDF exports, the Authorize.net hosted payment link, the order
+queue and progress invoicing UI. `docs/BANK.md`, `docs/ACCOUNTANT.md`,
+`docs/AUTHNET.md`, `docs/MFG.md` and `docs/NIGHTLY.md` describe the workflows.
 
 The first live authentication run should happen wherever the OAuth credentials
 already live, rather than moving them onto another machine.

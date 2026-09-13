@@ -55,11 +55,16 @@ push to any branch other than `claude/modest-allen-82wp1w`:
    is a follow-up, not this session.
 7. **The ledger's first real run**: `ledger init --db .local/ledger.db
    --company aquamentor --name Aquamentor --realm <id>`, then
-   `ledger import --replica .local/replica.db --realm <id>` and `ledger tb
-   --as-of <today>`. Pull QBO's Trial Balance report as of the same date
-   (Reports API, accrual) into a CSV and run `ledger tbdiff`. Do not chase the
-   variances; record the report verbatim in `DECISIONS.md` as the baseline the
-   parallel run starts from.
+   `ledger import --db .local/ledger.db --company aquamentor --replica
+   .local/replica.db --realm <id>` and `ledger tb --as-of <today>`. Pull
+   QBO's trial balance as of the same date with `qbo-local report --realm
+   <id> --name trial-balance --as-of <today> --out .local/qbo-tb.csv --live`
+   and run `ledger tbdiff --qbo-csv .local/qbo-tb.csv`. Then `qbo-local
+   snapshots --from-year 2012 --to-year 2025 --dir .local/snapshots --live`
+   and `ledger boundary --snapshots .local/snapshots` to find the boundary
+   year. Do not chase the variances; record both reports verbatim in
+   `DECISIONS.md` as the baseline the parallel run starts from, and install
+   the plist `ledger nightly --plist` prints (`docs/NIGHTLY.md`).
 8. **Tauri shell**: read `apps/desktop/README.md`. The UI is built and
    tested (`cd apps/desktop/ui && node --test`); `apps/desktop/commands` is
    the whole command body; `apps/desktop/src-tauri` is the scaffold, outside
