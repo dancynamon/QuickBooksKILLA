@@ -739,23 +739,112 @@ fn purchase_order_never_posts() {
 }
 
 // ---------------------------------------------------------------------
-// Manufacturing rows: designed in §11, not built yet
+// Manufacturing rows (§11): landed cost, builds, inventory adjustments.
+// `crate::mfg` puts the amounts on `Account`-kind lines, the same
+// convention Settlement uses for its own two accounts.
 // ---------------------------------------------------------------------
 
+fn account_line(no: i64, number: &str, amount_minor: i64) -> DocLine {
+    let mut docline = line(no, LineKind::Account, amount_minor);
+    docline.account = Some(acct(number));
+    docline
+}
+
 #[test]
-fn manufacturing_rows_return_unsupported() {
+fn raw_material_receipt_posts_1300_and_2050() {
     let ctx = ctx_with_items(vec![]);
-    for kind in [
-        DocKind::RawMaterialReceipt,
-        DocKind::Build,
-        DocKind::InventoryAdjustment,
-    ] {
-        let document = doc(kind);
-        assert_eq!(
-            post(&document, 1, &ctx),
-            Err(PostError::Unsupported { kind })
-        );
-    }
+    let mut receipt = doc(DocKind::RawMaterialReceipt);
+    receipt.lines = vec![
+        account_line(1, chart::INVENTORY_RAW, 47760),
+        account_line(2, chart::INVENTORY_RECEIVED_NOT_BILLED, 47760),
+    ];
+    let entry = entry_of(post(&receipt, 1, &ctx).expect("posts"));
+    assert!(entry.is_balanced());
+    let raw = find(&entry.lines, &acct(chart::INVENTORY_RAW));
+    assert_eq!(raw.debit, Money::from_minor(47760));
+    let payable = find(&entry.lines, &acct(chart::INVENTORY_RECEIVED_NOT_BILLED));
+    assert_eq!(payable.credit, Money::from_minor(47760));
+}
+
+#[test]
+fn a_build_that_ran_under_standard_credits_variance() {
+    let ctx = ctx_with_items(vec![]);
+    let mut build = doc(DocKind::Build);
+    build.header_class = Some(class("foam"));
+    build.lines = vec![
+        account_line(1, chart::INVENTORY_FINISHED, 2000),
+        account_line(2, chart::INVENTORY_RAW, 1300),
+        account_line(3, chart::PARTS_LABOUR_APPLIED, 620),
+    ];
+    let entry = entry_of(post(&build, 1, &ctx).expect("posts"));
+    assert!(entry.is_balanced());
+    let variance = find(&entry.lines, &acct(chart::MANUFACTURING_VARIANCE));
+    assert_eq!(variance.credit, Money::from_minor(80));
+    assert_eq!(variance.class, Some(class("foam")));
+}
+
+#[test]
+fn a_build_that_overran_debits_variance() {
+    let ctx = ctx_with_items(vec![]);
+    let mut build = doc(DocKind::Build);
+    build.header_class = Some(class("foam"));
+    build.lines = vec![
+        account_line(1, chart::INVENTORY_FINISHED, 2000),
+        account_line(2, chart::INVENTORY_RAW, 1700),
+        account_line(3, chart::PARTS_LABOUR_APPLIED, 620),
+    ];
+    let entry = entry_of(post(&build, 1, &ctx).expect("posts"));
+    assert!(entry.is_balanced());
+    let variance = find(&entry.lines, &acct(chart::MANUFACTURING_VARIANCE));
+    assert_eq!(variance.debit, Money::from_minor(320));
+}
+
+#[test]
+fn a_build_with_no_class_is_rejected() {
+    let ctx = ctx_with_items(vec![]);
+    let mut build = doc(DocKind::Build);
+    build.lines = vec![
+        account_line(1, chart::INVENTORY_FINISHED, 2000),
+        account_line(2, chart::INVENTORY_RAW, 1300),
+        account_line(3, chart::PARTS_LABOUR_APPLIED, 620),
+    ];
+    assert_eq!(
+        post(&build, 1, &ctx),
+        Err(PostError::MissingClass { line_no: 0 })
+    );
+}
+
+#[test]
+fn inventory_adjustment_count_up_and_down() {
+    let ctx = ctx_with_items(vec![]);
+
+    let mut up = doc(DocKind::InventoryAdjustment);
+    up.header_class = Some(class("foam"));
+    up.lines = vec![account_line(1, chart::INVENTORY_RAW, 500)];
+    let entry = entry_of(post(&up, 1, &ctx).expect("posts"));
+    assert!(entry.is_balanced());
+    assert_eq!(
+        find(&entry.lines, &acct(chart::INVENTORY_RAW)).debit,
+        Money::from_minor(500)
+    );
+    assert_eq!(
+        find(&entry.lines, &acct(chart::INVENTORY_ADJUSTMENT)).credit,
+        Money::from_minor(500)
+    );
+
+    let mut down = doc(DocKind::InventoryAdjustment);
+    down.header_class = Some(class("foam"));
+    down.lines = vec![account_line(1, chart::INVENTORY_FINISHED, -500)];
+    let entry = entry_of(post(&down, 1, &ctx).expect("posts"));
+    assert!(entry.is_balanced());
+    assert_eq!(
+        find(&entry.lines, &acct(chart::INVENTORY_ADJUSTMENT)).debit,
+        Money::from_minor(500)
+    );
+    assert_eq!(
+        find(&entry.lines, &acct(chart::INVENTORY_FINISHED)).credit,
+        Money::from_minor(500)
+    );
 }
 
 // ---------------------------------------------------------------------

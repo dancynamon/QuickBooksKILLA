@@ -391,6 +391,111 @@ BEGIN
 END;
 "#,
     },
+    Migration {
+        version: 5,
+        name: "manufacturing costing: materials, build sheets, builds (§11)",
+        sql: r#"
+CREATE TABLE materials (
+    company_id             TEXT NOT NULL REFERENCES companies(company_id),
+    material_id            TEXT NOT NULL,
+    name                   TEXT NOT NULL,
+    unit                   TEXT NOT NULL CHECK (unit IN ('bf','sheet','ea','lf')),
+    sheet_board_feet       TEXT,
+    avg_cost_minor_per_unit INTEGER NOT NULL DEFAULT 0,
+    qty_on_hand            TEXT NOT NULL DEFAULT '0',
+    -- The exact running value a receipt adds to and a build's consumption
+    -- relieves from, in the same minor units posted to 1300 — kept
+    -- alongside the rounded `avg_cost_minor_per_unit` (used to price new
+    -- consumption and new build sheets) precisely so `qty_on_hand *
+    -- avg_cost_minor_per_unit`, which rounds at every receipt, is never
+    -- what `material_on_hand` reports. It reports this column instead, so
+    -- it agrees with 1300 to the cent by construction rather than by luck
+    -- (`LEDGER-DESIGN.md` §11).
+    total_value_minor      INTEGER NOT NULL DEFAULT 0,
+    is_active              INTEGER NOT NULL DEFAULT 1,
+    source_ref             TEXT,
+    PRIMARY KEY (company_id, material_id)
+) STRICT;
+
+CREATE TABLE material_lots (
+    company_id         TEXT NOT NULL,
+    lot_id             TEXT NOT NULL,
+    material_id        TEXT NOT NULL,
+    received_on        TEXT NOT NULL,
+    qty                TEXT NOT NULL,
+    base_cost_minor    INTEGER NOT NULL,
+    freight_alloc_minor INTEGER NOT NULL,
+    landed_cost_minor  INTEGER NOT NULL,
+    po_ref             TEXT,
+    vendor_ref         TEXT,
+    PRIMARY KEY (company_id, lot_id),
+    FOREIGN KEY (company_id, material_id) REFERENCES materials(company_id, material_id)
+) STRICT;
+
+CREATE INDEX idx_material_lots_material ON material_lots(company_id, material_id);
+
+CREATE TABLE build_sheets (
+    company_id                 TEXT NOT NULL REFERENCES companies(company_id),
+    sheet_id                   TEXT NOT NULL,
+    item_id                    TEXT NOT NULL,
+    version                    INTEGER NOT NULL,
+    name                       TEXT NOT NULL,
+    yield_pct                  TEXT NOT NULL,
+    labour_minutes             TEXT NOT NULL,
+    labour_rate_minor_per_hour INTEGER NOT NULL,
+    overhead_minor             INTEGER NOT NULL DEFAULT 0,
+    is_active                  INTEGER NOT NULL DEFAULT 1,
+    created_at                 TEXT NOT NULL,
+    PRIMARY KEY (company_id, sheet_id)
+) STRICT;
+
+CREATE TABLE build_sheet_lines (
+    company_id    TEXT NOT NULL,
+    sheet_id      TEXT NOT NULL,
+    line_no       INTEGER NOT NULL,
+    material_id   TEXT,
+    part_item_id  TEXT,
+    qty_per_unit  TEXT NOT NULL,
+    unit          TEXT NOT NULL CHECK (unit IN ('bf','ea')),
+    note          TEXT,
+    PRIMARY KEY (company_id, sheet_id, line_no),
+    FOREIGN KEY (company_id, sheet_id) REFERENCES build_sheets(company_id, sheet_id),
+    CHECK ((material_id IS NULL) <> (part_item_id IS NULL))
+) STRICT;
+
+CREATE TABLE builds (
+    company_id            TEXT NOT NULL REFERENCES companies(company_id),
+    build_id              TEXT NOT NULL,
+    sheet_id              TEXT NOT NULL,
+    item_id               TEXT NOT NULL,
+    qty_built             TEXT NOT NULL,
+    started_on            TEXT,
+    completed_on          TEXT NOT NULL,
+    standard_cost_minor   INTEGER NOT NULL,
+    actual_material_minor INTEGER NOT NULL,
+    actual_labour_minor   INTEGER NOT NULL,
+    variance_minor        INTEGER NOT NULL,
+    entry_id              TEXT,
+    note                  TEXT,
+    PRIMARY KEY (company_id, build_id),
+    FOREIGN KEY (company_id, sheet_id) REFERENCES build_sheets(company_id, sheet_id)
+) STRICT;
+
+CREATE INDEX idx_builds_item ON builds(company_id, item_id, completed_on);
+
+CREATE TABLE build_consumptions (
+    company_id  TEXT NOT NULL,
+    build_id    TEXT NOT NULL,
+    line_no     INTEGER NOT NULL,
+    material_id TEXT NOT NULL,
+    qty_actual  TEXT NOT NULL,
+    cost_minor  INTEGER NOT NULL,
+    PRIMARY KEY (company_id, build_id, line_no),
+    FOREIGN KEY (company_id, build_id) REFERENCES builds(company_id, build_id),
+    FOREIGN KEY (company_id, material_id) REFERENCES materials(company_id, material_id)
+) STRICT;
+"#,
+    },
 ];
 
 pub fn latest_version() -> i64 {
