@@ -302,9 +302,7 @@ mod tests {
         ledger.post_entry(company, &entry, now()).unwrap();
 
         let store = Store::open_in_memory().unwrap();
-        store
-            .register_realm(&realm(), "Aquamentor", now())
-            .unwrap();
+        store.register_realm(&realm(), "Aquamentor", now()).unwrap();
 
         (ledger, store)
     }
@@ -318,9 +316,7 @@ mod tests {
             .create_company(company, "Aquamentor LLC", Some(realm().as_str()), now())
             .unwrap();
         let store = Store::open_in_memory().unwrap();
-        store
-            .register_realm(&realm(), "Aquamentor", now())
-            .unwrap();
+        store.register_realm(&realm(), "Aquamentor", now()).unwrap();
         (ledger, store)
     }
 
@@ -332,13 +328,11 @@ mod tests {
 
         // Every account starts at zero on an empty book, so an all-zero QBO
         // side agrees on every must-tier group by construction.
-        let qbo_rows = vec![
-            QboTbRow {
-                qbo_account_id: "no-such-account".to_string(),
-                name: "Nothing".to_string(),
-                balance: Money::ZERO,
-            },
-        ];
+        let qbo_rows = vec![QboTbRow {
+            qbo_account_id: "no-such-account".to_string(),
+            name: "Nothing".to_string(),
+            balance: Money::ZERO,
+        }];
 
         let outcome = run_nightly(
             &ledger,
@@ -352,7 +346,11 @@ mod tests {
         )
         .unwrap();
 
-        assert!(outcome.passed(), "{}", outcome.diff.render_text("aquamentor", as_of));
+        assert!(
+            outcome.passed(),
+            "{}",
+            outcome.diff.render_text("aquamentor", as_of)
+        );
         assert_eq!(outcome.summary_line(), "nightly: green");
         assert!(outcome.text_path.exists());
         assert!(outcome.csv_path.exists());
@@ -424,7 +422,10 @@ mod tests {
         assert!(plist.contains("com.aquamentor.ledger.nightly"));
         assert!(plist.contains("qbo-local report"));
         assert!(plist.contains("ledger nightly"));
-        assert!(plist.contains("&amp;&amp;"), "the shell && must be XML-escaped");
+        assert!(
+            plist.contains("&amp;&amp;"),
+            "the shell && must be XML-escaped"
+        );
         assert!(plist.contains("<integer>2</integer>"));
         assert!(plist.contains("<integer>0</integer>"));
         assert!(plist.contains("--live"));

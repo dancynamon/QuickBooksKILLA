@@ -93,7 +93,11 @@ impl VerifyReport {
 /// table, not a wall of ids.
 const MAX_LISTED: usize = 20;
 
-fn finding_if_any(check: &'static str, severity: Severity, mut ids: Vec<String>) -> Option<Finding> {
+fn finding_if_any(
+    check: &'static str,
+    severity: Severity,
+    mut ids: Vec<String>,
+) -> Option<Finding> {
     if ids.is_empty() {
         return None;
     }
@@ -171,7 +175,10 @@ fn check_entries_balance(ledger: &Ledger, company: &str) -> Result<Option<Findin
 /// No row in `journal_lines` whose `entry_id` has no matching
 /// `journal_entries` row — the composite foreign key this would otherwise
 /// rely on only holds on a connection with `PRAGMA foreign_keys = ON`.
-fn check_lines_have_entries(ledger: &Ledger, company: &str) -> Result<Option<Finding>, LedgerError> {
+fn check_lines_have_entries(
+    ledger: &Ledger,
+    company: &str,
+) -> Result<Option<Finding>, LedgerError> {
     let mut stmt = ledger.conn().prepare(
         "SELECT l.entry_id || ':' || l.line_no
          FROM journal_lines l
@@ -637,9 +644,11 @@ mod tests {
 
         let report = verify(&ledger, "aquamentor").unwrap();
         assert!(!report.is_ok());
-        assert!(report.findings.iter().any(|f| f.check
-            == "no income/COGS/expense line without a class"
-            && f.detail.contains("no-class-entry:2")));
+        assert!(report
+            .findings
+            .iter()
+            .any(|f| f.check == "no income/COGS/expense line without a class"
+                && f.detail.contains("no-class-entry:2")));
     }
 
     #[test]

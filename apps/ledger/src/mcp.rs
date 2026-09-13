@@ -57,7 +57,7 @@ use mcp_stdio::{ServerInfo, ToolSet};
 pub use mcp_stdio::{ToolError, ToolSpec};
 
 use crate::accountant::{self, AccountantError};
-use crate::post::{self, Posting, PostError};
+use crate::post::{self, PostError, Posting};
 use crate::report;
 use crate::store::{AdjustmentState, CommandMeta, Ledger, LedgerError};
 use crate::types::{
@@ -136,9 +136,14 @@ impl LedgerToolSet {
                     .get("account")
                     .and_then(Value::as_str)
                     .map(|s| AccountId(s.to_string()));
-                let detail =
-                    accountant::general_ledger(&self.ledger, &self.company, from, to, account.as_ref())
-                        .map_err(accountant_err)?;
+                let detail = accountant::general_ledger(
+                    &self.ledger,
+                    &self.company,
+                    from,
+                    to,
+                    account.as_ref(),
+                )
+                .map_err(accountant_err)?;
                 Ok(gl_detail_json(&detail))
             }
             "audit_trail" => {
@@ -179,7 +184,10 @@ impl LedgerToolSet {
             }
             "bank_status" => self.bank_status_tool(&args),
             "locked_through" => {
-                let locked = self.ledger.locked_through(&self.company).map_err(ledger_err)?;
+                let locked = self
+                    .ledger
+                    .locked_through(&self.company)
+                    .map_err(ledger_err)?;
                 Ok(json!({ "locked_through": locked.map(|d| d.to_string()) }))
             }
 
@@ -197,14 +205,15 @@ impl LedgerToolSet {
     }
 
     fn sales_tax_lines_tool(&self, args: &Value) -> Result<Value, ToolError> {
-        let year = args
-            .get("year")
-            .and_then(Value::as_i64)
-            .ok_or_else(|| ToolError::new("missing or invalid \"year\""))? as i32;
+        let year =
+            args.get("year")
+                .and_then(Value::as_i64)
+                .ok_or_else(|| ToolError::new("missing or invalid \"year\""))? as i32;
         let quarter = args
             .get("quarter")
             .and_then(Value::as_u64)
-            .ok_or_else(|| ToolError::new("missing or invalid \"quarter\""))? as u32;
+            .ok_or_else(|| ToolError::new("missing or invalid \"quarter\""))?
+            as u32;
         if !(1..=4).contains(&quarter) {
             return Err(ToolError::new("\"quarter\" must be 1..=4"));
         }
@@ -237,7 +246,10 @@ impl LedgerToolSet {
             .iter()
             .filter(|line| line.match_kind.as_deref() == Some("proposed"))
             .count();
-        let unmatched = lines.iter().filter(|line| line.match_kind.is_none()).count();
+        let unmatched = lines
+            .iter()
+            .filter(|line| line.match_kind.is_none())
+            .count();
         let matched = lines.len() - proposed - unmatched;
         Ok(json!({
             "statement": bank_statement_json(&statement),
@@ -263,9 +275,15 @@ impl LedgerToolSet {
     /// so a caller always sees the gate it is or is not up against —
     /// required on every write tool by this module's own docs.
     fn with_locked_through(&self, mut value: Value) -> Result<Value, ToolError> {
-        let locked = self.ledger.locked_through(&self.company).map_err(ledger_err)?;
+        let locked = self
+            .ledger
+            .locked_through(&self.company)
+            .map_err(ledger_err)?;
         if let Value::Object(map) = &mut value {
-            map.insert("locked_through".to_string(), json!(locked.map(|d| d.to_string())));
+            map.insert(
+                "locked_through".to_string(),
+                json!(locked.map(|d| d.to_string())),
+            );
         }
         Ok(value)
     }
@@ -1631,6 +1649,9 @@ mod tests {
     fn decimal_str_to_minor_matches_the_documented_examples() {
         assert_eq!(decimal_str_to_minor("1234.56"), Ok(123_456));
         assert_eq!(decimal_str_to_minor("-12"), Ok(-1200));
-        assert_eq!(decimal_str_to_minor(dec!(1.005).to_string().as_str()), Err(()));
+        assert_eq!(
+            decimal_str_to_minor(dec!(1.005).to_string().as_str()),
+            Err(())
+        );
     }
 }

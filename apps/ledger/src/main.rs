@@ -17,6 +17,11 @@ use ledger::accountant::{self, AdjustmentRequest, AuditRow, GlDetail};
 use ledger::authnet::{self, AuthnetConfig};
 use ledger::bank::{self, MatchRules, NewStatement};
 use ledger::import::ImportOptions;
+use ledger::mfg::build::{self as mfg_build, NewAdjustment, NewBuild};
+use ledger::mfg::landed::{self, RawMaterialReceipt};
+use ledger::mfg::report::{self as mfg_report};
+use ledger::mfg::sheet::{self as mfg_sheet, NewBuildSheet};
+use ledger::mfg::NewMaterial;
 use ledger::nightly;
 use ledger::pipeline;
 use ledger::post::{self, Posting};
@@ -231,6 +236,66 @@ enum Command {
         as_of: Option<NaiveDate>,
         plist: bool,
     },
+    Mfg(MfgCommand),
+}
+
+/// `ledger mfg ...` (§11). One JSON file per write, same shape as its
+/// `mfg` submodule's request struct — see `docs/MFG.md`.
+#[derive(Clone, Debug, PartialEq)]
+enum MfgCommand {
+    MaterialAdd {
+        db: PathBuf,
+        company: String,
+        file: PathBuf,
+    },
+    MaterialList {
+        db: PathBuf,
+        company: String,
+    },
+    Receive {
+        db: PathBuf,
+        company: String,
+        file: PathBuf,
+    },
+    SheetAdd {
+        db: PathBuf,
+        company: String,
+        file: PathBuf,
+    },
+    SheetList {
+        db: PathBuf,
+        company: String,
+    },
+    SheetCost {
+        db: PathBuf,
+        company: String,
+        sheet: String,
+        price: Option<Money>,
+    },
+    Build {
+        db: PathBuf,
+        company: String,
+        file: PathBuf,
+    },
+    Adjust {
+        db: PathBuf,
+        company: String,
+        account: String,
+        amount: Money,
+        class: String,
+        date: NaiveDate,
+        reason: String,
+    },
+    Variance {
+        db: PathBuf,
+        company: String,
+        from: NaiveDate,
+        to: NaiveDate,
+    },
+    Onhand {
+        db: PathBuf,
+        company: String,
+    },
 }
 
 /// `ledger bank import --format`. §10: the files the bank and Chase already
@@ -293,6 +358,17 @@ USAGE:
                    --qbo-csv PATH --out DIR [--as-of YYYY-MM-DD]
     ledger nightly --plist --db PATH --company ID --replica PATH --realm ID
                    --qbo-csv PATH --out DIR
+    ledger mfg material add  --db PATH --company ID --file material.json
+    ledger mfg material list --db PATH --company ID
+    ledger mfg receive       --db PATH --company ID --file receipt.json
+    ledger mfg sheet add     --db PATH --company ID --file sheet.json
+    ledger mfg sheet list    --db PATH --company ID
+    ledger mfg sheet cost    --db PATH --company ID --sheet ID [--price X]
+    ledger mfg build         --db PATH --company ID --file build.json
+    ledger mfg adjust        --db PATH --company ID --account NUM --amount X
+                             --class ID --date YYYY-MM-DD --reason \"...\"
+    ledger mfg variance      --db PATH --company ID --from YYYY-MM-DD --to YYYY-MM-DD
+    ledger mfg onhand        --db PATH --company ID
     ledger --help
 
 SUBCOMMANDS:
@@ -366,6 +442,19 @@ SUBCOMMANDS:
               must-tier failure or import rejection. With --plist, prints a
               launchd plist that runs `qbo-local report --live` and then
               this command at 02:00 local, instead of running anything.
+    mfg       Manufacturing costing (§11, docs/MFG.md for the JSON shapes):
+              material add/list — a raw material, at zero cost until received.
+              receive            — a raw material receipt: landed cost by
+                                   board foot, the moving average (W12).
+              sheet add/list     — a build sheet (recipe): yield, labour,
+                                   overhead, components.
+              sheet cost         — standard cost and, with --price, the
+                                   sensitivity table (foam ±5%, yield ±5
+                                   points, labour ±10%).
+              build              — complete a build: priced variance to 5100.
+              adjust             — a physical count against 1300 or 1310.
+              variance           — build variance by item over a date range.
+              onhand             — materials at average, next to 1300.
 
 FLAGS:
     --db PATH            Path to the SQLite ledger file.
@@ -402,7 +491,9 @@ FLAGS:
                            account).
     --account NUM         Bank/card account number, e.g. 1100 (bank import,
                           bank confirm).
-    --file PATH           Statement export to read (bank import only).
+    --file PATH           Statement export to read (bank import), or a JSON
+                          request file (mfg material add, receive, sheet
+                          add, build — shapes in docs/MFG.md).
     --format csv|ofx      Statement file format, default csv (bank import).
     --profile chase|generic  CSV column layout, default chase (bank import).
     --opening X           Statement opening balance (bank import only).
@@ -410,7 +501,8 @@ FLAGS:
     --statement ID        Bank statement id (bank match, close, status).
     --line ID             Bank line id (bank confirm only).
     --class ID            Class to post the confirmed line under (bank
-                          confirm only; optional).
+                          confirm; optional), or the required class on an
+                          inventory count (mfg adjust).
     --qbo-csv PATH        CSV of qbo_account_id,name,balance (tbdiff, opening).
     --snapshots DIR       Directory of tb-YYYY.csv files, same CSV shape as
                            --qbo-csv (boundary only).
@@ -433,6 +525,15 @@ FLAGS:
                            (nightly only); created if it does not exist.
     --plist               Print a launchd plist instead of running (nightly
                            only).
+    --sheet ID            Build sheet id (mfg sheet cost only).
+    --price X             Sell price, for the margin and sensitivity table
+                           (mfg sheet cost only; omitted, only the standard
+                           cost prints).
+    --account NUM          \"1300\" or \"1310\" (mfg adjust only).
+    --amount X             Signed dollar amount, positive is a count up
+                           (mfg adjust only).
+    --date YYYY-MM-DD      The count's date (mfg adjust only).
+    --reason \"...\"        Required reason for the count (mfg adjust only).
 
 EXIT CODES:
     0   ok
@@ -570,8 +671,209 @@ fn parse(args: &[String]) -> Result<Command, UsageError> {
         "boundary" => parse_boundary(args),
         "verify" => parse_verify(args),
         "nightly" => parse_nightly(args),
+        "mfg" => parse_mfg(args).map(Command::Mfg),
         other => Err(UsageError::unknown_subcommand(other)),
     }
+}
+
+fn parse_mfg(mut args: Args<'_>) -> Result<MfgCommand, UsageError> {
+    let Some(sub) = args.next() else {
+        return Err(UsageError::new(
+            "mfg requires a subcommand (material, receive, sheet, build, adjust, variance, onhand)",
+        ));
+    };
+    match sub.as_str() {
+        "material" => parse_mfg_material(args),
+        "receive" => parse_mfg_receive(args),
+        "sheet" => parse_mfg_sheet(args),
+        "build" => parse_mfg_build(args),
+        "adjust" => parse_mfg_adjust(args),
+        "variance" => parse_mfg_variance(args),
+        "onhand" => parse_mfg_onhand(args),
+        other => Err(UsageError::unknown_subcommand(&format!("mfg {other}"))),
+    }
+}
+
+fn parse_mfg_material(mut args: Args<'_>) -> Result<MfgCommand, UsageError> {
+    let Some(sub) = args.next() else {
+        return Err(UsageError::new("mfg material requires add or list"));
+    };
+    let mut db = None;
+    let mut company = None;
+    let mut file = None;
+    while let Some(flag) = args.next() {
+        match flag.as_str() {
+            "--db" => db = Some(PathBuf::from(next_value(&mut args, "--db")?)),
+            "--company" => company = Some(next_value(&mut args, "--company")?),
+            "--file" => file = Some(PathBuf::from(next_value(&mut args, "--file")?)),
+            other => return Err(UsageError::unknown_flag(other)),
+        }
+    }
+    let db = db.ok_or_else(|| UsageError::missing_flag("--db"))?;
+    let company = company.ok_or_else(|| UsageError::missing_flag("--company"))?;
+    match sub.as_str() {
+        "add" => Ok(MfgCommand::MaterialAdd {
+            db,
+            company,
+            file: file.ok_or_else(|| UsageError::missing_flag("--file"))?,
+        }),
+        "list" => Ok(MfgCommand::MaterialList { db, company }),
+        other => Err(UsageError::unknown_subcommand(&format!(
+            "mfg material {other}"
+        ))),
+    }
+}
+
+fn parse_mfg_receive(mut args: Args<'_>) -> Result<MfgCommand, UsageError> {
+    let mut db = None;
+    let mut company = None;
+    let mut file = None;
+    while let Some(flag) = args.next() {
+        match flag.as_str() {
+            "--db" => db = Some(PathBuf::from(next_value(&mut args, "--db")?)),
+            "--company" => company = Some(next_value(&mut args, "--company")?),
+            "--file" => file = Some(PathBuf::from(next_value(&mut args, "--file")?)),
+            other => return Err(UsageError::unknown_flag(other)),
+        }
+    }
+    Ok(MfgCommand::Receive {
+        db: db.ok_or_else(|| UsageError::missing_flag("--db"))?,
+        company: company.ok_or_else(|| UsageError::missing_flag("--company"))?,
+        file: file.ok_or_else(|| UsageError::missing_flag("--file"))?,
+    })
+}
+
+fn parse_mfg_sheet(mut args: Args<'_>) -> Result<MfgCommand, UsageError> {
+    let Some(sub) = args.next() else {
+        return Err(UsageError::new("mfg sheet requires add, list or cost"));
+    };
+    let mut db = None;
+    let mut company = None;
+    let mut file = None;
+    let mut sheet = None;
+    let mut price = None;
+    while let Some(flag) = args.next() {
+        match flag.as_str() {
+            "--db" => db = Some(PathBuf::from(next_value(&mut args, "--db")?)),
+            "--company" => company = Some(next_value(&mut args, "--company")?),
+            "--file" => file = Some(PathBuf::from(next_value(&mut args, "--file")?)),
+            "--sheet" => sheet = Some(next_value(&mut args, "--sheet")?),
+            "--price" => price = Some(parse_money(&next_value(&mut args, "--price")?, "--price")?),
+            other => return Err(UsageError::unknown_flag(other)),
+        }
+    }
+    let db = db.ok_or_else(|| UsageError::missing_flag("--db"))?;
+    let company = company.ok_or_else(|| UsageError::missing_flag("--company"))?;
+    match sub.as_str() {
+        "add" => Ok(MfgCommand::SheetAdd {
+            db,
+            company,
+            file: file.ok_or_else(|| UsageError::missing_flag("--file"))?,
+        }),
+        "list" => Ok(MfgCommand::SheetList { db, company }),
+        "cost" => Ok(MfgCommand::SheetCost {
+            db,
+            company,
+            sheet: sheet.ok_or_else(|| UsageError::missing_flag("--sheet"))?,
+            price,
+        }),
+        other => Err(UsageError::unknown_subcommand(&format!(
+            "mfg sheet {other}"
+        ))),
+    }
+}
+
+fn parse_mfg_build(mut args: Args<'_>) -> Result<MfgCommand, UsageError> {
+    let mut db = None;
+    let mut company = None;
+    let mut file = None;
+    while let Some(flag) = args.next() {
+        match flag.as_str() {
+            "--db" => db = Some(PathBuf::from(next_value(&mut args, "--db")?)),
+            "--company" => company = Some(next_value(&mut args, "--company")?),
+            "--file" => file = Some(PathBuf::from(next_value(&mut args, "--file")?)),
+            other => return Err(UsageError::unknown_flag(other)),
+        }
+    }
+    Ok(MfgCommand::Build {
+        db: db.ok_or_else(|| UsageError::missing_flag("--db"))?,
+        company: company.ok_or_else(|| UsageError::missing_flag("--company"))?,
+        file: file.ok_or_else(|| UsageError::missing_flag("--file"))?,
+    })
+}
+
+fn parse_mfg_adjust(mut args: Args<'_>) -> Result<MfgCommand, UsageError> {
+    let mut db = None;
+    let mut company = None;
+    let mut account = None;
+    let mut amount = None;
+    let mut class = None;
+    let mut date = None;
+    let mut reason = None;
+    while let Some(flag) = args.next() {
+        match flag.as_str() {
+            "--db" => db = Some(PathBuf::from(next_value(&mut args, "--db")?)),
+            "--company" => company = Some(next_value(&mut args, "--company")?),
+            "--account" => account = Some(next_value(&mut args, "--account")?),
+            "--amount" => {
+                amount = Some(parse_money(
+                    &next_value(&mut args, "--amount")?,
+                    "--amount",
+                )?)
+            }
+            "--class" => class = Some(next_value(&mut args, "--class")?),
+            "--date" => date = Some(parse_date(&next_value(&mut args, "--date")?, "--date")?),
+            "--reason" => reason = Some(next_value(&mut args, "--reason")?),
+            other => return Err(UsageError::unknown_flag(other)),
+        }
+    }
+    Ok(MfgCommand::Adjust {
+        db: db.ok_or_else(|| UsageError::missing_flag("--db"))?,
+        company: company.ok_or_else(|| UsageError::missing_flag("--company"))?,
+        account: account.ok_or_else(|| UsageError::missing_flag("--account"))?,
+        amount: amount.ok_or_else(|| UsageError::missing_flag("--amount"))?,
+        class: class.ok_or_else(|| UsageError::missing_flag("--class"))?,
+        date: date.ok_or_else(|| UsageError::missing_flag("--date"))?,
+        reason: reason.ok_or_else(|| UsageError::missing_flag("--reason"))?,
+    })
+}
+
+fn parse_mfg_variance(mut args: Args<'_>) -> Result<MfgCommand, UsageError> {
+    let mut db = None;
+    let mut company = None;
+    let mut from = None;
+    let mut to = None;
+    while let Some(flag) = args.next() {
+        match flag.as_str() {
+            "--db" => db = Some(PathBuf::from(next_value(&mut args, "--db")?)),
+            "--company" => company = Some(next_value(&mut args, "--company")?),
+            "--from" => from = Some(parse_date(&next_value(&mut args, "--from")?, "--from")?),
+            "--to" => to = Some(parse_date(&next_value(&mut args, "--to")?, "--to")?),
+            other => return Err(UsageError::unknown_flag(other)),
+        }
+    }
+    Ok(MfgCommand::Variance {
+        db: db.ok_or_else(|| UsageError::missing_flag("--db"))?,
+        company: company.ok_or_else(|| UsageError::missing_flag("--company"))?,
+        from: from.ok_or_else(|| UsageError::missing_flag("--from"))?,
+        to: to.ok_or_else(|| UsageError::missing_flag("--to"))?,
+    })
+}
+
+fn parse_mfg_onhand(mut args: Args<'_>) -> Result<MfgCommand, UsageError> {
+    let mut db = None;
+    let mut company = None;
+    while let Some(flag) = args.next() {
+        match flag.as_str() {
+            "--db" => db = Some(PathBuf::from(next_value(&mut args, "--db")?)),
+            "--company" => company = Some(next_value(&mut args, "--company")?),
+            other => return Err(UsageError::unknown_flag(other)),
+        }
+    }
+    Ok(MfgCommand::Onhand {
+        db: db.ok_or_else(|| UsageError::missing_flag("--db"))?,
+        company: company.ok_or_else(|| UsageError::missing_flag("--company"))?,
+    })
 }
 
 fn parse_bank(mut args: Args<'_>) -> Result<Command, UsageError> {
@@ -1421,6 +1723,7 @@ fn execute(command: Command) -> Result<ExitCode, CommandError> {
         } => run_nightly(
             &db, &company, &replica, &realm, &qbo_csv, &out, as_of, plist,
         ),
+        Command::Mfg(cmd) => run_mfg(cmd),
     }
 }
 
@@ -2257,6 +2560,308 @@ fn fmt_money(amount: Money) -> String {
     let sign = if minor < 0 { "-" } else { "" };
     let abs = minor.unsigned_abs();
     format!("{sign}{}.{:02}", abs / 100, abs % 100)
+}
+
+fn fmt_pct(value: rust_decimal::Decimal) -> String {
+    format!("{:.1}%", value * rust_decimal::Decimal::from(100))
+}
+
+fn read_json<T: serde::de::DeserializeOwned>(file: &std::path::Path) -> Result<T, CommandError> {
+    let text = fs::read_to_string(file).map_err(|e| runtime(format!("{}: {e}", file.display())))?;
+    serde_json::from_str(&text).map_err(|e| runtime(format!("{}: {e}", file.display())))
+}
+
+// -- mfg (§11) ------------------------------------------------------------
+
+fn run_mfg(command: MfgCommand) -> Result<ExitCode, CommandError> {
+    match command {
+        MfgCommand::MaterialAdd { db, company, file } => {
+            run_mfg_material_add(&db, &company, &file).map(ok)
+        }
+        MfgCommand::MaterialList { db, company } => run_mfg_material_list(&db, &company).map(ok),
+        MfgCommand::Receive { db, company, file } => run_mfg_receive(&db, &company, &file).map(ok),
+        MfgCommand::SheetAdd { db, company, file } => {
+            run_mfg_sheet_add(&db, &company, &file).map(ok)
+        }
+        MfgCommand::SheetList { db, company } => run_mfg_sheet_list(&db, &company).map(ok),
+        MfgCommand::SheetCost {
+            db,
+            company,
+            sheet,
+            price,
+        } => run_mfg_sheet_cost(&db, &company, &sheet, price).map(ok),
+        MfgCommand::Build { db, company, file } => run_mfg_build(&db, &company, &file).map(ok),
+        MfgCommand::Adjust {
+            db,
+            company,
+            account,
+            amount,
+            class,
+            date,
+            reason,
+        } => run_mfg_adjust(&db, &company, &account, amount, &class, date, &reason).map(ok),
+        MfgCommand::Variance {
+            db,
+            company,
+            from,
+            to,
+        } => run_mfg_variance(&db, &company, from, to).map(ok),
+        MfgCommand::Onhand { db, company } => run_mfg_onhand(&db, &company).map(ok),
+    }
+}
+
+fn run_mfg_material_add(
+    db: &std::path::Path,
+    company: &str,
+    file: &std::path::Path,
+) -> Result<(), CommandError> {
+    let new: NewMaterial = read_json(file)?;
+    let ledger = Ledger::open(db).map_err(runtime)?;
+    ledger.add_material(company, &new).map_err(runtime)?;
+    println!("added material {}", new.material_id);
+    Ok(())
+}
+
+fn run_mfg_material_list(db: &std::path::Path, company: &str) -> Result<(), CommandError> {
+    let ledger = Ledger::open(db).map_err(runtime)?;
+    let materials = ledger.list_materials(company).map_err(runtime)?;
+    println!(
+        "{:<20}{:<28}{:<8}{:>14}{:>16}",
+        "material", "name", "unit", "qty on hand", "avg cost/unit"
+    );
+    for material in &materials {
+        println!(
+            "{:<20}{:<28}{:<8}{:>14}{:>16}",
+            material.material_id,
+            material.name,
+            material.unit.as_str(),
+            material.qty_on_hand,
+            fmt_money(material.avg_cost_minor_per_unit),
+        );
+    }
+    Ok(())
+}
+
+fn run_mfg_receive(
+    db: &std::path::Path,
+    company: &str,
+    file: &std::path::Path,
+) -> Result<(), CommandError> {
+    let receipt: RawMaterialReceipt = read_json(file)?;
+    let ledger = Ledger::open(db).map_err(runtime)?;
+    let result =
+        landed::receive_materials(&ledger, company, receipt, Utc::now()).map_err(runtime)?;
+    println!(
+        "posted entry {} - landed {} total",
+        result.entry_id,
+        fmt_money(result.total_landed)
+    );
+    for line in &result.lines {
+        println!(
+            "  {} lot {} landed {} -> avg {}/unit, {} on hand",
+            line.material_id,
+            line.lot_id,
+            fmt_money(line.landed_cost),
+            fmt_money(line.new_avg_cost_minor_per_unit),
+            line.new_qty_on_hand,
+        );
+    }
+    Ok(())
+}
+
+fn run_mfg_sheet_add(
+    db: &std::path::Path,
+    company: &str,
+    file: &std::path::Path,
+) -> Result<(), CommandError> {
+    let new: NewBuildSheet = read_json(file)?;
+    let ledger = Ledger::open(db).map_err(runtime)?;
+    let full = ledger
+        .add_build_sheet(company, &new, Utc::now())
+        .map_err(runtime)?;
+    println!(
+        "added sheet {} ({} lines)",
+        full.header.sheet_id,
+        full.lines.len()
+    );
+    Ok(())
+}
+
+fn run_mfg_sheet_list(db: &std::path::Path, company: &str) -> Result<(), CommandError> {
+    let ledger = Ledger::open(db).map_err(runtime)?;
+    let sheets = ledger.list_build_sheets(company).map_err(runtime)?;
+    println!(
+        "{:<20}{:<14}{:>4}{:>10}{:>12}",
+        "sheet", "item", "ver", "yield", "labour min"
+    );
+    for sheet in &sheets {
+        println!(
+            "{:<20}{:<14}{:>4}{:>10}{:>12}",
+            sheet.sheet_id, sheet.item_id, sheet.version, sheet.yield_pct, sheet.labour_minutes,
+        );
+    }
+    Ok(())
+}
+
+fn run_mfg_sheet_cost(
+    db: &std::path::Path,
+    company: &str,
+    sheet_id: &str,
+    price: Option<Money>,
+) -> Result<(), CommandError> {
+    let ledger = Ledger::open(db).map_err(runtime)?;
+    let sheet = ledger.build_sheet(company, sheet_id).map_err(runtime)?;
+    let mut materials = std::collections::HashMap::new();
+    for line in &sheet.lines {
+        if let Some(id) = line.component_id() {
+            if !materials.contains_key(id) {
+                materials.insert(
+                    id.to_string(),
+                    ledger.material(company, id).map_err(runtime)?,
+                );
+            }
+        }
+    }
+    let cost = mfg_sheet::standard_cost(&sheet, &materials).map_err(runtime)?;
+    println!("STANDARD COST   {sheet_id}\n");
+    println!(
+        "material   {:>10}   (gross {} bf)",
+        fmt_money(cost.material),
+        cost.material_gross_bf
+    );
+    println!("labour     {:>10}", fmt_money(cost.labour));
+    println!("overhead   {:>10}", fmt_money(cost.overhead));
+    println!("total      {:>10}", fmt_money(cost.total));
+
+    if let Some(price) = price {
+        let margin = if price.is_zero() {
+            rust_decimal::Decimal::ZERO
+        } else {
+            rust_decimal::Decimal::new(price.minor() - cost.total.minor(), 2)
+                / rust_decimal::Decimal::new(price.minor(), 2)
+        };
+        println!(
+            "\nat price {}: margin {}\n",
+            fmt_money(price),
+            fmt_pct(margin)
+        );
+        println!("SENSITIVITY\n");
+        println!("{:<20}{:>10}{:>12}", "scenario", "margin", "delta");
+        let scenarios = mfg_sheet::sensitivity(&sheet, &materials, price).map_err(runtime)?;
+        for scenario in &scenarios {
+            println!(
+                "{:<20}{:>10}{:>12}",
+                scenario.name,
+                fmt_pct(scenario.margin_pct),
+                fmt_pct(scenario.delta_vs_base),
+            );
+        }
+    }
+    Ok(())
+}
+
+fn run_mfg_build(
+    db: &std::path::Path,
+    company: &str,
+    file: &std::path::Path,
+) -> Result<(), CommandError> {
+    let new: NewBuild = read_json(file)?;
+    let ledger = Ledger::open(db).map_err(runtime)?;
+    let result = mfg_build::complete_build(&ledger, company, new, Utc::now()).map_err(runtime)?;
+    println!(
+        "build {} posted entry {} - standard {} actual material {} applied {} variance {}",
+        result.build_id,
+        result.entry_id,
+        fmt_money(result.standard_cost),
+        fmt_money(result.actual_material),
+        fmt_money(result.applied),
+        fmt_money(result.variance),
+    );
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_mfg_adjust(
+    db: &std::path::Path,
+    company: &str,
+    account: &str,
+    amount: Money,
+    class: &str,
+    date: NaiveDate,
+    reason: &str,
+) -> Result<(), CommandError> {
+    let ledger = Ledger::open(db).map_err(runtime)?;
+    let entry_id = mfg_build::adjust_inventory(
+        &ledger,
+        company,
+        NewAdjustment {
+            account: account.to_string(),
+            amount,
+            class: ClassId(class.to_string()),
+            adjusted_on: date,
+            reason: reason.to_string(),
+        },
+        Utc::now(),
+    )
+    .map_err(runtime)?;
+    println!("posted entry {entry_id}");
+    Ok(())
+}
+
+fn run_mfg_variance(
+    db: &std::path::Path,
+    company: &str,
+    from: NaiveDate,
+    to: NaiveDate,
+) -> Result<(), CommandError> {
+    let ledger = Ledger::open(db).map_err(runtime)?;
+    let rows = mfg_report::variance_by_item(&ledger, company, from, to).map_err(runtime)?;
+    println!(
+        "{:<16}{:>8}{:>14}{:>14}{:>10}",
+        "item", "builds", "std material", "variance", "pct"
+    );
+    for row in &rows {
+        println!(
+            "{:<16}{:>8}{:>14}{:>14}{:>10}",
+            row.item_id,
+            row.build_count,
+            fmt_money(row.total_standard_material),
+            fmt_money(row.total_variance),
+            row.variance_pct
+                .map(fmt_pct)
+                .unwrap_or_else(|| "-".to_string()),
+        );
+    }
+    Ok(())
+}
+
+fn run_mfg_onhand(db: &std::path::Path, company: &str) -> Result<(), CommandError> {
+    let ledger = Ledger::open(db).map_err(runtime)?;
+    let report = mfg_report::material_on_hand(&ledger, company).map_err(runtime)?;
+    println!(
+        "{:<20}{:>12}{:>14}{:>14}",
+        "material", "qty", "avg cost", "value"
+    );
+    for row in &report.materials {
+        println!(
+            "{:<20}{:>12}{:>14}{:>14}",
+            row.material_id,
+            row.qty_on_hand,
+            fmt_money(row.avg_cost_minor_per_unit),
+            fmt_money(row.value),
+        );
+    }
+    println!(
+        "\ntotal value {}   account 1300 {}   {}",
+        fmt_money(report.total_value),
+        fmt_money(report.account_1300_balance),
+        if report.total_value == report.account_1300_balance {
+            "agree"
+        } else {
+            "** DO NOT AGREE"
+        },
+    );
+    Ok(())
 }
 
 fn parse_opening(mut args: Args<'_>) -> Result<Command, UsageError> {

@@ -72,11 +72,6 @@ pub enum PostError {
     #[error(transparent)]
     Money(#[from] MoneyError),
 
-    /// §11: built after cutover. Schema and posting effects are designed
-    /// there; there is no store to post these into yet.
-    #[error("{kind:?} does not post yet, built after cutover (LEDGER-DESIGN.md §11)")]
-    Unsupported { kind: DocKind },
-
     /// A Payment document that states its own total (via `lines`, e.g. a
     /// deposit slip's breakdown of checks received) whose sum does not equal
     /// `applications` plus `unapplied`.
@@ -861,6 +856,141 @@ fn post_settlement(doc: &LedgerDocument, ctx: &PostingContext) -> Result<Vec<Leg
     Ok(legs)
 }
 
+/// §11's convention for the three manufacturing rows below, stated once
+/// here rather than in each function: [`crate::mfg`] computes every amount
+/// itself (landed cost, standard cost, actual consumption, the variance
+/// plug) and puts each one on an `Account`-kind [`DocLine`] naming the
+/// account it belongs on — the same convention [`post_settlement`] already
+/// uses for its 1160/6700 lines. This function only has to find the line
+/// naming `number` and read its `amount` off; it never resolves an item, a
+/// class default or a quantity, because [`crate::mfg`] already has.
+fn named_account_amount(doc: &LedgerDocument, number: &str) -> Option<Money> {
+    doc.lines
+        .iter()
+        .find(|line| {
+            line.kind == LineKind::Account
+                && line
+                    .account
+                    .as_ref()
+                    .is_some_and(|account| account.0 == number)
+        })
+        .map(|line| line.amount)
+}
+
+/// §1, §11: Raw material receipt. Dr 1300 at landed cost, Cr 2050 inventory
+/// received not billed — goods on the floor before the bill arrives are
+/// inventory, not nothing. Both amounts come off the document's own
+/// `Account` lines ([`named_account_amount`]); [`crate::mfg::landed`]
+/// computed the landed total by allocating freight by board foot and put it
+/// on both.
+fn post_raw_material_receipt(doc: &LedgerDocument) -> Result<Vec<Leg>, PostError> {
+    let landed = named_account_amount(doc, chart::INVENTORY_RAW)
+        .ok_or(PostError::MissingAccount { line_no: 0 })?;
+    Ok(vec![
+        debit(acct(chart::INVENTORY_RAW), landed, None, None),
+        credit(
+            acct(chart::INVENTORY_RECEIVED_NOT_BILLED),
+            landed,
+            None,
+            None,
+        ),
+    ])
+}
+
+/// §1, §11: Build/assembly plus Build variance, one entry. Dr 1310 at
+/// standard, Cr 1300 for board feet actually consumed, Cr 5300 parts and
+/// labour applied at standard, and the difference plugged to 5100 (W4): a
+/// build that consumed more than the sheet allowed debits it, a good nest
+/// credits it. `doc.header_class` is required — §1's Notes column carries a
+/// Build's class "from the finished item" ([`crate::mfg`] module docs
+/// explain why that is an explicit input here rather than a lookup) — and
+/// applies to both the 5300 leg and the variance leg, per §1's "Class
+/// carried from" column ("as the build").
+fn post_build(doc: &LedgerDocument) -> Result<Vec<Leg>, PostError> {
+    let class = doc
+        .header_class
+        .clone()
+        .ok_or(PostError::MissingClass { line_no: 0 })?;
+    let finished = named_account_amount(doc, chart::INVENTORY_FINISHED)
+        .ok_or(PostError::MissingAccount { line_no: 0 })?;
+    let raw_used = named_account_amount(doc, chart::INVENTORY_RAW)
+        .ok_or(PostError::MissingAccount { line_no: 0 })?;
+    let applied = named_account_amount(doc, chart::PARTS_LABOUR_APPLIED)
+        .ok_or(PostError::MissingAccount { line_no: 0 })?;
+
+    let mut legs = vec![
+        debit(acct(chart::INVENTORY_FINISHED), finished, None, None),
+        credit(acct(chart::INVENTORY_RAW), raw_used, None, None),
+        credit(
+            acct(chart::PARTS_LABOUR_APPLIED),
+            applied,
+            Some(class.clone()),
+            None,
+        ),
+    ];
+
+    let variance = finished.checked_sub(raw_used)?.checked_sub(applied)?;
+    if variance.is_negative() {
+        legs.push(debit(
+            acct(chart::MANUFACTURING_VARIANCE),
+            variance.checked_neg()?,
+            Some(class),
+            None,
+        ));
+    } else if !variance.is_zero() {
+        legs.push(credit(
+            acct(chart::MANUFACTURING_VARIANCE),
+            variance,
+            Some(class),
+            None,
+        ));
+    }
+    Ok(legs)
+}
+
+/// §1, §11: Inventory adjustment. A count up debits the named inventory
+/// account (1300 or 1310) and credits 5150; a count down does the reverse.
+/// One signed `Account` line names the inventory account and carries the
+/// amount, positive for a count up. `doc.header_class` is required — §1:
+/// "required, from the item."
+fn post_inventory_adjustment(doc: &LedgerDocument) -> Result<Vec<Leg>, PostError> {
+    let class = doc
+        .header_class
+        .clone()
+        .ok_or(PostError::MissingClass { line_no: 1 })?;
+    let line = doc
+        .lines
+        .iter()
+        .find(|line| {
+            line.kind == LineKind::Account
+                && matches!(
+                    line.account.as_ref().map(|account| account.0.as_str()),
+                    Some(chart::INVENTORY_RAW) | Some(chart::INVENTORY_FINISHED)
+                )
+        })
+        .ok_or(PostError::MissingAccount { line_no: 0 })?;
+    let account = line.account.clone().expect("matched above");
+
+    let legs = if line.amount.is_negative() {
+        let shrink = line.amount.checked_neg()?;
+        vec![
+            debit(acct(chart::INVENTORY_ADJUSTMENT), shrink, Some(class), None),
+            credit(account, shrink, None, None),
+        ]
+    } else {
+        vec![
+            debit(account, line.amount, None, None),
+            credit(
+                acct(chart::INVENTORY_ADJUSTMENT),
+                line.amount,
+                Some(class),
+                None,
+            ),
+        ]
+    };
+    Ok(legs)
+}
+
 /// Merges legs sharing an (account, class, entity, side, is_taxable) key
 /// into one [`JournalLine`] and numbers what remains from 1. `is_taxable` is
 /// in the key alongside the rest (§9 line E): two Item lines of the same
@@ -952,9 +1082,7 @@ fn apply_void(mut entry: JournalEntry, is_voided: bool) -> JournalEntry {
 
 /// The posting-rules table (§1), as one function. Pure: everything it needs
 /// beyond the document is in `ctx`. Estimate and PurchaseOrder never post
-/// ([`DocKind::posts`]); RawMaterialReceipt, Build and InventoryAdjustment
-/// are designed in §11 but not yet built, and return
-/// [`PostError::Unsupported`] rather than posting something wrong.
+/// ([`DocKind::posts`]).
 pub fn post(
     doc: &LedgerDocument,
     version: i64,
@@ -962,13 +1090,6 @@ pub fn post(
 ) -> Result<Posting, PostError> {
     if !doc.kind.posts() {
         return Ok(Posting::NonPosting);
-    }
-
-    if matches!(
-        doc.kind,
-        DocKind::RawMaterialReceipt | DocKind::Build | DocKind::InventoryAdjustment
-    ) {
-        return Err(PostError::Unsupported { kind: doc.kind });
     }
 
     let is_journal = doc.kind == DocKind::JournalEntry;
@@ -988,13 +1109,13 @@ pub fn post(
             DocKind::Deposit => post_deposit(doc, ctx)?,
             DocKind::BankLine => post_bank_line(doc, ctx)?,
             DocKind::Settlement => post_settlement(doc, ctx)?,
+            DocKind::RawMaterialReceipt => post_raw_material_receipt(doc)?,
+            DocKind::Build => post_build(doc)?,
+            DocKind::InventoryAdjustment => post_inventory_adjustment(doc)?,
             DocKind::Estimate | DocKind::PurchaseOrder => {
                 unreachable!("DocKind::posts() filtered these out above")
             }
-            DocKind::JournalEntry
-            | DocKind::RawMaterialReceipt
-            | DocKind::Build
-            | DocKind::InventoryAdjustment => {
+            DocKind::JournalEntry => {
                 unreachable!("handled above")
             }
         }
@@ -1165,17 +1286,169 @@ mod tests {
         }
     }
 
+    fn account_line(no: i64, kind: LineKind, number: &str, amount: i64) -> DocLine {
+        let mut docline = line(no, kind, amount);
+        docline.account = Some(acct(number));
+        docline
+    }
+
     #[test]
-    fn manufacturing_rows_are_unsupported_for_now() {
+    fn raw_material_receipt_debits_1300_and_credits_2050() {
         let ctx = PostingContext::default();
-        for kind in [
-            DocKind::RawMaterialReceipt,
-            DocKind::Build,
-            DocKind::InventoryAdjustment,
-        ] {
-            let doc = minimal_doc(kind);
-            assert_eq!(post(&doc, 1, &ctx), Err(PostError::Unsupported { kind }));
-        }
+        let mut doc = minimal_doc(DocKind::RawMaterialReceipt);
+        doc.lines = vec![
+            account_line(1, LineKind::Account, chart::INVENTORY_RAW, 47760),
+            account_line(
+                2,
+                LineKind::Account,
+                chart::INVENTORY_RECEIVED_NOT_BILLED,
+                47760,
+            ),
+        ];
+        let Posting::Entry(entry) = post(&doc, 1, &ctx).expect("posts") else {
+            panic!("expected an entry");
+        };
+        assert!(entry.is_balanced());
+        let raw = entry
+            .lines
+            .iter()
+            .find(|l| l.account == acct(chart::INVENTORY_RAW))
+            .expect("1300 line");
+        assert_eq!(raw.debit, Money::from_minor(47760));
+        let payable = entry
+            .lines
+            .iter()
+            .find(|l| l.account == acct(chart::INVENTORY_RECEIVED_NOT_BILLED))
+            .expect("2050 line");
+        assert_eq!(payable.credit, Money::from_minor(47760));
+    }
+
+    #[test]
+    fn build_debits_finished_credits_raw_and_applied_and_plugs_variance() {
+        let ctx = PostingContext::default();
+        let mut doc = minimal_doc(DocKind::Build);
+        doc.header_class = Some(class("foam"));
+        doc.lines = vec![
+            account_line(1, LineKind::Account, chart::INVENTORY_FINISHED, 2000),
+            account_line(2, LineKind::Account, chart::INVENTORY_RAW, 1300),
+            account_line(3, LineKind::Account, chart::PARTS_LABOUR_APPLIED, 620),
+        ];
+        // finished (2000) - raw_used (1300) - applied (620) = 80: a good
+        // nest, credited to 5100.
+        let Posting::Entry(entry) = post(&doc, 1, &ctx).expect("posts") else {
+            panic!("expected an entry");
+        };
+        assert!(entry.is_balanced());
+        let variance = entry
+            .lines
+            .iter()
+            .find(|l| l.account == acct(chart::MANUFACTURING_VARIANCE))
+            .expect("5100 line");
+        assert_eq!(variance.credit, Money::from_minor(80));
+        assert_eq!(variance.class, Some(class("foam")));
+        let applied = entry
+            .lines
+            .iter()
+            .find(|l| l.account == acct(chart::PARTS_LABOUR_APPLIED))
+            .expect("5300 line");
+        assert_eq!(applied.class, Some(class("foam")));
+    }
+
+    #[test]
+    fn a_build_that_overran_debits_variance() {
+        let ctx = PostingContext::default();
+        let mut doc = minimal_doc(DocKind::Build);
+        doc.header_class = Some(class("foam"));
+        doc.lines = vec![
+            account_line(1, LineKind::Account, chart::INVENTORY_FINISHED, 2000),
+            account_line(2, LineKind::Account, chart::INVENTORY_RAW, 1700),
+            account_line(3, LineKind::Account, chart::PARTS_LABOUR_APPLIED, 620),
+        ];
+        // 2000 - 1700 - 620 = -320: consumed more than the sheet allowed.
+        let Posting::Entry(entry) = post(&doc, 1, &ctx).expect("posts") else {
+            panic!("expected an entry");
+        };
+        assert!(entry.is_balanced());
+        let variance = entry
+            .lines
+            .iter()
+            .find(|l| l.account == acct(chart::MANUFACTURING_VARIANCE))
+            .expect("5100 line");
+        assert_eq!(variance.debit, Money::from_minor(320));
+    }
+
+    #[test]
+    fn a_build_with_no_class_is_rejected() {
+        let ctx = PostingContext::default();
+        let mut doc = minimal_doc(DocKind::Build);
+        doc.lines = vec![
+            account_line(1, LineKind::Account, chart::INVENTORY_FINISHED, 2000),
+            account_line(2, LineKind::Account, chart::INVENTORY_RAW, 1300),
+            account_line(3, LineKind::Account, chart::PARTS_LABOUR_APPLIED, 620),
+        ];
+        assert_eq!(
+            post(&doc, 1, &ctx),
+            Err(PostError::MissingClass { line_no: 0 })
+        );
+    }
+
+    #[test]
+    fn inventory_adjustment_count_up_credits_5150() {
+        let ctx = PostingContext::default();
+        let mut doc = minimal_doc(DocKind::InventoryAdjustment);
+        doc.header_class = Some(class("foam"));
+        doc.lines = vec![account_line(
+            1,
+            LineKind::Account,
+            chart::INVENTORY_RAW,
+            500,
+        )];
+        let Posting::Entry(entry) = post(&doc, 1, &ctx).expect("posts") else {
+            panic!("expected an entry");
+        };
+        assert!(entry.is_balanced());
+        let raw = entry
+            .lines
+            .iter()
+            .find(|l| l.account == acct(chart::INVENTORY_RAW))
+            .expect("1300 line");
+        assert_eq!(raw.debit, Money::from_minor(500));
+        let shrink = entry
+            .lines
+            .iter()
+            .find(|l| l.account == acct(chart::INVENTORY_ADJUSTMENT))
+            .expect("5150 line");
+        assert_eq!(shrink.credit, Money::from_minor(500));
+        assert_eq!(shrink.class, Some(class("foam")));
+    }
+
+    #[test]
+    fn inventory_adjustment_count_down_debits_5150() {
+        let ctx = PostingContext::default();
+        let mut doc = minimal_doc(DocKind::InventoryAdjustment);
+        doc.header_class = Some(class("foam"));
+        doc.lines = vec![account_line(
+            1,
+            LineKind::Account,
+            chart::INVENTORY_FINISHED,
+            -500,
+        )];
+        let Posting::Entry(entry) = post(&doc, 1, &ctx).expect("posts") else {
+            panic!("expected an entry");
+        };
+        assert!(entry.is_balanced());
+        let shrink = entry
+            .lines
+            .iter()
+            .find(|l| l.account == acct(chart::INVENTORY_ADJUSTMENT))
+            .expect("5150 line");
+        assert_eq!(shrink.debit, Money::from_minor(500));
+        let finished = entry
+            .lines
+            .iter()
+            .find(|l| l.account == acct(chart::INVENTORY_FINISHED))
+            .expect("1310 line");
+        assert_eq!(finished.credit, Money::from_minor(500));
     }
 
     #[test]

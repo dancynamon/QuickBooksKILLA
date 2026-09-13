@@ -22,6 +22,10 @@
 //!   per-statement close
 //! - [`authnet`]  — D15, §1, §10: the Authorize.net settlement import and
 //!   the fee-aware settlement match it feeds in [`bank`]
+//! - [`mfg`]      — §11: manufacturing costing, built after cutover. Landed
+//!   cost by board foot, build sheets with yield as a divisor, builds with
+//!   priced variance, sensitivity, and the three §1 posting rows this
+//!   unblocks in [`post`]
 //! - [`mcp`]      — `ROADMAP.md` §G, §D: the MCP server over this ledger —
 //!   every report above as a read tool, plus gated writes through
 //!   [`post`] and [`store`]
@@ -37,6 +41,7 @@ pub mod bank;
 pub mod chart;
 pub mod import;
 pub mod mcp;
+pub mod mfg;
 pub mod nightly;
 pub mod pipeline;
 pub mod post;
