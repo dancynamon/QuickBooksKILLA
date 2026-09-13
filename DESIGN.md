@@ -770,14 +770,28 @@ POs/SOs, **accrual only**.
 
 - Record/replay HTTP fixtures for the QBO API. **The suite runs fully offline** —
   a requirement, not a nicety, since this environment cannot reach Intuit.
+  Not built yet: it needs one real response to scrub, which needs
+  `HttpQboClient` and credentials (`ROADMAP.md` §A step 4, 7).
 - Property test: any sequence of local mutations, drained through the outbox
   against a mock QBO, converges to a replica identical to a fresh pull.
+  `apps/qbo-local/src/worker.rs`'s `draining_converges_without_duplicates`,
+  extended with a proptest-chosen point at which the `Drainer` is dropped and
+  rebuilt mid-sequence — the in-process approximation of the chaos test below.
 - Chaos test: kill the process mid-flight on a write, restart, assert
   exactly-once — specifically exercising the `in_flight` recovery path (§6.1).
+  `apps/qbo-local/tests/chaos.rs`, driving a real second process
+  (`apps/qbo-local/src/bin/chaos-child.rs`) against a `JournalledMock`
+  (`apps/qbo-local/src/client/journal.rs`) that persists "QBO" state to disk
+  across the kill, so the recovery is proven against what a separate process
+  actually did rather than what the same process remembers.
 - Token rotation test: expire the access token mid-batch, assert clean recovery
-  and that no token generation is lost.
+  and that no token generation is lost. Not built yet: it needs
+  `HttpQboClient` to have a batch to expire mid-way through
+  (`ROADMAP.md` §A step 4).
 - CDC truncation test: a mock returning exactly 1000 objects must trigger window
-  halving, not cursor advance.
+  halving, not cursor advance. `apps/qbo-local/src/sync.rs`'s
+  `a_response_at_the_cap_is_treated_as_truncated`, exercised end to end in
+  `apps/qbo-local/tests/sync_driver.rs`'s truncation tests.
 
 ## 11. Performance targets — benchmarked, not asserted
 

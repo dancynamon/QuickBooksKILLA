@@ -102,10 +102,18 @@ not gate anything written to your own books.
   `docs/MCP.md`. A skill can be repointed for a read test as soon as a replica
   exists.
 - ~~LEDGER-DESIGN.md first draft~~ written (D18), 30 open items for Dan and Joel.
-- **Chaos test for `in_flight` recovery** (DESIGN §10) with a process-boundary
-  harness.
-- **Un-ignore the performance measurements** as a thresholded `--ignored` CI
-  job, so DESIGN §11's numbers are guarded rather than reported once.
+- ~~Chaos test for `in_flight` recovery~~ built: `tests/chaos.rs` kills and
+  restarts a real second process (`src/bin/chaos-child.rs`) against a
+  `JournalledMock` (`src/client/journal.rs`) that survives the kill;
+  `worker.rs`'s convergence property test gained a random restart point
+  alongside it. A CI job (`.github/workflows/ci.yml`) also now runs
+  `cargo clippy --workspace --all-targets -- -D warnings` and
+  `cargo test --workspace` on every push and pull request.
+- ~~Un-ignore the performance measurements as a thresholded CI job~~ built:
+  each DESIGN §11 measurement asserts a 3x budget under `QBO_BENCH_ASSERT=1`
+  (`tests/{commit_cost,query,replica}.rs`, `cargo bench-qbo`), and CI's
+  `bench` job sets that variable — DESIGN §11's numbers are guarded now, not
+  reported once.
 
 ---
 

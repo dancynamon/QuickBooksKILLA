@@ -19,6 +19,7 @@ pub mod query;
 pub mod search;
 
 use crate::domain::{ContactType, DocumentType, EntityType, RealmId};
+use crate::outbox::{Operation, OutboxRecord, OutboxState};
 use crate::project::{ParsedDocument, ParsedEntity, Projection};
 use crate::sync::SyncCursor;
 
@@ -933,6 +934,182 @@ impl Store {
             |row| row.get(0),
         )?)
     }
+
+    // -----------------------------------------------------------------------
+    // The outbox (`DESIGN.md` §6). Durable storage for `outbox::OutboxRecord`
+    // — `worker::Drainer` runs the state machine in memory, one drain pass at
+    // a time; this is what lets a record's state survive past the process
+    // that was draining it, which is the entire premise `tests/chaos.rs`
+    // exercises.
+    // -----------------------------------------------------------------------
+
+    /// Persist a newly created outbox record.
+    pub fn insert_outbox_record(&self, record: &OutboxRecord) -> Result<(), StoreError> {
+        self.connection.execute(
+            "INSERT INTO outbox (id, realm_id, entity_type, operation, payload_json,
+                 local_entity_id, base_sync_token, request_id, state, attempts,
+                 depends_on, last_error, qbo_response_json, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, NULL, ?13, ?14)",
+            params![
+                record.id.to_string(),
+                record.realm_id.as_str(),
+                record.entity_type.as_str(),
+                record.operation.as_str(),
+                record.payload_json.to_string(),
+                record.local_entity_id,
+                record.base_sync_token,
+                record.request_id.to_string(),
+                record.state.as_str(),
+                record.attempts,
+                record.depends_on.map(|id| id.to_string()),
+                record.last_error,
+                record.created_at.to_rfc3339(),
+                record.updated_at.to_rfc3339(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Persist a state transition.
+    ///
+    /// Call this **immediately** after any `OutboxRecord` transition, in
+    /// particular `begin_attempt`'s move to `in_flight` — before the client
+    /// call it guards is issued, per `DESIGN.md` §6.1. `worker::Drainer`
+    /// exposes exactly this timing through `set_on_transition` without
+    /// depending on `Store` itself; wiring the two together is the caller's
+    /// job (`apps/qbo-local/src/bin/chaos-child.rs` is the only one that does
+    /// today).
+    pub fn save_outbox_record(&self, record: &OutboxRecord) -> Result<(), StoreError> {
+        self.connection.execute(
+            "UPDATE outbox
+             SET state = ?2, attempts = ?3, last_error = ?4, updated_at = ?5
+             WHERE id = ?1",
+            params![
+                record.id.to_string(),
+                record.state.as_str(),
+                record.attempts,
+                record.last_error,
+                record.updated_at.to_rfc3339(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Every outbox record for a realm, oldest first — UUIDv7 order, which is
+    /// creation order and therefore drain order (`DESIGN.md` §6.3).
+    pub fn list_outbox_records(&self, realm: &RealmId) -> Result<Vec<OutboxRecord>, StoreError> {
+        let mut statement = self.connection.prepare(
+            "SELECT id, realm_id, entity_type, operation, payload_json, local_entity_id,
+                    base_sync_token, request_id, state, attempts, depends_on, last_error,
+                    created_at, updated_at
+             FROM outbox WHERE realm_id = ?1 ORDER BY id",
+        )?;
+        let rows = statement.query_map(params![realm.as_str()], outbox_row)?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// Record the id QBO assigned to a `local:`-prefixed id, once the create
+    /// that owns it applies (`DESIGN.md` §6.4). Idempotent: replaying the same
+    /// mapping — the case a recovered `in_flight` create adopting rather than
+    /// duplicating produces — overwrites with the same value rather than
+    /// erroring.
+    pub fn record_local_id_mapping(
+        &self,
+        realm: &RealmId,
+        local_entity_id: &str,
+        entity_type: EntityType,
+        qbo_id: &str,
+        now: DateTime<Utc>,
+    ) -> Result<(), StoreError> {
+        self.connection.execute(
+            "INSERT INTO local_id_map (realm_id, local_entity_id, entity_type, qbo_id, mapped_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(realm_id, local_entity_id) DO UPDATE SET
+                 qbo_id = excluded.qbo_id, mapped_at = excluded.mapped_at",
+            params![
+                realm.as_str(),
+                local_entity_id,
+                entity_type.as_str(),
+                qbo_id,
+                now.to_rfc3339()
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Every `local:` id this realm has resolved to a real QBO id — what a
+    /// restarted process reloads to reseed a fresh `worker::Drainer` via
+    /// `seed_mapping`, so a dependant queued before the crash can still have
+    /// its reference rewritten without redraining its already-applied parent.
+    pub fn load_local_id_map(&self, realm: &RealmId) -> Result<Vec<(String, String)>, StoreError> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT local_entity_id, qbo_id FROM local_id_map WHERE realm_id = ?1")?;
+        let rows = statement.query_map(params![realm.as_str()], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+}
+
+fn outbox_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<OutboxRecord> {
+    let id: String = row.get(0)?;
+    let realm_id: String = row.get(1)?;
+    let entity_type: String = row.get(2)?;
+    let operation: String = row.get(3)?;
+    let payload_json: String = row.get(4)?;
+    let local_entity_id: String = row.get(5)?;
+    let base_sync_token: Option<String> = row.get(6)?;
+    let request_id: String = row.get(7)?;
+    let state: String = row.get(8)?;
+    let attempts: u32 = row.get(9)?;
+    let depends_on: Option<String> = row.get(10)?;
+    let last_error: Option<String> = row.get(11)?;
+    let created_at: String = row.get(12)?;
+    let updated_at: String = row.get(13)?;
+
+    // Every row here only ever came from `insert_outbox_record`, which takes
+    // an already-validated `OutboxRecord` — a value that fails one of these
+    // conversions means the file was edited outside the app, exactly as in
+    // `list_realms`'s `raw_realm_id` decode above.
+    fn fail(
+        column: usize,
+        error: impl std::error::Error + Send + Sync + 'static,
+    ) -> rusqlite::Error {
+        rusqlite::Error::FromSqlConversionFailure(
+            column,
+            rusqlite::types::Type::Text,
+            Box::new(error),
+        )
+    }
+    fn fail_message(column: usize, message: String) -> rusqlite::Error {
+        rusqlite::Error::FromSqlConversionFailure(
+            column,
+            rusqlite::types::Type::Text,
+            message.into(),
+        )
+    }
+
+    Ok(OutboxRecord {
+        id: uuid::Uuid::parse_str(&id).map_err(|e| fail(0, e))?,
+        realm_id: RealmId::parse(&realm_id).map_err(|e| fail(1, e))?,
+        entity_type: EntityType::parse(&entity_type).map_err(|e| fail(2, e))?,
+        operation: Operation::parse(&operation)
+            .ok_or_else(|| fail_message(3, format!("unknown outbox operation {operation:?}")))?,
+        payload_json: serde_json::from_str(&payload_json).map_err(|e| fail(4, e))?,
+        local_entity_id,
+        base_sync_token,
+        request_id: uuid::Uuid::parse_str(&request_id).map_err(|e| fail(7, e))?,
+        state: OutboxState::parse(&state)
+            .ok_or_else(|| fail_message(8, format!("unknown outbox state {state:?}")))?,
+        attempts,
+        depends_on: depends_on
+            .map(|raw| uuid::Uuid::parse_str(&raw).map_err(|e| fail(10, e)))
+            .transpose()?,
+        last_error,
+        created_at: parse_timestamp(&created_at),
+        updated_at: parse_timestamp(&updated_at),
+    })
 }
 
 /// The projected tables, named as a type so `count_projected` cannot be handed
@@ -1775,5 +1952,119 @@ mod tests {
             params![aquamentor().as_str()],
         );
         assert!(result.is_err(), "orphaned line should have been refused");
+    }
+
+    // -----------------------------------------------------------------------
+    // Outbox persistence — the durability `tests/chaos.rs` depends on.
+    // -----------------------------------------------------------------------
+
+    fn outbox_record(entity_type: EntityType, local_entity_id: &str) -> OutboxRecord {
+        OutboxRecord::new(
+            crate::outbox::NewOutboxRecord {
+                id: uuid::Uuid::now_v7(),
+                request_id: uuid::Uuid::now_v7(),
+                realm_id: aquamentor(),
+                entity_type,
+                operation: Operation::Create,
+                payload_json: serde_json::json!({ "DisplayName": "BLUE HARBOR SWIM" }),
+                local_entity_id: local_entity_id.to_string(),
+                base_sync_token: None,
+            },
+            now(),
+        )
+    }
+
+    #[test]
+    fn an_inserted_outbox_record_round_trips_through_the_store() {
+        let store = store();
+        let record = outbox_record(EntityType::Customer, "local:cust-1");
+        store.insert_outbox_record(&record).unwrap();
+
+        let loaded = store.list_outbox_records(&aquamentor()).unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].id, record.id);
+        assert_eq!(loaded[0].request_id, record.request_id);
+        assert_eq!(loaded[0].entity_type, EntityType::Customer);
+        assert_eq!(loaded[0].operation, Operation::Create);
+        assert_eq!(loaded[0].state, OutboxState::Pending);
+        assert_eq!(loaded[0].local_entity_id, "local:cust-1");
+        assert_eq!(loaded[0].payload_json, record.payload_json);
+    }
+
+    #[test]
+    fn saving_a_transition_persists_the_new_state() {
+        let store = store();
+        let mut record = outbox_record(EntityType::Invoice, "local:inv-1");
+        store.insert_outbox_record(&record).unwrap();
+
+        record.begin_attempt(true, now()).unwrap();
+        store.save_outbox_record(&record).unwrap();
+
+        let loaded = store.list_outbox_records(&aquamentor()).unwrap();
+        assert_eq!(loaded[0].state, OutboxState::InFlight);
+        assert_eq!(loaded[0].attempts, 1);
+
+        record.mark_applied(now()).unwrap();
+        store.save_outbox_record(&record).unwrap();
+        let loaded = store.list_outbox_records(&aquamentor()).unwrap();
+        assert_eq!(loaded[0].state, OutboxState::Applied);
+    }
+
+    #[test]
+    fn outbox_records_are_listed_in_uuidv7_creation_order() {
+        let store = store();
+        let first = outbox_record(EntityType::Invoice, "local:inv-1");
+        let second = outbox_record(EntityType::Invoice, "local:inv-2");
+        // Insert out of order; listing order must come from the id, not from
+        // insertion order.
+        store.insert_outbox_record(&second).unwrap();
+        store.insert_outbox_record(&first).unwrap();
+
+        let loaded = store.list_outbox_records(&aquamentor()).unwrap();
+        assert_eq!(
+            loaded.iter().map(|r| r.id).collect::<Vec<_>>(),
+            vec![first.id, second.id]
+        );
+    }
+
+    #[test]
+    fn realms_do_not_see_each_others_outbox_records() {
+        let store = store();
+        let mut record = outbox_record(EntityType::Invoice, "local:inv-1");
+        record.realm_id = waterline();
+        store.insert_outbox_record(&record).unwrap();
+
+        assert!(store.list_outbox_records(&aquamentor()).unwrap().is_empty());
+        assert_eq!(store.list_outbox_records(&waterline()).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_local_id_mapping_round_trips_and_can_be_replaced() {
+        let store = store();
+        store
+            .record_local_id_mapping(
+                &aquamentor(),
+                "local:cust-1",
+                EntityType::Customer,
+                "42",
+                now(),
+            )
+            .unwrap();
+
+        let map = store.load_local_id_map(&aquamentor()).unwrap();
+        assert_eq!(map, vec![("local:cust-1".to_string(), "42".to_string())]);
+
+        // Recovering the same in_flight create twice (once for real, once for
+        // a test that re-adopts) must overwrite rather than error.
+        store
+            .record_local_id_mapping(
+                &aquamentor(),
+                "local:cust-1",
+                EntityType::Customer,
+                "42",
+                now(),
+            )
+            .unwrap();
+        assert_eq!(store.load_local_id_map(&aquamentor()).unwrap().len(), 1);
     }
 }

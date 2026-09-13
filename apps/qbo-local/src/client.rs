@@ -9,13 +9,16 @@
 use std::collections::HashMap;
 
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
 
 use crate::domain::{EntityType, RealmId};
 
+pub mod journal;
+
 /// One entity as QBO returns it.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct EntityPayload {
     pub entity_type: EntityType,
     pub qbo_id: String,
@@ -273,15 +276,67 @@ impl MockQbo {
     /// Simulate someone editing a record in the QBO web UI: the `SyncToken`
     /// moves on, so any queued update built on the old one now conflicts.
     pub fn bump_sync_token(&mut self, realm: &RealmId, entity_type: EntityType, qbo_id: &str) {
-        if let Some(entity) = self.entities.get_mut(&(
-            realm.as_str().to_string(),
-            entity_type,
-            qbo_id.to_string(),
-        )) {
+        if let Some(entity) =
+            self.entities
+                .get_mut(&(realm.as_str().to_string(), entity_type, qbo_id.to_string()))
+        {
             let next: u64 = entity.sync_token.parse::<u64>().unwrap_or(0) + 1;
             entity.sync_token = next.to_string();
         }
     }
+
+    /// A serialisable snapshot of everything that makes this double behave
+    /// like the real QBO — not just the entities it holds, but the
+    /// `RequestId` log that gives idempotency and the id counter that keeps
+    /// new ids from colliding with ones a previous process already handed
+    /// out.
+    ///
+    /// This is what [`journal::JournalledMock`] persists to disk after every
+    /// mutating call, so that a second process picks up exactly what the
+    /// first one actually did to "QBO" rather than an approximation of it.
+    pub fn snapshot(&self) -> MockQboSnapshot {
+        MockQboSnapshot {
+            entities: self
+                .entities
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
+            request_log: self
+                .request_log
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
+            next_id: self.next_id,
+            clock: self.clock,
+            cdc_cap: self.cdc_cap,
+        }
+    }
+
+    /// The inverse of [`Self::snapshot`]. Scripted failures and call counters
+    /// are deliberately not part of the snapshot — they are per-process test
+    /// instrumentation, not state QBO itself would remember.
+    pub fn restore(snapshot: MockQboSnapshot) -> Self {
+        MockQbo {
+            entities: snapshot.entities.into_iter().collect(),
+            request_log: snapshot.request_log.into_iter().collect(),
+            next_id: snapshot.next_id,
+            clock: snapshot.clock,
+            scripted_failures: Vec::new(),
+            create_calls: 0,
+            query_calls: 0,
+            cdc_cap: snapshot.cdc_cap,
+        }
+    }
+}
+
+/// See [`MockQbo::snapshot`].
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct MockQboSnapshot {
+    entities: Vec<(EntityKey, EntityPayload)>,
+    request_log: Vec<((String, Uuid), EntityPayload)>,
+    next_id: u64,
+    clock: DateTime<Utc>,
+    cdc_cap: usize,
 }
 
 impl QboClient for MockQbo {
@@ -318,7 +373,11 @@ impl QboClient for MockQbo {
                 .cmp(&b.last_updated_utc)
                 .then(a.qbo_id.cmp(&b.qbo_id))
         });
-        Ok(matches.into_iter().skip(start_position).take(max_results).collect())
+        Ok(matches
+            .into_iter()
+            .skip(start_position)
+            .take(max_results)
+            .collect())
     }
 
     fn cdc(
@@ -497,8 +556,12 @@ mod tests {
         let request_id = Uuid::now_v7();
         let payload = serde_json::json!({ "DocNumber": "21234" });
 
-        let first = qbo.create(&realm(), EntityType::Invoice, &payload, request_id).unwrap();
-        let second = qbo.create(&realm(), EntityType::Invoice, &payload, request_id).unwrap();
+        let first = qbo
+            .create(&realm(), EntityType::Invoice, &payload, request_id)
+            .unwrap();
+        let second = qbo
+            .create(&realm(), EntityType::Invoice, &payload, request_id)
+            .unwrap();
 
         assert_eq!(first.qbo_id, second.qbo_id);
         assert_eq!(qbo.count(&realm(), EntityType::Invoice), 1);
@@ -534,7 +597,12 @@ mod tests {
     fn a_stale_sync_token_is_refused() {
         let mut qbo = MockQbo::new(at(0));
         let created = qbo
-            .create(&realm(), EntityType::Invoice, &serde_json::json!({}), Uuid::now_v7())
+            .create(
+                &realm(),
+                EntityType::Invoice,
+                &serde_json::json!({}),
+                Uuid::now_v7(),
+            )
             .unwrap();
 
         // Someone edits it in the QBO web UI.
@@ -555,7 +623,12 @@ mod tests {
     fn an_update_on_the_current_token_succeeds_and_advances_it() {
         let mut qbo = MockQbo::new(at(0));
         let created = qbo
-            .create(&realm(), EntityType::Invoice, &serde_json::json!({}), Uuid::now_v7())
+            .create(
+                &realm(),
+                EntityType::Invoice,
+                &serde_json::json!({}),
+                Uuid::now_v7(),
+            )
             .unwrap();
         let updated = qbo
             .update(
@@ -596,8 +669,13 @@ mod tests {
     fn realms_are_isolated_in_the_double_too() {
         let mut qbo = MockQbo::new(at(0));
         let waterline = RealmId::parse("1234567890123457").unwrap();
-        qbo.create(&realm(), EntityType::Invoice, &serde_json::json!({}), Uuid::now_v7())
-            .unwrap();
+        qbo.create(
+            &realm(),
+            EntityType::Invoice,
+            &serde_json::json!({}),
+            Uuid::now_v7(),
+        )
+        .unwrap();
         assert_eq!(qbo.count(&realm(), EntityType::Invoice), 1);
         assert_eq!(qbo.count(&waterline, EntityType::Invoice), 0);
     }
@@ -614,19 +692,44 @@ mod tests {
             )
             .unwrap();
         }
-        assert_eq!(qbo.query(&realm(), EntityType::Invoice, None, 0, 2).unwrap().len(), 2);
-        assert_eq!(qbo.query(&realm(), EntityType::Invoice, None, 4, 2).unwrap().len(), 1);
-        assert_eq!(qbo.query(&realm(), EntityType::Invoice, None, 9, 2).unwrap().len(), 0);
+        assert_eq!(
+            qbo.query(&realm(), EntityType::Invoice, None, 0, 2)
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(
+            qbo.query(&realm(), EntityType::Invoice, None, 4, 2)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            qbo.query(&realm(), EntityType::Invoice, None, 9, 2)
+                .unwrap()
+                .len(),
+            0
+        );
     }
 
     #[test]
     fn cdc_returns_only_what_changed_since_the_cursor() {
         let mut qbo = MockQbo::new(at(0));
-        qbo.create(&realm(), EntityType::Invoice, &serde_json::json!({ "n": 1 }), Uuid::now_v7())
-            .unwrap();
+        qbo.create(
+            &realm(),
+            EntityType::Invoice,
+            &serde_json::json!({ "n": 1 }),
+            Uuid::now_v7(),
+        )
+        .unwrap();
         qbo.advance(at(100));
-        qbo.create(&realm(), EntityType::Invoice, &serde_json::json!({ "n": 2 }), Uuid::now_v7())
-            .unwrap();
+        qbo.create(
+            &realm(),
+            EntityType::Invoice,
+            &serde_json::json!({ "n": 2 }),
+            Uuid::now_v7(),
+        )
+        .unwrap();
 
         let changed = qbo.cdc(&realm(), &[EntityType::Invoice], at(50)).unwrap();
         assert_eq!(changed.len(), 1);
@@ -640,16 +743,74 @@ mod tests {
         qbo.fail_next(QboError::RateLimited);
 
         assert!(matches!(
-            qbo.create(&realm(), EntityType::Invoice, &serde_json::json!({}), Uuid::now_v7()),
+            qbo.create(
+                &realm(),
+                EntityType::Invoice,
+                &serde_json::json!({}),
+                Uuid::now_v7()
+            ),
             Err(QboError::Network(_))
         ));
         assert_eq!(
-            qbo.create(&realm(), EntityType::Invoice, &serde_json::json!({}), Uuid::now_v7()),
+            qbo.create(
+                &realm(),
+                EntityType::Invoice,
+                &serde_json::json!({}),
+                Uuid::now_v7()
+            ),
             Err(QboError::RateLimited)
         );
         assert!(qbo
-            .create(&realm(), EntityType::Invoice, &serde_json::json!({}), Uuid::now_v7())
+            .create(
+                &realm(),
+                EntityType::Invoice,
+                &serde_json::json!({}),
+                Uuid::now_v7()
+            )
             .is_ok());
+    }
+
+    #[test]
+    fn a_snapshot_round_trips_through_json_and_restores_full_behaviour() {
+        let mut qbo = MockQbo::new(at(0));
+        let request_id = Uuid::now_v7();
+        qbo.create(
+            &realm(),
+            EntityType::Customer,
+            &serde_json::json!({ "DisplayName": "BLUE HARBOR SWIM" }),
+            request_id,
+        )
+        .unwrap();
+        qbo.create(
+            &realm(),
+            EntityType::Invoice,
+            &serde_json::json!({}),
+            Uuid::now_v7(),
+        )
+        .unwrap();
+
+        let json = serde_json::to_string(&qbo.snapshot()).unwrap();
+        let snapshot: MockQboSnapshot = serde_json::from_str(&json).unwrap();
+        let mut restored = MockQbo::restore(snapshot);
+
+        assert_eq!(restored.count(&realm(), EntityType::Customer), 1);
+        assert_eq!(restored.count(&realm(), EntityType::Invoice), 1);
+
+        // The RequestId log survived, so a retry against the restored double
+        // still replays rather than duplicating.
+        let replayed = restored
+            .create(
+                &realm(),
+                EntityType::Invoice,
+                &serde_json::json!({}),
+                Uuid::now_v7(),
+            )
+            .unwrap();
+        assert_eq!(restored.count(&realm(), EntityType::Invoice), 2);
+        assert_eq!(
+            replayed.qbo_id, "3",
+            "the id counter must not restart and collide"
+        );
     }
 
     #[test]

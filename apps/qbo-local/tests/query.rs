@@ -17,6 +17,19 @@ fn realm() -> RealmId {
     RealmId::parse("1234567890123456").unwrap()
 }
 
+/// Enforces a `DESIGN.md` §11 measurement's budget only when `QBO_BENCH_ASSERT=1`
+/// is set, so an ordinary `cargo test -p qbo-local -- --ignored` reports a
+/// number without failing a slower laptop, while the dedicated CI `bench` job
+/// (`.github/workflows/ci.yml`) — a fixed, comparable machine — enforces it.
+fn bench_assert(label: &str, elapsed: std::time::Duration, budget_ms: u128) {
+    if std::env::var("QBO_BENCH_ASSERT").as_deref() == Ok("1") {
+        assert!(
+            elapsed.as_millis() < budget_ms,
+            "{label} took {elapsed:?}, over the {budget_ms}ms QBO_BENCH_ASSERT budget"
+        );
+    }
+}
+
 fn now() -> chrono::DateTime<Utc> {
     Utc.with_ymd_and_hms(2026, 9, 11, 12, 0, 0).unwrap()
 }
@@ -802,12 +815,11 @@ fn ar_aging_and_document_detail_stay_fast_at_a_realistic_book_size() {
          document_detail : {document_detail_elapsed:?}"
     );
 
-    assert!(
-        ar_aging_elapsed.as_millis() < 2000,
-        "ar_aging took {ar_aging_elapsed:?}"
-    );
-    assert!(
-        document_detail_elapsed.as_millis() < 50,
-        "document_detail took {document_detail_elapsed:?}"
-    );
+    // DESIGN.md §11 measured ~59ms and ~0.3ms on this same shape (debug
+    // build); these budgets are 3x that, enforced only under
+    // QBO_BENCH_ASSERT=1 (`.github/workflows/ci.yml`'s `bench` job) so a
+    // regression is caught in CI rather than merely reported on whoever
+    // happens to run the ignored suite by hand.
+    bench_assert("ar_aging", ar_aging_elapsed, 200);
+    bench_assert("document_detail", document_detail_elapsed, 5);
 }

@@ -16,6 +16,9 @@ use crate::outbox::{DrainFailure, Operation, OutboxRecord, OutboxState};
 /// Prefix marking an id that exists only locally until QBO assigns a real one.
 pub const LOCAL_ID_PREFIX: &str = "local:";
 
+/// See [`Drainer::set_on_transition`].
+type TransitionHook = Box<dyn FnMut(&OutboxRecord, Option<&str>)>;
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct DrainReport {
     pub applied: usize,
@@ -82,6 +85,19 @@ fn rewrite_local_ids(
 pub struct Drainer {
     /// `(realm, local_entity_id) -> qbo_id`
     id_map: HashMap<(String, String), String>,
+    /// Client calls that reached `Applied` in this `Drainer`'s lifetime — the
+    /// counter `set_crash_hook` compares against `--kill-after`.
+    applied_calls: usize,
+    /// Fired after every persisted-state change during a drain pass —
+    /// `begin_attempt` (before the client call, so a caller backed by a
+    /// [`crate::store::Store`] can commit `in_flight` to disk before the
+    /// request is issued, per `DESIGN.md` §6.1), then `mark_applied` or
+    /// `mark_failed` (after it). `worker` itself has no `Store` dependency;
+    /// this hook is how a durable caller gets one without `worker` growing
+    /// one.
+    on_transition: Option<TransitionHook>,
+    /// Test-only. See [`Self::set_crash_hook`].
+    crash_hook: Option<Box<dyn FnMut(usize)>>,
 }
 
 impl Drainer {
@@ -99,6 +115,35 @@ impl Drainer {
             (realm.as_str().to_string(), local_entity_id.to_string()),
             qbo_id.to_string(),
         );
+    }
+
+    /// Seed a mapping this `Drainer` did not itself resolve — reloaded, for
+    /// instance, from `store::Store`'s `local_id_map` table after a process
+    /// restart. Without this, a fresh `Drainer` has no memory of ids QBO
+    /// assigned in an earlier run, and cannot rewrite a still-pending
+    /// dependant's `local:` reference to one.
+    pub fn seed_mapping(&mut self, realm: &RealmId, local_entity_id: &str, qbo_id: &str) {
+        self.record_mapping(realm, local_entity_id, qbo_id);
+    }
+
+    /// Persistence seam: called with the record's state right after it
+    /// changes, twice per attempt — once for `begin_attempt`, before the
+    /// client call, and once for the `mark_applied`/`mark_failed` that
+    /// follows it. The second argument is the id QBO assigned, when this call
+    /// is the one that just applied the record; `None` otherwise.
+    pub fn set_on_transition(&mut self, hook: impl FnMut(&OutboxRecord, Option<&str>) + 'static) {
+        self.on_transition = Some(Box::new(hook));
+    }
+
+    /// Test-only: the crash window `DESIGN.md` §6.1 requires the `in_flight`
+    /// recovery path to survive — after a remote call has succeeded and
+    /// before the resulting `mark_applied` commit. `hook` receives the count
+    /// of calls that have reached that point so far in this `Drainer`'s
+    /// lifetime; `tests/chaos.rs` uses it to call `std::process::abort()` on
+    /// the Kth one.
+    #[doc(hidden)]
+    pub fn set_crash_hook(&mut self, hook: impl FnMut(usize) + 'static) {
+        self.crash_hook = Some(Box::new(hook));
     }
 
     /// One drain pass over the queue.
@@ -138,7 +183,11 @@ impl Drainer {
                     record.state,
                 )
             };
-            let entity_key = (realm.as_str().to_string(), entity_type, local_entity_id.clone());
+            let entity_key = (
+                realm.as_str().to_string(),
+                entity_type,
+                local_entity_id.clone(),
+            );
 
             if !state.is_drainable() {
                 if !state.is_terminal() {
@@ -172,13 +221,23 @@ impl Drainer {
                 blocked_entities.insert(entity_key);
                 continue;
             }
+            if let Some(hook) = self.on_transition.as_mut() {
+                hook(&records[index], None);
+            }
 
             let outcome = self.issue(client, &records[index], &payload, &realm, now);
 
             match outcome {
                 Ok(Applied { qbo_id, adopted }) => {
+                    self.applied_calls += 1;
+                    if let Some(hook) = self.crash_hook.as_mut() {
+                        hook(self.applied_calls);
+                    }
                     self.record_mapping(&realm, &local_entity_id, &qbo_id);
                     let _ = records[index].mark_applied(now);
+                    if let Some(hook) = self.on_transition.as_mut() {
+                        hook(&records[index], Some(qbo_id.as_str()));
+                    }
                     states.insert(id, OutboxState::Applied);
                     report.applied += 1;
                     if adopted {
@@ -192,6 +251,9 @@ impl Drainer {
                         other => DrainFailure::Rejected(other.to_string()),
                     };
                     let _ = records[index].mark_failed(failure, now);
+                    if let Some(hook) = self.on_transition.as_mut() {
+                        hook(&records[index], None);
+                    }
                     let new_state = records[index].state;
                     states.insert(id, new_state);
                     match new_state {
@@ -360,7 +422,10 @@ mod tests {
         assert_eq!(report.applied, 2);
         assert_eq!(report.blocked, 0);
 
-        let customer_id = drainer.resolved_id(&realm(), "local:cust-1").unwrap().clone();
+        let customer_id = drainer
+            .resolved_id(&realm(), "local:cust-1")
+            .unwrap()
+            .clone();
         let invoice_id = drainer.resolved_id(&realm(), "local:inv-1").unwrap();
         let stored = qbo.get(&realm(), EntityType::Invoice, invoice_id).unwrap();
         assert_eq!(stored.raw_json["CustomerRef"]["value"], customer_id);
@@ -397,9 +462,20 @@ mod tests {
 
         assert_eq!(report.retried, 1);
         assert_eq!(report.blocked, 1);
-        assert_eq!(records[1].state, OutboxState::Pending, "dependant must not fail on its own");
-        assert_eq!(records[1].attempts, 0, "a blocked dependant burns no retry budget");
-        assert_eq!(qbo.count(&realm(), EntityType::Invoice), 0, "no orphaned invoice");
+        assert_eq!(
+            records[1].state,
+            OutboxState::Pending,
+            "dependant must not fail on its own"
+        );
+        assert_eq!(
+            records[1].attempts, 0,
+            "a blocked dependant burns no retry budget"
+        );
+        assert_eq!(
+            qbo.count(&realm(), EntityType::Invoice),
+            0,
+            "no orphaned invoice"
+        );
     }
 
     #[test]
@@ -430,7 +506,10 @@ mod tests {
         let report = drainer.drain(&mut records, &mut qbo, at(1));
 
         assert_eq!(report.applied, 1);
-        assert_eq!(report.adopted, 1, "should have adopted the existing customer");
+        assert_eq!(
+            report.adopted, 1,
+            "should have adopted the existing customer"
+        );
         assert_eq!(
             qbo.count(&realm(), EntityType::Customer),
             1,
@@ -456,7 +535,11 @@ mod tests {
         records[0].attempts = 0;
         drainer.drain(&mut records, &mut qbo, at(1));
 
-        assert_eq!(qbo.count(&realm(), EntityType::Invoice), 1, "duplicate invoice");
+        assert_eq!(
+            qbo.count(&realm(), EntityType::Invoice),
+            1,
+            "duplicate invoice"
+        );
         assert_eq!(records[0].state, OutboxState::Applied);
     }
 
@@ -472,7 +555,10 @@ mod tests {
             serde_json::json!({ "DocNumber": "1" }),
         )];
         drainer.drain(&mut records, &mut qbo, at(0));
-        let qbo_id = drainer.resolved_id(&realm(), "local:inv-1").unwrap().clone();
+        let qbo_id = drainer
+            .resolved_id(&realm(), "local:inv-1")
+            .unwrap()
+            .clone();
 
         // Someone edits the invoice in QBO's web UI.
         qbo.bump_sync_token(&realm(), EntityType::Invoice, &qbo_id);
@@ -489,7 +575,12 @@ mod tests {
         assert_eq!(updates[0].state, OutboxState::Conflicted);
         assert!(updates[0].state.needs_attention());
         // The edit made in QBO survived.
-        assert_ne!(qbo.get(&realm(), EntityType::Invoice, &qbo_id).unwrap().raw_json["TotalAmt"], 99.0);
+        assert_ne!(
+            qbo.get(&realm(), EntityType::Invoice, &qbo_id)
+                .unwrap()
+                .raw_json["TotalAmt"],
+            99.0
+        );
     }
 
     #[test]
@@ -518,7 +609,9 @@ mod tests {
         assert_eq!(report.applied, 2);
         let qbo_id = drainer.resolved_id(&realm(), "local:inv-1").unwrap();
         assert_eq!(
-            qbo.get(&realm(), EntityType::Invoice, qbo_id).unwrap().raw_json["TotalAmt"],
+            qbo.get(&realm(), EntityType::Invoice, qbo_id)
+                .unwrap()
+                .raw_json["TotalAmt"],
             74.24
         );
     }
@@ -635,11 +728,17 @@ mod tests {
         /// Convergence: any sequence of local creates, drained repeatedly until
         /// the queue settles, produces exactly one QBO record per local entity —
         /// no duplicates, nothing lost — even with transient failures injected
-        /// throughout.
+        /// throughout, and even if a fresh `Drainer` — the in-process stand-in
+        /// for a restarted process, `DESIGN.md` §6.1 — takes over partway
+        /// through with no memory but what a `Store` would have persisted:
+        /// resolved id mappings, and any `in_flight` record recovered rather
+        /// than resent blind (`tests/chaos.rs` exercises the same recovery
+        /// path across a real process boundary).
         #[test]
         fn draining_converges_without_duplicates(
             count in 1usize..12,
             failure_points in prop::collection::vec(any::<bool>(), 0..24),
+            restart_at in 0usize..8,
         ) {
             let mut qbo = MockQbo::new(at(0));
             let mut drainer = Drainer::new();
@@ -656,6 +755,7 @@ mod tests {
                 .collect();
 
             let mut failures = failure_points.into_iter();
+            let mut restarted = false;
             for pass in 0..(MAX_ATTEMPTS as usize + count) {
                 if records.iter().all(|r| r.state.is_terminal() || r.state.needs_attention()) {
                     break;
@@ -663,6 +763,32 @@ mod tests {
                 if failures.next().unwrap_or(false) {
                     qbo.fail_next(QboError::Network("induced".into()));
                 }
+
+                // Once, at a proptest-chosen pass, simulate a process restart:
+                // a brand-new `Drainer` takes over with none of the in-memory
+                // state the old one built up, reseeded only with what a
+                // `Store`-backed caller would actually have persisted — every
+                // mapping already resolved (`local_id_map`, §6.4) — same as
+                // `tests/chaos.rs` reloading a fresh `Drainer` after a real
+                // process kill. A record `drain` had carried to `in_flight`
+                // and no further within a single pass is impossible — a pass
+                // is synchronous and always resolves what it starts — so the
+                // property this adds is that draining tolerates losing and
+                // rebuilding the `Drainer` itself mid-sequence, not merely
+                // running start to finish inside one long-lived instance.
+                if !restarted && pass == restart_at {
+                    restarted = true;
+                    let mut fresh = Drainer::new();
+                    for outbox_record in &records {
+                        if outbox_record.state == OutboxState::Applied {
+                            if let Some(qbo_id) = drainer.resolved_id(&realm(), &outbox_record.local_entity_id) {
+                                fresh.seed_mapping(&realm(), &outbox_record.local_entity_id, qbo_id);
+                            }
+                        }
+                    }
+                    drainer = fresh;
+                }
+
                 drainer.drain(&mut records, &mut qbo, at(pass as i64));
             }
 
@@ -680,5 +806,109 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn the_crash_hook_fires_after_the_kth_successful_call_and_before_its_commit() {
+        let mut qbo = MockQbo::new(at(0));
+        let mut drainer = Drainer::new();
+        let mut records = vec![
+            record(
+                EntityType::Invoice,
+                Operation::Create,
+                "local:inv-1",
+                serde_json::json!({}),
+            ),
+            record(
+                EntityType::Invoice,
+                Operation::Create,
+                "local:inv-2",
+                serde_json::json!({}),
+            ),
+        ];
+
+        let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let seen_in_hook = seen.clone();
+        drainer.set_crash_hook(move |count| seen_in_hook.borrow_mut().push(count));
+
+        drainer.drain(&mut records, &mut qbo, at(0));
+
+        // Fired once per successful call, in order, before either record's
+        // `mark_applied` had a chance to run — both still ended up Applied,
+        // which only proves the hook does not itself interfere.
+        assert_eq!(*seen.borrow(), vec![1, 2]);
+        assert!(records.iter().all(|r| r.state == OutboxState::Applied));
+    }
+
+    #[test]
+    fn the_transition_hook_sees_in_flight_before_the_call_and_the_qbo_id_after() {
+        let mut qbo = MockQbo::new(at(0));
+        let mut drainer = Drainer::new();
+        let mut records = vec![record(
+            EntityType::Invoice,
+            Operation::Create,
+            "local:inv-1",
+            serde_json::json!({}),
+        )];
+
+        let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let seen_in_hook = seen.clone();
+        drainer.set_on_transition(move |outbox_record, qbo_id| {
+            seen_in_hook
+                .borrow_mut()
+                .push((outbox_record.state, qbo_id.map(str::to_string)));
+        });
+
+        drainer.drain(&mut records, &mut qbo, at(0));
+
+        assert_eq!(
+            *seen.borrow(),
+            vec![
+                (OutboxState::InFlight, None),
+                (OutboxState::Applied, Some("1".to_string())),
+            ]
+        );
+    }
+
+    #[test]
+    fn seeded_mappings_rewrite_a_dependants_reference_without_ever_drawing_the_parent() {
+        // What a restarted process relies on: the parent already applied in an
+        // earlier run, so this `Drainer` never drains it — only a `Store`
+        // reload of `local_id_map` told it the mapping.
+        let mut qbo = MockQbo::new(at(0));
+        qbo.create(
+            &realm(),
+            EntityType::Customer,
+            &serde_json::json!({ "DisplayName": "BLUE HARBOR SWIM" }),
+            Uuid::now_v7(),
+        )
+        .unwrap();
+        let qbo_id = qbo
+            .find_by_name(&realm(), EntityType::Customer, "BLUE HARBOR SWIM")
+            .unwrap()
+            .unwrap()
+            .qbo_id;
+
+        let mut drainer = Drainer::new();
+        drainer.seed_mapping(&realm(), "local:cust-1", &qbo_id);
+
+        let mut records = vec![record(
+            EntityType::Invoice,
+            Operation::Create,
+            "local:inv-1",
+            serde_json::json!({ "CustomerRef": { "value": "local:cust-1" } }),
+        )];
+        let report = drainer.drain(&mut records, &mut qbo, at(0));
+
+        assert_eq!(report.applied, 1);
+        assert_eq!(records[0].state, OutboxState::Applied);
+        let stored = qbo
+            .get(
+                &realm(),
+                EntityType::Invoice,
+                drainer.resolved_id(&realm(), "local:inv-1").unwrap(),
+            )
+            .unwrap();
+        assert_eq!(stored.raw_json["CustomerRef"]["value"], qbo_id);
     }
 }

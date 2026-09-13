@@ -1,0 +1,87 @@
+name: CI
+
+# The whole test suite runs offline (DESIGN.md §10) — nothing here should ever
+# need network access beyond fetching the checkout and toolchain themselves.
+on:
+  push:
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  clippy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace
+
+  # DESIGN.md §11's numbers, guarded rather than only ever reported once
+  # (ROADMAP.md §A). Release build: the ignored tests measure wall clock, and a
+  # debug build's numbers are not the ones DESIGN.md records. QBO_BENCH_ASSERT=1
+  # turns each measurement's budget from "printed" into "enforced" — see
+  # `apps/qbo-local/tests/{commit_cost,query,replica}.rs`.
+  bench:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo bench-qbo
+        env:
+          QBO_BENCH_ASSERT: "1"
+
+  # apps/desktop/ui does not exist yet (a separate agent is adding it) — every
+  # step here is a no-op until it does, rather than the job failing to find
+  # something to run.
+  desktop-ui:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        if: hashFiles('apps/desktop/ui/package.json') != ''
+        with:
+          node-version: "20"
+      - run: npm ci
+        if: hashFiles('apps/desktop/ui/package.json') != ''
+        working-directory: apps/desktop/ui
+      - run: node --test apps/desktop/ui/test
+        if: hashFiles('apps/desktop/ui/package.json') != ''
+
+  # No `cargo fmt --check` job: the tree is deliberately not fmt-clean
+  # everywhere. Instead, a PR is checked only against the `.rs` files it
+  # actually touches, so an unrelated change is never blocked by formatting
+  # debt somewhere else in the tree.
+  fmt-diff:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: rustfmt --check on files changed in this PR
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --depth=1 origin "${{ github.base_ref }}:refs/remotes/origin/${{ github.base_ref }}"
+          files=$(git diff --name-only "origin/${{ github.base_ref }}"... | grep '\.rs$' || true)
+          if [ -z "$files" ]; then
+            echo "No .rs files changed in this PR."
+            exit 0
+          fi
+          echo "$files"
+          echo "$files" | xargs rustfmt --edition 2021 --check
