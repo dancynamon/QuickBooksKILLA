@@ -1,11 +1,12 @@
 //! `qbo-local` — the subcommand binary. `HANDOFF.md` §2.5, `ROADMAP.md` §A.
 //!
-//! Wires the pieces built so far — [`Store`], [`Daemon`], [`Reconciler`] — into
-//! something runnable against a file database, ahead of `HttpQboClient`
-//! (`HANDOFF.md` §2.3) landing. Every subcommand that would need Intuit
-//! credentials accepts `--mock` instead, backed by [`MockQbo`], so the loop is
-//! exercisable end to end today; without it, each refuses with the same exact
-//! message rather than pretending to reach a client that does not exist yet.
+//! Wires the pieces built so far — [`Store`], [`Daemon`], [`Reconciler`],
+//! [`HttpQboClient`] — into something runnable against a file database and,
+//! with `--live`, against a real QBO realm. Every subcommand that would need
+//! Intuit credentials accepts either `--live` (backed by [`HttpQboClient`],
+//! built from `--config`; `HANDOFF.md` §2.3, §2.1) or `--mock` (backed by
+//! [`MockQbo`]); without either, each refuses with the same exact message
+//! rather than guessing which the caller meant.
 //!
 //! No `clap`: `std::env::args` and a hand-rolled [`parse`], matching the rest
 //! of this crate's no-new-dependencies discipline.
@@ -19,12 +20,17 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::Utc;
+use uuid::Uuid;
 
-use qbo_local::client::MockQbo;
+use qbo_local::auth::{FileTokenStore, TokenGenerations, TokenStore};
+use qbo_local::client::{MockQbo, QboClient};
 use qbo_local::clock::{Clock, SystemClock};
+use qbo_local::config::LocalConfig;
 use qbo_local::daemon::{Cadence, Daemon, DaemonOptions, Tick};
 use qbo_local::domain::{EntityType, RealmId, SyncTier};
 use qbo_local::driver::{SyncOptions, SyncPath, SyncReport};
+use qbo_local::http::{HttpQboClient, TokenSource};
+use qbo_local::oauth::{self, OAuthConfig};
 use qbo_local::ratelimit::RealmLimits;
 use qbo_local::reconcile::{ReconcileOptions, ReconcileReport, Reconciler};
 use qbo_local::store::backup::SnapshotPolicy;
@@ -48,11 +54,15 @@ const PROJECTED_TABLES: &[ProjectedTable] = &[
 /// notice for a few days".
 const DEFAULT_SNAPSHOT_KEEP: usize = 7;
 
-/// `HANDOFF.md` §2.3: the HTTP transport is not built yet. Every subcommand
-/// that would otherwise need it prints exactly this and exits 2 unless told
-/// to run against [`MockQbo`] instead.
-const HTTP_CLIENT_MISSING: &str =
-    "HttpQboClient is not built yet (HANDOFF.md §2.3); run with --mock to exercise the loop";
+/// Every subcommand that talks to QBO needs a client, and there are exactly
+/// two ways to get one: `--live` (real HTTP, `HANDOFF.md` §2.3) or `--mock`
+/// ([`MockQbo`]). Neither given is a usage error, not a guess.
+const NO_CLIENT_SELECTED: &str =
+    "no QBO client selected: pass --live (see `qbo-local auth`) or --mock to exercise the loop";
+
+/// Where `--live` looks for its config when `--config` is not given.
+/// `HANDOFF.md` §0: `.local/` is gitignored in full.
+const DEFAULT_CONFIG_PATH: &str = ".local/config.toml";
 
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();
@@ -66,8 +76,8 @@ fn main() -> ExitCode {
 
     match execute(command) {
         Ok(()) => ExitCode::SUCCESS,
-        Err(CommandError::MissingHttpClient) => {
-            eprintln!("{HTTP_CLIENT_MISSING}");
+        Err(CommandError::NoClientSelected) => {
+            eprintln!("{NO_CLIENT_SELECTED}");
             ExitCode::from(2)
         }
         Err(CommandError::Runtime(message)) => {
@@ -91,6 +101,11 @@ enum Command {
         realm: RealmId,
         name: String,
     },
+    Auth {
+        realm: RealmId,
+        port: Option<u16>,
+        config: Option<PathBuf>,
+    },
     Daemon {
         db: PathBuf,
         realm: RealmId,
@@ -101,11 +116,15 @@ enum Command {
         snapshot_hour_utc: Option<u32>,
         once: bool,
         mock: bool,
+        live: bool,
+        config: Option<PathBuf>,
     },
     Sweep {
         db: PathBuf,
         realm: RealmId,
         mock: bool,
+        live: bool,
+        config: Option<PathBuf>,
     },
     Snapshot {
         db: PathBuf,
@@ -120,10 +139,11 @@ qbo-local — local SQLite replica of QuickBooks Online
 USAGE:
     qbo-local status [--db PATH]
     qbo-local init --db PATH --realm ID --name \"Display Name\"
+    qbo-local auth --realm ID [--port N] [--config PATH]
     qbo-local daemon --db PATH --realm ID [--focused-secs N] [--idle-secs N]
                       [--snapshot-dir DIR --keep N] [--snapshot-hour-utc H]
-                      [--once] [--mock]
-    qbo-local sweep --db PATH --realm ID [--mock]
+                      [--once] (--live [--config PATH] | --mock)
+    qbo-local sweep --db PATH --realm ID (--live [--config PATH] | --mock)
     qbo-local snapshot --db PATH --dir DIR [--keep N]
     qbo-local --help
 
@@ -131,6 +151,10 @@ SUBCOMMANDS:
     status      Print the M0 foundations, and sync status per realm with --db.
     init        Open (creating if absent) a file store and register a realm.
                 Idempotent — registering an existing realm is not an error.
+    auth        Run the OAuth loopback flow and save generation zero for a
+                realm through FileTokenStore. (The macOS keychain backend
+                arrives when this runs on Dan's machine — HANDOFF.md §2.1;
+                FileTokenStore is the store everywhere else, tests included.)
     daemon      Run the CDC poll loop against a realm until stopped.
     sweep       Run one reconciliation sweep against QBO's index.
     snapshot    Take one nightly-style backup of the replica, with rotation.
@@ -139,6 +163,8 @@ FLAGS:
     --db PATH               Path to the SQLite replica file.
     --realm ID              A QBO realm id (digits only).
     --name \"Display Name\"   The realm's display name (init only).
+    --port N                Loopback redirect port (auth; default from config).
+    --config PATH           Path to the local config file (default: .local/config.toml).
     --focused-secs N        Focused-cadence poll interval, in seconds (daemon).
     --idle-secs N           Idle-cadence poll interval, in seconds (daemon).
     --snapshot-dir DIR      Where nightly snapshots go (daemon; pair with --keep).
@@ -146,16 +172,17 @@ FLAGS:
     --snapshot-hour-utc H   UTC hour at or after which a snapshot may fire (daemon).
     --dir DIR               Where a snapshot is written (snapshot).
     --once                  Run a single tick and exit (daemon).
+    --live                  Use HttpQboClient against a real QBO realm (HANDOFF.md §2.3).
     --mock                  Use an empty in-memory MockQbo instead of live QBO.
 
-Without --mock, daemon and sweep exit 2: HttpQboClient is not built yet.
+Without --live or --mock, daemon and sweep exit 2: choose one.
 Ctrl-C is safe to stop `daemon` with — every write is transactional — or type
 \"stop\" and press Enter on its stdin for a clean exit.
 
 EXIT CODES:
     0   ok
     1   runtime error
-    2   usage error (this message), or --mock not given (daemon, sweep)
+    2   usage error (this message), or neither --live nor --mock given (daemon, sweep)
 ";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -217,6 +244,7 @@ fn parse(args: &[String]) -> Result<Command, UsageError> {
         "--help" | "-h" => Err(UsageError::usage()),
         "status" => parse_status(args),
         "init" => parse_init(args),
+        "auth" => parse_auth(args),
         "daemon" => parse_daemon(args),
         "sweep" => parse_sweep(args),
         "snapshot" => parse_snapshot(args),
@@ -251,6 +279,11 @@ fn parse_usize(raw: &str, flag: &str) -> Result<usize, UsageError> {
         .map_err(|_| UsageError::invalid_value(flag, raw))
 }
 
+fn parse_u16(raw: &str, flag: &str) -> Result<u16, UsageError> {
+    raw.parse()
+        .map_err(|_| UsageError::invalid_value(flag, raw))
+}
+
 fn parse_status(mut args: Args<'_>) -> Result<Command, UsageError> {
     let mut db = None;
     while let Some(flag) = args.next() {
@@ -281,6 +314,25 @@ fn parse_init(mut args: Args<'_>) -> Result<Command, UsageError> {
     })
 }
 
+fn parse_auth(mut args: Args<'_>) -> Result<Command, UsageError> {
+    let mut realm = None;
+    let mut port = None;
+    let mut config = None;
+    while let Some(flag) = args.next() {
+        match flag.as_str() {
+            "--realm" => realm = Some(parse_realm(&next_value(&mut args, "--realm")?)?),
+            "--port" => port = Some(parse_u16(&next_value(&mut args, "--port")?, "--port")?),
+            "--config" => config = Some(PathBuf::from(next_value(&mut args, "--config")?)),
+            other => return Err(UsageError::unknown_flag(other)),
+        }
+    }
+    Ok(Command::Auth {
+        realm: realm.ok_or_else(|| UsageError::missing_flag("--realm"))?,
+        port,
+        config,
+    })
+}
+
 fn parse_daemon(mut args: Args<'_>) -> Result<Command, UsageError> {
     let mut db = None;
     let mut realm = None;
@@ -291,6 +343,8 @@ fn parse_daemon(mut args: Args<'_>) -> Result<Command, UsageError> {
     let mut snapshot_hour_utc = None;
     let mut once = false;
     let mut mock = false;
+    let mut live = false;
+    let mut config = None;
 
     while let Some(flag) = args.next() {
         match flag.as_str() {
@@ -320,6 +374,8 @@ fn parse_daemon(mut args: Args<'_>) -> Result<Command, UsageError> {
             }
             "--once" => once = true,
             "--mock" => mock = true,
+            "--live" => live = true,
+            "--config" => config = Some(PathBuf::from(next_value(&mut args, "--config")?)),
             other => return Err(UsageError::unknown_flag(other)),
         }
     }
@@ -328,6 +384,9 @@ fn parse_daemon(mut args: Args<'_>) -> Result<Command, UsageError> {
         return Err(UsageError::new(
             "--snapshot-dir and --keep must be given together",
         ));
+    }
+    if mock && live {
+        return Err(UsageError::new("--mock and --live cannot both be given"));
     }
 
     Ok(Command::Daemon {
@@ -340,6 +399,8 @@ fn parse_daemon(mut args: Args<'_>) -> Result<Command, UsageError> {
         snapshot_hour_utc,
         once,
         mock,
+        live,
+        config,
     })
 }
 
@@ -347,18 +408,27 @@ fn parse_sweep(mut args: Args<'_>) -> Result<Command, UsageError> {
     let mut db = None;
     let mut realm = None;
     let mut mock = false;
+    let mut live = false;
+    let mut config = None;
     while let Some(flag) = args.next() {
         match flag.as_str() {
             "--db" => db = Some(PathBuf::from(next_value(&mut args, "--db")?)),
             "--realm" => realm = Some(parse_realm(&next_value(&mut args, "--realm")?)?),
             "--mock" => mock = true,
+            "--live" => live = true,
+            "--config" => config = Some(PathBuf::from(next_value(&mut args, "--config")?)),
             other => return Err(UsageError::unknown_flag(other)),
         }
+    }
+    if mock && live {
+        return Err(UsageError::new("--mock and --live cannot both be given"));
     }
     Ok(Command::Sweep {
         db: db.ok_or_else(|| UsageError::missing_flag("--db"))?,
         realm: realm.ok_or_else(|| UsageError::missing_flag("--realm"))?,
         mock,
+        live,
+        config,
     })
 }
 
@@ -386,9 +456,9 @@ fn parse_snapshot(mut args: Args<'_>) -> Result<Command, UsageError> {
 // ---------------------------------------------------------------------------
 
 enum CommandError {
-    /// `--mock` was not given to a subcommand that would otherwise need
-    /// `HttpQboClient`.
-    MissingHttpClient,
+    /// Neither `--live` nor `--mock` was given to a subcommand that needs a
+    /// QBO client.
+    NoClientSelected,
     Runtime(String),
 }
 
@@ -400,6 +470,11 @@ fn execute(command: Command) -> Result<(), CommandError> {
     match command {
         Command::Status { db } => run_status(db),
         Command::Init { db, realm, name } => run_init(&db, &realm, &name),
+        Command::Auth {
+            realm,
+            port,
+            config,
+        } => run_auth(&realm, port, config.as_deref()),
         Command::Daemon {
             db,
             realm,
@@ -410,6 +485,8 @@ fn execute(command: Command) -> Result<(), CommandError> {
             snapshot_hour_utc,
             once,
             mock,
+            live,
+            config,
         } => run_daemon(
             &db,
             &realm,
@@ -420,10 +497,42 @@ fn execute(command: Command) -> Result<(), CommandError> {
             snapshot_hour_utc,
             once,
             mock,
+            live,
+            config.as_deref(),
         ),
-        Command::Sweep { db, realm, mock } => run_sweep(&db, &realm, mock),
+        Command::Sweep {
+            db,
+            realm,
+            mock,
+            live,
+            config,
+        } => run_sweep(&db, &realm, mock, live, config.as_deref()),
         Command::Snapshot { db, dir, keep } => run_snapshot(&db, &dir, keep),
     }
+}
+
+/// Build an [`HttpQboClient`] from `--config` (or [`DEFAULT_CONFIG_PATH`])
+/// for `realm`. Shared by `daemon --live` and `sweep --live` so the two
+/// don't drift on how a config file becomes a client.
+fn build_http_client(
+    config_path: Option<&Path>,
+    realm: &RealmId,
+) -> Result<HttpQboClient, CommandError> {
+    let path = config_path.unwrap_or(Path::new(DEFAULT_CONFIG_PATH));
+    let config = LocalConfig::load(path).map_err(runtime)?;
+    // Validates that `realm` is one this config file actually lists, so a
+    // typo'd --realm fails loudly here rather than as a confusing empty sync.
+    config.realm(realm.as_str()).map_err(runtime)?;
+    let secret = config.client_secret().map_err(runtime)?;
+    let redirect_uri = format!("http://localhost:{}/callback", config.intuit.redirect_port);
+    let oauth_config = OAuthConfig::intuit(config.intuit.client_id.clone(), secret, redirect_uri);
+    let token_store: Box<dyn TokenStore> = Box::new(FileTokenStore::new(&config.tokens_dir));
+    let tokens = TokenSource::new(token_store, oauth_config, realm.clone());
+    Ok(HttpQboClient::new(
+        config.base_url(),
+        tokens,
+        config.rotation_log.clone(),
+    ))
 }
 
 // -- status -------------------------------------------------------------
@@ -574,16 +683,80 @@ fn run_init(db: &Path, realm: &RealmId, name: &str) -> Result<(), CommandError> 
     Ok(())
 }
 
-// -- sweep ------------------------------------------------------------------
+// -- auth -------------------------------------------------------------------
 
-fn run_sweep(db: &Path, realm: &RealmId, mock: bool) -> Result<(), CommandError> {
-    if !mock {
-        return Err(CommandError::MissingHttpClient);
+/// Run the OAuth loopback flow for one realm and save generation zero
+/// through [`FileTokenStore`] (`HANDOFF.md` §2.1, §2.2). The keychain-backed
+/// store arrives when this runs on Dan's machine; `FileTokenStore` is the
+/// store everywhere else, `--live` included.
+fn run_auth(
+    realm: &RealmId,
+    port: Option<u16>,
+    config_path: Option<&Path>,
+) -> Result<(), CommandError> {
+    let path = config_path.unwrap_or(Path::new(DEFAULT_CONFIG_PATH));
+    let config = LocalConfig::load(path).map_err(runtime)?;
+    let secret = config.client_secret().map_err(runtime)?;
+    let port = port.unwrap_or(config.intuit.redirect_port);
+    let redirect_uri = format!("http://localhost:{port}/callback");
+    let oauth_config = OAuthConfig::intuit(config.intuit.client_id.clone(), secret, redirect_uri);
+
+    let state = Uuid::now_v7().to_string();
+    println!("Open this URL to authorize qbo-local for realm {realm}:\n");
+    println!("  {}\n", oauth_config.authorize_url(&state));
+    println!("Waiting for the redirect on http://localhost:{port}/callback ...");
+
+    let auth_code = oauth::run_loopback(port, Duration::from_secs(300)).map_err(runtime)?;
+    if auth_code.state != state {
+        return Err(CommandError::Runtime(
+            "state mismatch on the OAuth callback (possible CSRF) — aborting without saving anything".to_string(),
+        ));
+    }
+    if !auth_code.realm_id.is_empty() && auth_code.realm_id != realm.as_str() {
+        eprintln!(
+            "warning: the callback's realmId ({}) does not match --realm {realm}; saving under --realm as given",
+            auth_code.realm_id
+        );
     }
 
+    let agent = ureq::AgentBuilder::new().build();
+    let token_set =
+        oauth::exchange_code(&oauth_config, &auth_code.code, &agent).map_err(runtime)?;
+
+    let generations = TokenGenerations::new(realm.clone(), token_set);
+    let store = FileTokenStore::new(&config.tokens_dir);
+    store.save(&generations).map_err(runtime)?;
+
+    println!(
+        "Saved generation zero for realm {realm} to {}",
+        config.tokens_dir.display()
+    );
+    Ok(())
+}
+
+// -- sweep ------------------------------------------------------------------
+
+fn run_sweep(
+    db: &Path,
+    realm: &RealmId,
+    mock: bool,
+    live: bool,
+    config: Option<&Path>,
+) -> Result<(), CommandError> {
+    match (mock, live) {
+        (true, _) => run_sweep_with_client(db, realm, MockQbo::new(Utc::now())),
+        (false, true) => run_sweep_with_client(db, realm, build_http_client(config, realm)?),
+        (false, false) => Err(CommandError::NoClientSelected),
+    }
+}
+
+fn run_sweep_with_client<C: QboClient>(
+    db: &Path,
+    realm: &RealmId,
+    client: C,
+) -> Result<(), CommandError> {
     let store = Store::open(db).map_err(runtime)?;
     let now = Utc::now();
-    let client = MockQbo::new(now);
     let mut reconciler = Reconciler::new(client, ReconcileOptions::default(), now);
     let report = reconciler
         .sweep_realm(&store, realm, EntityType::m0_scope(), now)
@@ -656,12 +829,9 @@ fn run_daemon(
     snapshot_hour_utc: Option<u32>,
     once: bool,
     mock: bool,
+    live: bool,
+    config: Option<&Path>,
 ) -> Result<(), CommandError> {
-    if !mock {
-        return Err(CommandError::MissingHttpClient);
-    }
-
-    let store = Store::open(db).map_err(runtime)?;
     let clock = SystemClock;
     let default_cadence = Cadence::default();
     let cadence = Cadence {
@@ -683,7 +853,27 @@ fn run_daemon(
         snapshot_hour_utc: snapshot_hour_utc.unwrap_or(DaemonOptions::default().snapshot_hour_utc),
     };
 
-    let client = MockQbo::new(clock.now());
+    match (mock, live) {
+        (true, _) => {
+            run_daemon_with_client(db, realm, clock, options, once, MockQbo::new(clock.now()))
+        }
+        (false, true) => {
+            let client = build_http_client(config, realm)?;
+            run_daemon_with_client(db, realm, clock, options, once, client)
+        }
+        (false, false) => Err(CommandError::NoClientSelected),
+    }
+}
+
+fn run_daemon_with_client<C: QboClient>(
+    db: &Path,
+    realm: &RealmId,
+    clock: SystemClock,
+    options: DaemonOptions,
+    once: bool,
+    client: C,
+) -> Result<(), CommandError> {
+    let store = Store::open(db).map_err(runtime)?;
     let mut daemon = Daemon::new(client, clock, options);
 
     if once {
@@ -985,6 +1175,8 @@ mod tests {
                 snapshot_hour_utc: Some(9),
                 once: false,
                 mock: false,
+                live: false,
+                config: None,
             }
         );
     }
@@ -1029,6 +1221,45 @@ mod tests {
     }
 
     #[test]
+    fn daemon_rejects_mock_and_live_together() {
+        assert!(parse(&args(&[
+            "daemon",
+            "--db",
+            "r.db",
+            "--realm",
+            "1234567890123456",
+            "--mock",
+            "--live",
+        ]))
+        .is_err());
+    }
+
+    #[test]
+    fn daemon_parses_live_with_a_config_path() {
+        let parsed = parse(&args(&[
+            "daemon",
+            "--db",
+            "r.db",
+            "--realm",
+            "1234567890123456",
+            "--live",
+            "--config",
+            "custom.toml",
+        ]))
+        .unwrap();
+        match parsed {
+            Command::Daemon {
+                live, config, mock, ..
+            } => {
+                assert!(live);
+                assert!(!mock);
+                assert_eq!(config, Some(PathBuf::from("custom.toml")));
+            }
+            other => panic!("expected Command::Daemon, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn sweep_requires_db_and_realm() {
         assert_eq!(
             parse(&args(&["sweep", "--realm", "1234567890123456"])),
@@ -1055,6 +1286,73 @@ mod tests {
                 db: PathBuf::from("r.db"),
                 realm: RealmId::parse("1234567890123456").unwrap(),
                 mock: true,
+                live: false,
+                config: None,
+            })
+        );
+    }
+
+    #[test]
+    fn sweep_rejects_mock_and_live_together() {
+        assert!(parse(&args(&[
+            "sweep",
+            "--db",
+            "r.db",
+            "--realm",
+            "1234567890123456",
+            "--mock",
+            "--live",
+        ]))
+        .is_err());
+    }
+
+    #[test]
+    fn sweep_parses_live_with_a_config_path() {
+        assert_eq!(
+            parse(&args(&[
+                "sweep",
+                "--db",
+                "r.db",
+                "--realm",
+                "1234567890123456",
+                "--live",
+                "--config",
+                "custom.toml",
+            ])),
+            Ok(Command::Sweep {
+                db: PathBuf::from("r.db"),
+                realm: RealmId::parse("1234567890123456").unwrap(),
+                mock: false,
+                live: true,
+                config: Some(PathBuf::from("custom.toml")),
+            })
+        );
+    }
+
+    #[test]
+    fn auth_requires_realm() {
+        assert_eq!(
+            parse(&args(&["auth"])),
+            Err(UsageError::missing_flag("--realm"))
+        );
+    }
+
+    #[test]
+    fn auth_parses_port_and_config() {
+        assert_eq!(
+            parse(&args(&[
+                "auth",
+                "--realm",
+                "1234567890123456",
+                "--port",
+                "9999",
+                "--config",
+                "custom.toml",
+            ])),
+            Ok(Command::Auth {
+                realm: RealmId::parse("1234567890123456").unwrap(),
+                port: Some(9999),
+                config: Some(PathBuf::from("custom.toml")),
             })
         );
     }

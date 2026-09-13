@@ -32,7 +32,11 @@ rotation-*.jsonl
 # Snapshots carry customer names, balances and purchase-order numbers; a
 # private repo is still permanent and may later be shared with a contractor.
 # One ignored directory beats a list of filenames someone will forget to add to.
-.local/
+#
+# The one exception is the example config template — no real values, meant to
+# be copied to .local/config.toml and filled in locally.
+.local/*
+!.local/config.example.toml
 
 # OS
 .DS_Store

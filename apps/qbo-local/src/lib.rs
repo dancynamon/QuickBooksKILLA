@@ -20,16 +20,23 @@
 //! - [`clock`]    — `HANDOFF.md` §2.5: a testable source of time and waiting
 //! - [`daemon`]   — `HANDOFF.md` §2.5, `DESIGN.md` §8: the CDC poll loop and
 //!   nightly snapshots
+//! - [`http`]     — `HANDOFF.md` §2.3: [`client::QboClient`] over real HTTP
+//! - [`oauth`]    — `HANDOFF.md` §2.2: the authorization-code loopback flow
+//! - [`config`]   — `.local/config.toml`, what `--live` reads to build an
+//!   [`http::HttpQboClient`]
 //! - [`mcp`]      — `ROADMAP.md` §G: an MCP server over the read-only query
 //!   API, so Dan's existing skills can be repointed off the QuickBooks MCP
 
 pub mod auth;
 pub mod client;
 pub mod clock;
+pub mod config;
 pub mod daemon;
 pub mod domain;
 pub mod driver;
+pub mod http;
 pub mod mcp;
+pub mod oauth;
 pub mod outbox;
 pub mod project;
 pub mod ratelimit;

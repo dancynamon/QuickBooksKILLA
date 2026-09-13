@@ -43,7 +43,7 @@ backend in §2.1. Never in the repo, never in a dotfile Dropbox syncs.
 
 ## 1. Where the work stands
 
-`cargo test` — 451 tests, all offline, all green. `cargo clippy --all-targets` —
+`cargo test` — 498 tests, all offline, all green. `cargo clippy --all-targets` —
 clean.
 
 Built and tested:
@@ -63,12 +63,27 @@ Built and tested:
 | `reconcile` | Verification sweep against QBO's index (DESIGN §7 steps 1-4) |
 | `daemon`, `clock` | Cadence loop around the driver, backoff, nightly snapshots |
 | `store::query` | Read-only query API for the UI and the ledger import |
+| `http`, `oauth`, `config` | Live transport, OAuth loopback flow, `.local/config.toml` (§2.2, §2.3) |
 
-**Not built:** the HTTP transport behind `QboClient`, the OAuth authorisation
-flow, the keychain token backend, wiring the daemon into a binary, the Tauri
+**Not built:** the macOS keychain token backend (§2.1 — `FileTokenStore` is
+the store everywhere else, `--live` included), wiring the daemon into a Tauri
 shell and its front-end.
 
-M0 needs the first four of those. The last is M1. `ROADMAP.md` has the phases.
+The keychain backend is the one item left from M0's original list. The Tauri
+shell is M1. `ROADMAP.md` has the phases.
+
+**Built in the cloud on 13 Sep** — `apps/qbo-local/src/http.rs`
+(`HttpQboClient`, implementing `client::QboClient` over real HTTP),
+`apps/qbo-local/src/oauth.rs` (the authorization-code loopback flow:
+`run_loopback`, `exchange_code`, `refresh`), `apps/qbo-local/src/config.rs`
+(`.local/config.toml`, templated by `.local/config.example.toml` at the repo
+root), and `--live` on `qbo-local daemon` / `qbo-local sweep` plus the new
+`qbo-local auth` subcommand in `main.rs`. Proven offline against a hand-rolled
+fake Intuit server (`apps/qbo-local/tests/support/mod.rs`) — `tests/http_client.rs`
+covers every mapping in §2.3 below plus `SyncDriver` running end to end over
+HTTP, `tests/oauth.rs` covers the loopback and token exchange. `developer.intuit.com`
+was still blocked in this session, so the §0 and §4 confidence levels are
+unchanged — verify those against Intuit's live docs before M0 is called done.
 
 ---
 
@@ -96,54 +111,58 @@ dies between Intuit invalidating the old refresh token and the new one reaching
 disk, and that case is the difference between a hiccup and re-authorising by
 hand at 3am.
 
-### 2.2 OAuth authorisation flow
+### 2.2 OAuth authorisation flow — built; run it
 
-One-time, per realm. Local loopback redirect. Store the result via 2.1.
+`oauth.rs`: `OAuthConfig::intuit`, `authorize_url`, `run_loopback` (a one-shot
+loopback listener), `exchange_code`, `refresh`. `TokenSource` in `http.rs`
+wires `TokenSet::needs_refresh` into every `HttpQboClient` call — proactive
+refresh at ~50 minutes on a 60-minute token, reactive refresh on a 401 as the
+fallback — rotates `TokenGenerations`, saves through `TokenStore`, and appends
+a fingerprint-only `auth::RotationLogEntry` to the configured JSONL log.
+Tested offline against a fake token endpoint in `tests/http_client.rs` and
+`tests/oauth.rs`.
 
-`auth::TokenSet::needs_refresh` already implements proactive refresh at ~50
-minutes on a 60-minute token; wire it into the client so rotation happens while
-idle rather than mid-batch. Reactive refresh on a 401 stays as the fallback.
+Run it once per realm, after copying `.local/config.example.toml` to
+`.local/config.toml` and filling in the client id/secret and realm id (§0):
 
-Every rotation appends an `auth::RotationLogEntry` to a JSONL file. Log the
-fingerprint, never the token — `TokenSet::fingerprint()` already does the right
-thing.
-
-### 2.3 `HttpQboClient`
-
-Implement `client::QboClient`. The trait is the seam — nothing above it changes.
-
-```rust
-pub trait QboClient {
-    fn query(&mut self, realm, entity_type, start_position, max_results)
-        -> Result<Vec<EntityPayload>, QboError>;
-    fn cdc(&mut self, realm, entity_types, changed_since)
-        -> Result<Vec<EntityPayload>, QboError>;
-    fn create(&mut self, realm, entity_type, payload, request_id)
-        -> Result<EntityPayload, QboError>;
-    fn update(&mut self, realm, entity_type, qbo_id, payload, base_sync_token, request_id)
-        -> Result<EntityPayload, QboError>;
-    fn find_by_name(&mut self, realm, entity_type, name)
-        -> Result<Option<EntityPayload>, QboError>;
-}
+```
+qbo-local auth --realm <REALM_ID>
 ```
 
-Mapping obligations:
+This opens the consent URL (paste it into a browser by hand — the flow
+doesn't launch one for you), waits for the loopback redirect, and saves
+generation zero through `FileTokenStore`. The keychain backend (§2.1) is a
+drop-in replacement for `FileTokenStore` whenever it lands; nothing above
+`TokenStore` changes.
 
-- Every call passes through `ratelimit::RealmLimiter` first. Refusal means
-  wait, never proceed anyway.
-- HTTP 429 and 5xx → `QboError::RateLimited` / `QboError::Network`. These are
-  the only variants `is_transient()` returns true for, and that flag is what
-  the worker uses to decide retry versus failure inbox.
-- A stale-`SyncToken` response → `QboError::StaleSyncToken`, nothing else. The
-  worker routes that straight to `conflicted`, bypassing the retry budget, and
-  that behaviour is deliberate: retrying a stale token is last-writer-wins by
-  another name.
-- Everything else QBO refuses → `QboError::Validation`.
-- Reuse `record.request_id` on retries. Never regenerate it.
+### 2.3 `HttpQboClient` — built; run it
 
-`MockQbo` in `client.rs` is the behavioural spec. If the real client and the
-mock disagree about any of the above, the mock is what the worker's 20-odd
-tests were written against — reconcile deliberately, don't just change the mock.
+Implements `client::QboClient` exactly as this section originally specified —
+the full mapping (rate limiting, HTTP-status-to-`QboError`, `RequestId`
+reuse) now lives in `apps/qbo-local/src/http.rs`'s module doc, and
+`tests/http_client.rs` proves it against a hand-rolled fake Intuit server,
+one behaviour per test: paging and the 1-based
+`STARTPOSITION` conversion, CDC's `Deleted` status, `RequestId` replay on a
+retry after a 500, a stale-`SyncToken` fault, 429, a plain 400, 404, and both
+the proactive and reactive refresh paths. The same test file also runs
+`SyncDriver` end to end against that fake server, so the driver is proven
+against HTTP and not only `MockQbo`.
+
+`MockQbo` in `client.rs` remains the behavioural spec for anything above the
+trait — if `HttpQboClient` and the mock ever disagree, reconcile deliberately
+rather than just changing the mock.
+
+Run a sweep or the daemon against a real realm once `auth` (§2.2) has saved a
+token:
+
+```
+qbo-local sweep --db replica.db --realm <REALM_ID> --live
+qbo-local daemon --db replica.db --realm <REALM_ID> --live --once
+```
+
+Both default to `.local/config.toml`; pass `--config PATH` to point elsewhere.
+`--mock` still works everywhere it did before, for exercising the loop without
+credentials at all.
 
 ### 2.4 Initial sync driver — built (`driver.rs`, D12, D13)
 
