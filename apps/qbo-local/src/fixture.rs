@@ -28,7 +28,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use uuid::Uuid;
 
-use crate::client::{EntityPayload, IndexEntry, QboClient, QboError, UpdatedRange};
+use crate::client::{
+    EntityPayload, IndexEntry, QboClient, QboError, ReportName, ReportParams, UpdatedRange,
+};
 use crate::domain::{EntityType, RealmId};
 
 // ---------------------------------------------------------------------------
@@ -77,6 +79,30 @@ fn index_path(entity_type: EntityType, start_position: usize) -> PathBuf {
 
 fn find_path(entity_type: EntityType, name: &str) -> PathBuf {
     PathBuf::from(entity_type.as_str()).join(format!("find-{}.json", fnv1a_hex(name)))
+}
+
+/// `reports/<Name>-<start>-<end>-<accounting_method>-<date_macro>-<aging_method>.json`.
+/// Human-readable rather than hashed — unlike [`find_path`]'s free-text
+/// customer name, every field of [`ReportParams`] is already a short date or
+/// enum-shaped string, so there is no reason to obscure it behind a digest.
+/// That also means a committed synthetic fixture's filename can be written by
+/// hand rather than only ever produced by a recording run.
+fn report_path(name: ReportName, params: &ReportParams) -> PathBuf {
+    fn field(value: &Option<impl ToString>) -> String {
+        value
+            .as_ref()
+            .map(ToString::to_string)
+            .unwrap_or_else(|| "none".to_string())
+    }
+    PathBuf::from("reports").join(format!(
+        "{}-{}-{}-{}-{}-{}.json",
+        name.as_str(),
+        field(&params.start_date),
+        field(&params.end_date),
+        field(&params.accounting_method),
+        field(&params.date_macro),
+        field(&params.aging_method),
+    ))
 }
 
 /// FNV-1a, chosen over `DefaultHasher` because it is a fixed, documented
@@ -498,6 +524,34 @@ impl<C: QboClient> QboClient for RecordingQbo<C> {
         self.record("fetch", Some(entity_type), params, rel, body)?;
         result
     }
+
+    /// Overridden, not left to the trait default: the default refuses
+    /// outright, and a recording session needs the real Reports API call
+    /// this wraps, captured the same way every other read is.
+    fn report(
+        &mut self,
+        realm: &RealmId,
+        name: ReportName,
+        params: &ReportParams,
+    ) -> Result<Value, QboError> {
+        let result = self.inner.report(realm, name, params);
+        let rel = report_path(name, params);
+        let call_params = json!({
+            "realm": realm.as_str(),
+            "name": name.as_str(),
+            "start_date": params.start_date.map(|d| d.to_string()),
+            "end_date": params.end_date.map(|d| d.to_string()),
+            "accounting_method": params.accounting_method,
+            "date_macro": params.date_macro,
+            "aging_method": params.aging_method,
+        });
+        let body = match &result {
+            Ok(value) => value.clone(),
+            Err(error) => error_to_json(error),
+        };
+        self.record("report", None, call_params, rel, body)?;
+        result
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -644,6 +698,23 @@ impl QboClient for FixtureQbo {
         }
         Ok(Some(payload_from_json(&rel, &value)?))
     }
+
+    /// Overridden, not left to the trait default: replaying a report fixture
+    /// is exactly what `qbo-local report --replay` and the nightly parallel
+    /// run's synthetic tests need, and the default refuses outright.
+    fn report(
+        &mut self,
+        _realm: &RealmId,
+        name: ReportName,
+        params: &ReportParams,
+    ) -> Result<Value, QboError> {
+        let rel = report_path(name, params);
+        let value = self.load(&rel)?;
+        if let Some(error) = as_recorded_error(&value) {
+            return Err(error);
+        }
+        Ok(value)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -778,6 +849,97 @@ mod tests {
         let other = find_path(EntityType::Customer, "SOMEONE ELSE");
         assert_eq!(a, b);
         assert_ne!(a, other);
+    }
+
+    // -- report path --------------------------------------------------------
+
+    #[test]
+    fn report_path_is_human_readable_and_stable() {
+        let params = ReportParams {
+            start_date: None,
+            end_date: Some(now().date_naive()),
+            accounting_method: Some("Accrual".to_string()),
+            date_macro: None,
+            aging_method: None,
+        };
+        let path = report_path(ReportName::TrialBalance, &params);
+        assert_eq!(
+            path,
+            PathBuf::from("reports/TrialBalance-none-2026-01-01-Accrual-none-none.json")
+        );
+        assert_eq!(path, report_path(ReportName::TrialBalance, &params));
+    }
+
+    #[test]
+    fn report_path_differs_by_report_name_and_params() {
+        let end_only = ReportParams {
+            end_date: Some(now().date_naive()),
+            ..ReportParams::default()
+        };
+        let tb = report_path(ReportName::TrialBalance, &end_only);
+        let ar = report_path(ReportName::AgedReceivables, &end_only);
+        let with_method = ReportParams {
+            accounting_method: Some("Cash".to_string()),
+            ..end_only.clone()
+        };
+        assert_ne!(tb, ar);
+        assert_ne!(tb, report_path(ReportName::TrialBalance, &with_method));
+    }
+
+    // -- report record/replay ------------------------------------------------
+
+    #[test]
+    fn recording_a_report_writes_a_readable_fixture_and_replays_it() {
+        let directory = tempfile::tempdir().unwrap();
+        let realm = realm();
+        let params = ReportParams {
+            start_date: None,
+            end_date: Some(now().date_naive()),
+            accounting_method: Some("Accrual".to_string()),
+            date_macro: None,
+            aging_method: None,
+        };
+        let canned = seeded_mock(now());
+        let mut recorder = RecordingQbo::new(canned, directory.path());
+
+        // The wrapped MockQbo has no report support of its own (the trait's
+        // default), so recording captures the refusal — proving errors round
+        // trip through a report fixture exactly as they do for every other
+        // call.
+        let recorded = recorder.report(&realm, ReportName::TrialBalance, &params);
+        assert!(matches!(recorded, Err(QboError::Validation(_))));
+
+        let rel = report_path(ReportName::TrialBalance, &params);
+        assert!(directory.path().join(&rel).exists());
+
+        let mut fixture = FixtureQbo::new(directory.path());
+        let replayed = fixture.report(&realm, ReportName::TrialBalance, &params);
+        assert_eq!(recorded, replayed);
+    }
+
+    #[test]
+    fn replaying_a_report_fixture_returns_the_recorded_json_whole() {
+        let directory = tempfile::tempdir().unwrap();
+        let realm = realm();
+        let params = ReportParams {
+            end_date: Some(now().date_naive()),
+            accounting_method: Some("Accrual".to_string()),
+            ..ReportParams::default()
+        };
+        let rel = report_path(ReportName::TrialBalance, &params);
+        let full = directory.path().join(&rel);
+        fs::create_dir_all(full.parent().unwrap()).unwrap();
+        let body = json!({
+            "Header": { "ReportName": "TrialBalance" },
+            "Rows": { "Row": [] }
+        });
+        fs::write(&full, serde_json::to_string(&body).unwrap()).unwrap();
+
+        let mut fixture = FixtureQbo::new(directory.path());
+        let replayed = fixture
+            .report(&realm, ReportName::TrialBalance, &params)
+            .unwrap();
+        assert_eq!(replayed, body);
     }
 
     // -- FixtureQbo -------------------------------------------------------

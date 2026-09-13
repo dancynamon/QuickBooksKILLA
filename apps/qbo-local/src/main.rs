@@ -19,11 +19,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use chrono::Utc;
+use chrono::{NaiveDate, Utc};
 use uuid::Uuid;
 
 use qbo_local::auth::{FileTokenStore, TokenGenerations, TokenStore};
-use qbo_local::client::{MockQbo, QboClient};
+use qbo_local::client::{MockQbo, QboClient, ReportName, ReportParams};
 use qbo_local::clock::{Clock, SystemClock};
 use qbo_local::config::LocalConfig;
 use qbo_local::daemon::{Cadence, Daemon, DaemonOptions, Tick};
@@ -34,6 +34,7 @@ use qbo_local::http::{HttpQboClient, TokenSource};
 use qbo_local::oauth::{self, OAuthConfig};
 use qbo_local::ratelimit::RealmLimits;
 use qbo_local::reconcile::{ReconcileOptions, ReconcileReport, Reconciler};
+use qbo_local::reports;
 use qbo_local::store::backup::SnapshotPolicy;
 use qbo_local::store::{latest_version, ProjectedTable, RealmSummary, Store};
 use qbo_local::sync::{CDC_LOOKBACK_DAYS, DEFAULT_CDC_MAX_AGE_DAYS};
@@ -61,6 +62,12 @@ const DEFAULT_SNAPSHOT_KEEP: usize = 7;
 const NO_CLIENT_SELECTED: &str =
     "no QBO client selected: pass --live (see `qbo-local auth`) or --mock to exercise the loop";
 
+/// `report` and `snapshots` read the Reports API rather than syncing entities,
+/// so their choice of source is `--live` or `--replay DIR`, never `--mock` —
+/// there is no report-shaped double to fall back on.
+const NO_REPORT_SOURCE: &str = "no report source selected: pass --live (see `qbo-local auth`) or \
+     --replay DIR to read from fixtures recorded earlier";
+
 /// Where `--live` looks for its config when `--config` is not given.
 /// `HANDOFF.md` §0: `.local/` is gitignored in full.
 const DEFAULT_CONFIG_PATH: &str = ".local/config.toml";
@@ -79,6 +86,10 @@ fn main() -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(CommandError::NoClientSelected) => {
             eprintln!("{NO_CLIENT_SELECTED}");
+            ExitCode::from(2)
+        }
+        Err(CommandError::NoReportSource) => {
+            eprintln!("{NO_REPORT_SOURCE}");
             ExitCode::from(2)
         }
         Err(CommandError::Runtime(message)) => {
@@ -145,6 +156,59 @@ enum Command {
         realm: RealmId,
         dir: PathBuf,
     },
+    Report {
+        realm: RealmId,
+        name: ReportKind,
+        as_of: NaiveDate,
+        start: Option<NaiveDate>,
+        out: PathBuf,
+        live: bool,
+        replay: Option<PathBuf>,
+        record: Option<PathBuf>,
+        config: Option<PathBuf>,
+    },
+    Snapshots {
+        realm: RealmId,
+        from_year: i32,
+        to_year: i32,
+        dir: PathBuf,
+        live: bool,
+        replay: Option<PathBuf>,
+        record: Option<PathBuf>,
+        config: Option<PathBuf>,
+    },
+}
+
+/// `qbo-local report --name`. `LEDGER-DESIGN.md` §7's Reports API call
+/// exposes more report names than this CLI does — `ProfitAndLoss` and
+/// `BalanceSheet` are on [`qbo_local::client::ReportName`] for a caller that
+/// wants them directly, but the ledger's own `tbdiff`/`opening`/`boundary`
+/// track only ever needs a trial balance or an aging report, so those are
+/// the only three spellings this flag accepts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ReportKind {
+    TrialBalance,
+    ArAging,
+    ApAging,
+}
+
+impl ReportKind {
+    fn parse(raw: &str) -> Option<Self> {
+        match raw {
+            "trial-balance" => Some(ReportKind::TrialBalance),
+            "ar-aging" => Some(ReportKind::ArAging),
+            "ap-aging" => Some(ReportKind::ApAging),
+            _ => None,
+        }
+    }
+
+    const fn report_name(self) -> ReportName {
+        match self {
+            ReportKind::TrialBalance => ReportName::TrialBalance,
+            ReportKind::ArAging => ReportName::AgedReceivables,
+            ReportKind::ApAging => ReportName::AgedPayables,
+        }
+    }
 }
 
 const USAGE: &str = "\
@@ -161,6 +225,11 @@ USAGE:
     qbo-local snapshot --db PATH --dir DIR [--keep N]
     qbo-local record --db PATH --realm ID --dir DIR [--mock|--live] [--config PATH]
     qbo-local replay --db PATH --realm ID --dir DIR
+    qbo-local report --realm ID --name trial-balance|ar-aging|ap-aging
+                      --as-of YYYY-MM-DD [--start YYYY-MM-DD] --out PATH
+                      (--live [--config PATH] | --replay DIR) [--record DIR]
+    qbo-local snapshots --realm ID --from-year YYYY --to-year YYYY --dir DIR
+                      (--live [--config PATH] | --replay DIR) [--record DIR]
     qbo-local --help
 
 SUBCOMMANDS:
@@ -179,6 +248,15 @@ SUBCOMMANDS:
                 it — see tools/scrub-fixtures.py.
     replay      Sync a realm from fixtures previously recorded into DIR,
                 touching no network at all.
+    report      Pull one Reports API report (LEDGER-DESIGN.md §6, §7) and
+                write it as CSV to --out: trial-balance in the
+                qbo_account_id,name,balance shape `ledger tbdiff`/`opening`/
+                `boundary` read; ar-aging/ap-aging in this crate's own
+                entity_id,name,current,1-30,31-60,61-90,over_90,total shape.
+    snapshots   Pull a year-end (31 December) trial balance for every year
+                from --from-year to --to-year and write tb-YYYY.csv into
+                --dir — exactly the directory `ledger boundary --snapshots`
+                reads.
 
 FLAGS:
     --db PATH               Path to the SQLite replica file.
@@ -191,14 +269,27 @@ FLAGS:
     --snapshot-dir DIR      Where nightly snapshots go (daemon; pair with --keep).
     --keep N                Snapshots to retain (daemon, snapshot).
     --snapshot-hour-utc H   UTC hour at or after which a snapshot may fire (daemon).
-    --dir DIR               Where a snapshot is written (snapshot), or where
+    --dir DIR               Where a snapshot is written (snapshot); where
                             fixtures are recorded to / replayed from (record,
-                            replay).
+                            replay); or where tb-YYYY.csv files are written
+                            (snapshots).
     --once                  Run a single tick and exit (daemon).
     --live                  Use HttpQboClient against a real QBO realm (HANDOFF.md §2.3).
     --mock                  Use an empty in-memory MockQbo instead of live QBO.
+    --name NAME             Which report: trial-balance, ar-aging or ap-aging (report only).
+    --as-of YYYY-MM-DD      End date / as-of date (report only).
+    --start YYYY-MM-DD      Start date, when the report takes one (report only).
+    --out PATH              Where the report's CSV is written (report only).
+    --replay DIR            Read the report from fixtures previously recorded
+                            into DIR instead of a live call (report, snapshots).
+    --record DIR            Also record the report response(s) into DIR, the
+                            same shape `qbo-local record` writes for a sync
+                            (report, snapshots).
+    --from-year YYYY        First year to snapshot, inclusive (snapshots only).
+    --to-year YYYY          Last year to snapshot, inclusive (snapshots only).
 
 Without --live or --mock, daemon, sweep and record exit 2: choose one.
+Without --live or --replay DIR, report and snapshots exit 2: choose one.
 Ctrl-C is safe to stop `daemon` with — every write is transactional — or type
 \"stop\" and press Enter on its stdin for a clean exit.
 
@@ -273,6 +364,8 @@ fn parse(args: &[String]) -> Result<Command, UsageError> {
         "snapshot" => parse_snapshot(args),
         "record" => parse_record(args),
         "replay" => parse_replay(args),
+        "report" => parse_report(args),
+        "snapshots" => parse_snapshots(args),
         other => Err(UsageError::unknown_subcommand(other)),
     }
 }
@@ -307,6 +400,15 @@ fn parse_usize(raw: &str, flag: &str) -> Result<usize, UsageError> {
 fn parse_u16(raw: &str, flag: &str) -> Result<u16, UsageError> {
     raw.parse()
         .map_err(|_| UsageError::invalid_value(flag, raw))
+}
+
+fn parse_i32(raw: &str, flag: &str) -> Result<i32, UsageError> {
+    raw.parse()
+        .map_err(|_| UsageError::invalid_value(flag, raw))
+}
+
+fn parse_date(raw: &str, flag: &str) -> Result<NaiveDate, UsageError> {
+    NaiveDate::parse_from_str(raw, "%Y-%m-%d").map_err(|_| UsageError::invalid_value(flag, raw))
 }
 
 fn parse_status(mut args: Args<'_>) -> Result<Command, UsageError> {
@@ -526,6 +628,107 @@ fn parse_replay(mut args: Args<'_>) -> Result<Command, UsageError> {
     })
 }
 
+/// `--live` xor `--replay DIR`: exactly one, same rule for `report` and
+/// `snapshots`. `--mock` has no equivalent here — there is no report-shaped
+/// double.
+fn require_report_source(live: bool, replay: &Option<PathBuf>) -> Result<(), UsageError> {
+    if live == replay.is_some() {
+        return Err(UsageError::new(
+            "exactly one of --live or --replay DIR is required",
+        ));
+    }
+    Ok(())
+}
+
+fn parse_report(mut args: Args<'_>) -> Result<Command, UsageError> {
+    let mut realm = None;
+    let mut name = None;
+    let mut as_of = None;
+    let mut start = None;
+    let mut out = None;
+    let mut live = false;
+    let mut replay = None;
+    let mut record = None;
+    let mut config = None;
+    while let Some(flag) = args.next() {
+        match flag.as_str() {
+            "--realm" => realm = Some(parse_realm(&next_value(&mut args, "--realm")?)?),
+            "--name" => {
+                let raw = next_value(&mut args, "--name")?;
+                name = Some(
+                    ReportKind::parse(&raw).ok_or_else(|| UsageError::invalid_value("--name", &raw))?,
+                );
+            }
+            "--as-of" => as_of = Some(parse_date(&next_value(&mut args, "--as-of")?, "--as-of")?),
+            "--start" => start = Some(parse_date(&next_value(&mut args, "--start")?, "--start")?),
+            "--out" => out = Some(PathBuf::from(next_value(&mut args, "--out")?)),
+            "--live" => live = true,
+            "--replay" => replay = Some(PathBuf::from(next_value(&mut args, "--replay")?)),
+            "--record" => record = Some(PathBuf::from(next_value(&mut args, "--record")?)),
+            "--config" => config = Some(PathBuf::from(next_value(&mut args, "--config")?)),
+            other => return Err(UsageError::unknown_flag(other)),
+        }
+    }
+    require_report_source(live, &replay)?;
+    Ok(Command::Report {
+        realm: realm.ok_or_else(|| UsageError::missing_flag("--realm"))?,
+        name: name.ok_or_else(|| UsageError::missing_flag("--name"))?,
+        as_of: as_of.ok_or_else(|| UsageError::missing_flag("--as-of"))?,
+        start,
+        out: out.ok_or_else(|| UsageError::missing_flag("--out"))?,
+        live,
+        replay,
+        record,
+        config,
+    })
+}
+
+fn parse_snapshots(mut args: Args<'_>) -> Result<Command, UsageError> {
+    let mut realm = None;
+    let mut from_year = None;
+    let mut to_year = None;
+    let mut dir = None;
+    let mut live = false;
+    let mut replay = None;
+    let mut record = None;
+    let mut config = None;
+    while let Some(flag) = args.next() {
+        match flag.as_str() {
+            "--realm" => realm = Some(parse_realm(&next_value(&mut args, "--realm")?)?),
+            "--from-year" => {
+                from_year = Some(parse_i32(&next_value(&mut args, "--from-year")?, "--from-year")?)
+            }
+            "--to-year" => {
+                to_year = Some(parse_i32(&next_value(&mut args, "--to-year")?, "--to-year")?)
+            }
+            "--dir" => dir = Some(PathBuf::from(next_value(&mut args, "--dir")?)),
+            "--live" => live = true,
+            "--replay" => replay = Some(PathBuf::from(next_value(&mut args, "--replay")?)),
+            "--record" => record = Some(PathBuf::from(next_value(&mut args, "--record")?)),
+            "--config" => config = Some(PathBuf::from(next_value(&mut args, "--config")?)),
+            other => return Err(UsageError::unknown_flag(other)),
+        }
+    }
+    require_report_source(live, &replay)?;
+    let from_year = from_year.ok_or_else(|| UsageError::missing_flag("--from-year"))?;
+    let to_year = to_year.ok_or_else(|| UsageError::missing_flag("--to-year"))?;
+    if from_year > to_year {
+        return Err(UsageError::new(format!(
+            "--from-year {from_year} is after --to-year {to_year}"
+        )));
+    }
+    Ok(Command::Snapshots {
+        realm: realm.ok_or_else(|| UsageError::missing_flag("--realm"))?,
+        from_year,
+        to_year,
+        dir: dir.ok_or_else(|| UsageError::missing_flag("--dir"))?,
+        live,
+        replay,
+        record,
+        config,
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Execution
 // ---------------------------------------------------------------------------
@@ -534,6 +737,8 @@ enum CommandError {
     /// Neither `--live` nor `--mock` was given to a subcommand that needs a
     /// QBO client.
     NoClientSelected,
+    /// Neither `--live` nor `--replay DIR` was given to `report`/`snapshots`.
+    NoReportSource,
     Runtime(String),
 }
 
@@ -592,6 +797,46 @@ fn execute(command: Command) -> Result<(), CommandError> {
             config,
         } => run_record(&db, &realm, &dir, mock, live, config.as_deref()),
         Command::Replay { db, realm, dir } => run_replay(&db, &realm, &dir),
+        Command::Report {
+            realm,
+            name,
+            as_of,
+            start,
+            out,
+            live,
+            replay,
+            record,
+            config,
+        } => run_report(
+            &realm,
+            name,
+            as_of,
+            start,
+            &out,
+            live,
+            replay.as_deref(),
+            record.as_deref(),
+            config.as_deref(),
+        ),
+        Command::Snapshots {
+            realm,
+            from_year,
+            to_year,
+            dir,
+            live,
+            replay,
+            record,
+            config,
+        } => run_snapshots(
+            &realm,
+            from_year,
+            to_year,
+            &dir,
+            live,
+            replay.as_deref(),
+            record.as_deref(),
+            config.as_deref(),
+        ),
     }
 }
 
@@ -969,6 +1214,164 @@ fn run_replay(db: &Path, realm: &RealmId, dir: &Path) -> Result<(), CommandError
         .map_err(runtime)?;
 
     print_sync_report_table(&report);
+    Ok(())
+}
+
+// -- report -----------------------------------------------------------------
+
+/// `LEDGER-DESIGN.md` §6, §7: one Reports API call, parsed and written as CSV
+/// to `--out`. `--live`/`--replay` choose the client exactly as
+/// `run_record`/`run_replay` above do; `--record DIR` additionally wraps
+/// whichever client in [`RecordingQbo`] so a live pull is captured for later
+/// replay in the same call that uses it.
+#[allow(clippy::too_many_arguments)]
+fn run_report(
+    realm: &RealmId,
+    name: ReportKind,
+    as_of: NaiveDate,
+    start: Option<NaiveDate>,
+    out: &Path,
+    live: bool,
+    replay: Option<&Path>,
+    record: Option<&Path>,
+    config: Option<&Path>,
+) -> Result<(), CommandError> {
+    match (live, replay, record) {
+        (true, None, None) => {
+            report_with_client(build_http_client(config, realm)?, realm, name, as_of, start, out)
+        }
+        (true, None, Some(dir)) => report_with_client(
+            RecordingQbo::new(build_http_client(config, realm)?, dir),
+            realm,
+            name,
+            as_of,
+            start,
+            out,
+        ),
+        (false, Some(replay_dir), None) => {
+            report_with_client(FixtureQbo::new(replay_dir), realm, name, as_of, start, out)
+        }
+        (false, Some(replay_dir), Some(dir)) => report_with_client(
+            RecordingQbo::new(FixtureQbo::new(replay_dir), dir),
+            realm,
+            name,
+            as_of,
+            start,
+            out,
+        ),
+        _ => Err(CommandError::NoReportSource),
+    }
+}
+
+fn report_params(name: ReportKind, as_of: NaiveDate, start: Option<NaiveDate>) -> ReportParams {
+    match name {
+        ReportKind::TrialBalance => ReportParams {
+            start_date: start,
+            end_date: Some(as_of),
+            accounting_method: Some("Accrual".to_string()),
+            date_macro: None,
+            aging_method: None,
+        },
+        ReportKind::ArAging | ReportKind::ApAging => ReportParams {
+            start_date: start,
+            end_date: Some(as_of),
+            accounting_method: None,
+            date_macro: None,
+            aging_method: Some("Report_Date".to_string()),
+        },
+    }
+}
+
+fn report_with_client<C: QboClient>(
+    mut client: C,
+    realm: &RealmId,
+    name: ReportKind,
+    as_of: NaiveDate,
+    start: Option<NaiveDate>,
+    out: &Path,
+) -> Result<(), CommandError> {
+    let params = report_params(name, as_of, start);
+    let value = client
+        .report(realm, name.report_name(), &params)
+        .map_err(runtime)?;
+
+    let csv = match name {
+        ReportKind::TrialBalance => {
+            let rows = reports::parse_trial_balance(&value).map_err(runtime)?;
+            reports::trial_balance_csv(&rows)
+        }
+        ReportKind::ArAging | ReportKind::ApAging => {
+            let rows = reports::parse_aging(&value).map_err(runtime)?;
+            reports::aging_csv(&rows)
+        }
+    };
+    std::fs::write(out, &csv).map_err(runtime)?;
+    println!(
+        "wrote {} ({} bytes, {} rows)",
+        out.display(),
+        csv.len(),
+        csv.lines().count().saturating_sub(1),
+    );
+    Ok(())
+}
+
+// -- snapshots ----------------------------------------------------------
+
+/// `LEDGER-DESIGN.md` §6: a year-end `TrialBalance` per year into
+/// `tb-YYYY.csv`, for `ledger boundary --snapshots DIR` to read.
+#[allow(clippy::too_many_arguments)]
+fn run_snapshots(
+    realm: &RealmId,
+    from_year: i32,
+    to_year: i32,
+    dir: &Path,
+    live: bool,
+    replay: Option<&Path>,
+    record: Option<&Path>,
+    config: Option<&Path>,
+) -> Result<(), CommandError> {
+    match (live, replay, record) {
+        (true, None, None) => snapshots_with_client(
+            build_http_client(config, realm)?,
+            realm,
+            from_year,
+            to_year,
+            dir,
+        ),
+        (true, None, Some(rec_dir)) => snapshots_with_client(
+            RecordingQbo::new(build_http_client(config, realm)?, rec_dir),
+            realm,
+            from_year,
+            to_year,
+            dir,
+        ),
+        (false, Some(replay_dir), None) => {
+            snapshots_with_client(FixtureQbo::new(replay_dir), realm, from_year, to_year, dir)
+        }
+        (false, Some(replay_dir), Some(rec_dir)) => snapshots_with_client(
+            RecordingQbo::new(FixtureQbo::new(replay_dir), rec_dir),
+            realm,
+            from_year,
+            to_year,
+            dir,
+        ),
+        _ => Err(CommandError::NoReportSource),
+    }
+}
+
+fn snapshots_with_client<C: QboClient>(
+    mut client: C,
+    realm: &RealmId,
+    from_year: i32,
+    to_year: i32,
+    dir: &Path,
+) -> Result<(), CommandError> {
+    let written =
+        reports::write_year_end_snapshots(&mut client, realm, from_year..=to_year, dir)
+            .map_err(runtime)?;
+    for path in &written {
+        println!("wrote {}", path.display());
+    }
     Ok(())
 }
 
@@ -1701,6 +2104,160 @@ mod tests {
                 dir: PathBuf::from("fx"),
             })
         );
+    }
+
+    #[test]
+    fn report_parses_a_complete_invocation() {
+        assert_eq!(
+            parse(&args(&[
+                "report",
+                "--realm",
+                "1234567890123456",
+                "--name",
+                "trial-balance",
+                "--as-of",
+                "2026-09-10",
+                "--out",
+                "tb.csv",
+                "--replay",
+                "fx",
+            ])),
+            Ok(Command::Report {
+                realm: RealmId::parse("1234567890123456").unwrap(),
+                name: ReportKind::TrialBalance,
+                as_of: NaiveDate::from_ymd_opt(2026, 9, 10).unwrap(),
+                start: None,
+                out: PathBuf::from("tb.csv"),
+                live: false,
+                replay: Some(PathBuf::from("fx")),
+                record: None,
+                config: None,
+            })
+        );
+    }
+
+    #[test]
+    fn report_parses_start_live_and_record() {
+        let parsed = parse(&args(&[
+            "report",
+            "--realm",
+            "1234567890123456",
+            "--name",
+            "ar-aging",
+            "--as-of",
+            "2026-09-10",
+            "--start",
+            "2026-01-01",
+            "--out",
+            "ar.csv",
+            "--live",
+            "--record",
+            "rec",
+            "--config",
+            "conf.toml",
+        ]))
+        .unwrap();
+        assert_eq!(
+            parsed,
+            Command::Report {
+                realm: RealmId::parse("1234567890123456").unwrap(),
+                name: ReportKind::ArAging,
+                as_of: NaiveDate::from_ymd_opt(2026, 9, 10).unwrap(),
+                start: Some(NaiveDate::from_ymd_opt(2026, 1, 1).unwrap()),
+                out: PathBuf::from("ar.csv"),
+                live: true,
+                replay: None,
+                record: Some(PathBuf::from("rec")),
+                config: Some(PathBuf::from("conf.toml")),
+            }
+        );
+    }
+
+    #[test]
+    fn report_rejects_an_unknown_name() {
+        assert_eq!(
+            parse(&args(&[
+                "report",
+                "--realm",
+                "1234567890123456",
+                "--name",
+                "balance-sheet",
+                "--as-of",
+                "2026-09-10",
+                "--out",
+                "tb.csv",
+                "--replay",
+                "fx",
+            ])),
+            Err(UsageError::invalid_value("--name", "balance-sheet"))
+        );
+    }
+
+    #[test]
+    fn report_requires_exactly_one_of_live_or_replay() {
+        let base = [
+            "report",
+            "--realm",
+            "1234567890123456",
+            "--name",
+            "trial-balance",
+            "--as-of",
+            "2026-09-10",
+            "--out",
+            "tb.csv",
+        ];
+        assert!(parse(&args(&base)).is_err(), "neither given must be refused");
+
+        let mut both = base.to_vec();
+        both.extend(["--live", "--replay", "fx"]);
+        assert!(parse(&args(&both)).is_err(), "both given must be refused");
+    }
+
+    #[test]
+    fn snapshots_parses_a_complete_invocation() {
+        assert_eq!(
+            parse(&args(&[
+                "snapshots",
+                "--realm",
+                "1234567890123456",
+                "--from-year",
+                "2020",
+                "--to-year",
+                "2025",
+                "--dir",
+                "snaps",
+                "--replay",
+                "fx",
+            ])),
+            Ok(Command::Snapshots {
+                realm: RealmId::parse("1234567890123456").unwrap(),
+                from_year: 2020,
+                to_year: 2025,
+                dir: PathBuf::from("snaps"),
+                live: false,
+                replay: Some(PathBuf::from("fx")),
+                record: None,
+                config: None,
+            })
+        );
+    }
+
+    #[test]
+    fn snapshots_rejects_from_year_after_to_year() {
+        assert!(parse(&args(&[
+            "snapshots",
+            "--realm",
+            "1234567890123456",
+            "--from-year",
+            "2025",
+            "--to-year",
+            "2020",
+            "--dir",
+            "snaps",
+            "--replay",
+            "fx",
+        ]))
+        .is_err());
     }
 
     #[test]

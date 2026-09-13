@@ -203,6 +203,32 @@ fn percent_decode(raw: &str) -> String {
     out
 }
 
+/// A minimal but real-shaped Reports API `TrialBalance` response: a flat
+/// `Rows.Row[]` of `Data` rows built from `(id, name, debit, credit)`
+/// tuples — no sections, since `apps/qbo-local/src/reports.rs`'s own tests
+/// already cover walking nested ones. Enough for the report route tests here
+/// to exercise a real client end to end without hand-writing the whole tree
+/// per test.
+pub fn trial_balance_response(rows: &[(&str, &str, &str, &str)]) -> Value {
+    let row_values: Vec<Value> = rows
+        .iter()
+        .map(|(id, name, debit, credit)| {
+            serde_json::json!({
+                "type": "Data",
+                "ColData": [
+                    {"value": name, "id": id},
+                    {"value": debit},
+                    {"value": credit},
+                ]
+            })
+        })
+        .collect();
+    serde_json::json!({
+        "Header": { "ReportName": "TrialBalance" },
+        "Rows": { "Row": row_values }
+    })
+}
+
 /// A `MetaData.LastUpdatedTime`-bearing entity JSON object, the shape every
 /// canned response in these tests builds from.
 pub fn entity(id: &str, sync_token: &str, fields: Value, last_updated: &str) -> Value {

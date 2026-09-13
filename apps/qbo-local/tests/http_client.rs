@@ -14,19 +14,20 @@ mod support;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Duration, NaiveDate, Utc};
 use serde_json::{json, Value};
 use uuid::Uuid;
 
 use qbo_local::auth::{FileTokenStore, RotationLogEntry, TokenGenerations, TokenSet, TokenStore};
-use qbo_local::client::{QboClient, QboError};
+use qbo_local::client::{QboClient, QboError, ReportName, ReportParams};
 use qbo_local::domain::{EntityType, RealmId};
 use qbo_local::driver::SyncDriver;
 use qbo_local::http::HttpQboClient;
 use qbo_local::oauth::OAuthConfig;
+use qbo_local::reports;
 use qbo_local::store::{ProjectedTable, Store};
 
-use support::{entity, FakeRequest, FakeResponse, FakeServer};
+use support::{entity, trial_balance_response, FakeRequest, FakeResponse, FakeServer};
 
 fn realm() -> RealmId {
     RealmId::parse("1234567890123456").unwrap()
@@ -597,6 +598,96 @@ fn the_sync_driver_runs_end_to_end_against_the_fake_server() {
         invoice.contact_name.as_deref(),
         Some("Blue Harbor Swim Club")
     );
+}
+
+// ---------------------------------------------------------------------------
+// Reports API (LEDGER-DESIGN.md §6, §7)
+// ---------------------------------------------------------------------------
+
+type CapturedRequest = Option<(String, HashMap<String, String>)>;
+
+#[test]
+fn report_hits_the_reports_path_with_the_given_params_and_parses() {
+    let captured: Arc<Mutex<CapturedRequest>> = Arc::new(Mutex::new(None));
+    let state = Arc::clone(&captured);
+
+    let server = support::start(move |request: &FakeRequest| {
+        *state.lock().unwrap() = Some((request.path.clone(), request.query.clone()));
+        FakeResponse::json(
+            200,
+            trial_balance_response(&[
+                ("35", "Checking", "412884.19", ""),
+                ("61", "Sales Tax Payable", "", "8412.06"),
+            ]),
+        )
+    });
+
+    let directory = tempfile::tempdir().unwrap();
+    let mut client = fresh_client(&server, directory.path());
+    let params = ReportParams {
+        start_date: Some(NaiveDate::from_ymd_opt(2026, 1, 1).unwrap()),
+        end_date: Some(NaiveDate::from_ymd_opt(2026, 9, 10).unwrap()),
+        accounting_method: Some("Accrual".to_string()),
+        date_macro: None,
+        aging_method: None,
+    };
+
+    let value = client
+        .report(&realm(), ReportName::TrialBalance, &params)
+        .unwrap();
+
+    let (path, query) = captured.lock().unwrap().clone().unwrap();
+    assert_eq!(
+        path,
+        format!("/v3/company/{}/reports/TrialBalance", realm().as_str())
+    );
+    assert_eq!(query.get("start_date").map(String::as_str), Some("2026-01-01"));
+    assert_eq!(query.get("end_date").map(String::as_str), Some("2026-09-10"));
+    assert_eq!(
+        query.get("accounting_method").map(String::as_str),
+        Some("Accrual")
+    );
+    assert!(!query.contains_key("date_macro"));
+    assert!(!query.contains_key("aging_method"));
+
+    let rows = reports::parse_trial_balance(&value).unwrap();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].name, "Checking");
+    assert_eq!(rows[0].qbo_account_id.as_deref(), Some("35"));
+}
+
+#[test]
+fn report_only_sends_the_params_that_are_given() {
+    let captured: Arc<Mutex<Option<HashMap<String, String>>>> = Arc::new(Mutex::new(None));
+    let state = Arc::clone(&captured);
+
+    let server = support::start(move |request: &FakeRequest| {
+        *state.lock().unwrap() = Some(request.query.clone());
+        FakeResponse::json(200, trial_balance_response(&[]))
+    });
+
+    let directory = tempfile::tempdir().unwrap();
+    let mut client = fresh_client(&server, directory.path());
+
+    client
+        .report(&realm(), ReportName::AgedReceivables, &ReportParams::default())
+        .unwrap();
+
+    let query = captured.lock().unwrap().clone().unwrap();
+    for absent in ["start_date", "end_date", "accounting_method", "date_macro", "aging_method"] {
+        assert!(!query.contains_key(absent), "unexpected {absent} in {query:?}");
+    }
+}
+
+#[test]
+fn a_report_fault_maps_the_same_way_as_every_other_call() {
+    let server = support::start(|_: &FakeRequest| FakeResponse::json(500, json!({})));
+
+    let directory = tempfile::tempdir().unwrap();
+    let mut client = fresh_client(&server, directory.path());
+
+    let result = client.report(&realm(), ReportName::TrialBalance, &ReportParams::default());
+    assert!(matches!(result, Err(QboError::Network(_))), "{result:?}");
 }
 
 fn invoice_fields(doc_number: &str, total: f64) -> Value {

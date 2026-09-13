@@ -116,6 +116,82 @@ fn build_replica(path: &std::path::Path) {
     // explicitly — every write above went through a committed transaction.
 }
 
+/// A qbo-local file replica with one small, real document: a *non-taxable*
+/// sales receipt straight to the bank account. `nightly`'s tests need a
+/// trial balance that a hand-written QBO CSV can actually match to the cent
+/// on every must-tier account (`LEDGER-DESIGN.md` §7) — `build_replica`
+/// above posts sales tax to 2200 with no QBO account behind it, which can
+/// never match anything, must-tier or not.
+fn build_nightly_replica(path: &std::path::Path) {
+    let store = Store::open(path).unwrap();
+    store.register_realm(&realm(), "Aquamentor", now()).unwrap();
+
+    seed(
+        &store,
+        mirrored(
+            EntityType::Customer,
+            "31",
+            json!({ "Id": "31", "DisplayName": "Blue Harbor Swim Club", "Active": true, "Taxable": false }),
+        ),
+    );
+    seed(
+        &store,
+        mirrored(
+            EntityType::Class,
+            "4",
+            json!({ "Id": "4", "Name": "Foam Products", "Active": true }),
+        ),
+    );
+    seed(
+        &store,
+        mirrored(
+            EntityType::Account,
+            "BANK1",
+            json!({ "Id": "BANK1", "Name": "Checking", "AccountType": "Bank", "Active": true }),
+        ),
+    );
+    seed(
+        &store,
+        mirrored(
+            EntityType::Account,
+            "INC1",
+            json!({ "Id": "INC1", "Name": "Sales", "AccountType": "Income",
+                    "AccountSubType": "SalesOfProductIncome", "Active": true }),
+        ),
+    );
+    seed(
+        &store,
+        mirrored(
+            EntityType::Item,
+            "601",
+            json!({ "Id": "601", "Name": "CNC Job Work", "Sku": "CNC-1", "Type": "Service",
+                    "IncomeAccountRef": { "value": "INC1" }, "ClassRef": { "value": "4" }, "Active": true }),
+        ),
+    );
+    seed(
+        &store,
+        mirrored(
+            EntityType::SalesReceipt,
+            "SR-1",
+            json!({
+                "Id": "SR-1", "DocNumber": "SR1001", "TxnDate": "2026-08-05",
+                "CustomerRef": { "value": "31" }, "TotalAmt": 250.00,
+                "DepositToAccountRef": { "value": "BANK1" },
+                "Line": [
+                    {
+                        "Id": "1", "LineNum": 1, "Amount": 250.00,
+                        "DetailType": "SalesItemLineDetail",
+                        "SalesItemLineDetail": {
+                            "ItemRef": { "value": "601" }, "Qty": 1, "UnitPrice": 250.00,
+                            "ClassRef": { "value": "4" }, "TaxCodeRef": { "value": "NON" }
+                        }
+                    }
+                ]
+            }),
+        ),
+    );
+}
+
 fn run(args: &[&str]) -> std::process::Output {
     Command::new(env!("CARGO_BIN_EXE_ledger"))
         .args(args)
@@ -125,6 +201,10 @@ fn run(args: &[&str]) -> std::process::Output {
 
 fn stdout(output: &std::process::Output) -> String {
     String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+fn stderr(output: &std::process::Output) -> String {
+    String::from_utf8_lossy(&output.stderr).into_owned()
 }
 
 #[test]
@@ -403,4 +483,226 @@ fn opening_and_boundary_subcommands_run_end_to_end() {
     let boundary_out = stdout(&boundary);
     assert!(boundary_out.contains("BOUNDARY WALK"), "{boundary_out}");
     assert!(boundary_out.contains("boundary year"), "{boundary_out}");
+}
+
+#[test]
+fn verify_on_a_freshly_imported_book_exits_0_with_no_findings() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("ledger.sqlite");
+    let replica = dir.path().join("replica.sqlite");
+    build_nightly_replica(&replica);
+
+    let init = run(&[
+        "init",
+        "--db",
+        db.to_str().unwrap(),
+        "--company",
+        "aquamentor",
+        "--name",
+        "Aquamentor LLC",
+        "--realm",
+        realm().as_str(),
+    ]);
+    assert!(init.status.success(), "init failed: {}", stdout(&init));
+
+    let import = run(&[
+        "import",
+        "--db",
+        db.to_str().unwrap(),
+        "--company",
+        "aquamentor",
+        "--replica",
+        replica.to_str().unwrap(),
+        "--realm",
+        realm().as_str(),
+    ]);
+    assert!(
+        import.status.success(),
+        "import failed: {}",
+        stdout(&import)
+    );
+
+    let verify = run(&["verify", "--db", db.to_str().unwrap(), "--company", "aquamentor"]);
+    assert!(
+        verify.status.success(),
+        "verify failed: {}",
+        stderr(&verify)
+    );
+    assert!(
+        stdout(&verify).contains("no invariant failures"),
+        "{}",
+        stdout(&verify)
+    );
+}
+
+#[test]
+fn nightly_with_a_matching_csv_exits_0_and_writes_both_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("ledger.sqlite");
+    let replica = dir.path().join("replica.sqlite");
+    build_nightly_replica(&replica);
+
+    let init = run(&[
+        "init",
+        "--db",
+        db.to_str().unwrap(),
+        "--company",
+        "aquamentor",
+        "--name",
+        "Aquamentor LLC",
+        "--realm",
+        realm().as_str(),
+    ]);
+    assert!(init.status.success(), "init failed: {}", stdout(&init));
+
+    // The non-taxable receipt lands a 250.00 debit in Checking (BANK1) and a
+    // 250.00 credit in Sales (INC1) — signed debit-positive, the same
+    // convention `trial_balance_csv` and `read_qbo_csv` both use, so the
+    // income row is negative. A QBO CSV naming exactly those two figures
+    // against exactly those two QBO ids must-matches to the cent on every
+    // §7 tier.
+    let qbo_csv = dir.path().join("qbo-tb.csv");
+    std::fs::write(
+        &qbo_csv,
+        "qbo_account_id,name,balance\nBANK1,Checking,250.00\nINC1,Sales,-250.00\n",
+    )
+    .unwrap();
+    let out_dir = dir.path().join("nightly-out");
+
+    let nightly = run(&[
+        "nightly",
+        "--db",
+        db.to_str().unwrap(),
+        "--company",
+        "aquamentor",
+        "--replica",
+        replica.to_str().unwrap(),
+        "--realm",
+        realm().as_str(),
+        "--qbo-csv",
+        qbo_csv.to_str().unwrap(),
+        "--out",
+        out_dir.to_str().unwrap(),
+        "--as-of",
+        "2026-08-05",
+    ]);
+    assert!(
+        nightly.status.success(),
+        "nightly failed (stderr: {}): {}",
+        stderr(&nightly),
+        stdout(&nightly)
+    );
+    let text = stdout(&nightly);
+    assert!(text.contains("nightly: green"), "{text}");
+    assert!(text.contains("MUST-MATCH FAILURES: 0"), "{text}");
+
+    let text_path = out_dir.join("tbdiff-2026-08-05.txt");
+    let csv_path = out_dir.join("tbdiff-2026-08-05.csv");
+    assert!(text_path.exists(), "{}", text_path.display());
+    assert!(csv_path.exists(), "{}", csv_path.display());
+    let csv = std::fs::read_to_string(&csv_path).unwrap();
+    assert!(csv.starts_with("account,tier,ledger,qbo,delta\n"));
+}
+
+#[test]
+fn nightly_with_a_1100_mismatch_exits_1_and_the_text_names_1100() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("ledger.sqlite");
+    let replica = dir.path().join("replica.sqlite");
+    build_nightly_replica(&replica);
+
+    let init = run(&[
+        "init",
+        "--db",
+        db.to_str().unwrap(),
+        "--company",
+        "aquamentor",
+        "--name",
+        "Aquamentor LLC",
+        "--realm",
+        realm().as_str(),
+    ]);
+    assert!(init.status.success(), "init failed: {}", stdout(&init));
+
+    // Sales (INC1) still matches; Checking (BANK1) is deliberately wrong.
+    let qbo_csv = dir.path().join("qbo-tb.csv");
+    std::fs::write(
+        &qbo_csv,
+        "qbo_account_id,name,balance\nBANK1,Checking,999.00\nINC1,Sales,-250.00\n",
+    )
+    .unwrap();
+    let out_dir = dir.path().join("nightly-out");
+
+    let nightly = run(&[
+        "nightly",
+        "--db",
+        db.to_str().unwrap(),
+        "--company",
+        "aquamentor",
+        "--replica",
+        replica.to_str().unwrap(),
+        "--realm",
+        realm().as_str(),
+        "--qbo-csv",
+        qbo_csv.to_str().unwrap(),
+        "--out",
+        out_dir.to_str().unwrap(),
+        "--as-of",
+        "2026-08-05",
+    ]);
+    assert_eq!(
+        nightly.status.code(),
+        Some(1),
+        "nightly should exit 1 on a must-tier mismatch: {}",
+        stdout(&nightly)
+    );
+    let text = stdout(&nightly);
+    assert!(text.contains("nightly: RED"), "{text}");
+    assert!(text.contains("1100"), "expected the report to name 1100:\n{text}");
+
+    let text_path = out_dir.join("tbdiff-2026-08-05.txt");
+    assert!(text_path.exists());
+    let written = std::fs::read_to_string(&text_path).unwrap();
+    assert!(
+        written.contains("1100"),
+        "the written report must also name 1100:\n{written}"
+    );
+}
+
+#[test]
+fn nightly_plist_prints_a_launchd_plist_without_touching_any_file() {
+    let dir = tempfile::tempdir().unwrap();
+    // Neither path need exist: --plist only ever prints text.
+    let db = dir.path().join("ledger.sqlite");
+    let replica = dir.path().join("replica.sqlite");
+    let qbo_csv = dir.path().join("qbo-tb.csv");
+    let out_dir = dir.path().join("nightly-out");
+
+    let nightly = run(&[
+        "nightly",
+        "--plist",
+        "--db",
+        db.to_str().unwrap(),
+        "--company",
+        "aquamentor",
+        "--replica",
+        replica.to_str().unwrap(),
+        "--realm",
+        realm().as_str(),
+        "--qbo-csv",
+        qbo_csv.to_str().unwrap(),
+        "--out",
+        out_dir.to_str().unwrap(),
+    ]);
+    assert!(
+        nightly.status.success(),
+        "nightly --plist failed: {}",
+        stderr(&nightly)
+    );
+    let text = stdout(&nightly);
+    assert!(text.contains("<key>Label</key>"), "{text}");
+    assert!(text.contains("qbo-local report"), "{text}");
+    assert!(text.contains("ledger nightly"), "{text}");
+    assert!(!db.exists(), "--plist must never touch the ledger file");
+    assert!(!out_dir.exists(), "--plist must never write the out dir");
 }

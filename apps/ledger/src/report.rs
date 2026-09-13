@@ -698,6 +698,26 @@ impl TbDiff {
         ));
         out
     }
+
+    /// The same rows as [`Self::render_text`], as CSV — `LEDGER-DESIGN.md`
+    /// §7: "written as CSV and as fixed width text, kept forever". No
+    /// quoting, matching every other CSV this crate writes; a comma inside a
+    /// label is replaced with a space rather than corrupting the column
+    /// count.
+    pub fn render_csv(&self) -> String {
+        let mut out = String::from("account,tier,ledger,qbo,delta\n");
+        for row in &self.rows {
+            out.push_str(&format!(
+                "{},{},{},{},{}\n",
+                row.label.replace(',', " "),
+                row.tier.as_str(),
+                format_money(row.ledger_amount),
+                format_money(row.qbo_amount),
+                format_money(row.delta),
+            ));
+        }
+        out
+    }
 }
 
 fn format_money(amount: Money) -> String {
@@ -823,6 +843,26 @@ mod tests {
                 NaiveDate::from_ymd_opt(2026, 10, 1).unwrap(),
                 NaiveDate::from_ymd_opt(2026, 12, 31).unwrap()
             )
+        );
+    }
+
+    #[test]
+    fn tb_diff_render_csv_has_a_header_and_one_row_per_group() {
+        let diff = TbDiff {
+            rows: vec![TbDiffRow {
+                label: "Bank — Checking (1100)".to_string(),
+                tier: Tier::Must,
+                ledger_amount: Money::from_minor(41_288_419),
+                qbo_amount: Money::from_minor(41_288_419),
+                delta: Money::ZERO,
+            }],
+            must_failures: Vec::new(),
+            may_unexplained: Vec::new(),
+        };
+        let csv = diff.render_csv();
+        assert_eq!(
+            csv,
+            "account,tier,ledger,qbo,delta\nBank — Checking (1100),must,412884.19,412884.19,0.00\n"
         );
     }
 
