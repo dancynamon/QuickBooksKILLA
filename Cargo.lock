@@ -526,6 +526,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "qbo-desktop-commands"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "qbo-local",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "qbo-local"
 version = "0.1.0"
 dependencies = [

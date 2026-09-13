@@ -18,7 +18,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let store = Store::open_read_only(&db_path)
         .map_err(|err| format!("failed to open {db_path:?} read-only: {err}"))?;
-    let mut server = Server::new(store);
+    let mut server = Server::new(&store);
 
     let stdin = io::stdin();
     let stdout = io::stdout();

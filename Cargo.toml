@@ -4,6 +4,7 @@ members = [
     "crates/ledger-core",
     "apps/qbo-local",
     "apps/ledger",
+    "apps/desktop/commands",
 ]
 
 [workspace.package]

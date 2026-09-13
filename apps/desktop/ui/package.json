@@ -1,0 +1,9 @@
+{
+  "name": "bunzbooks-ui",
+  "private": true,
+  "type": "module",
+  "description": "BunzBooks desktop UI — vanilla ES modules, no bundler (ROADMAP.md D14).",
+  "scripts": {
+    "test": "node --test"
+  }
+}
