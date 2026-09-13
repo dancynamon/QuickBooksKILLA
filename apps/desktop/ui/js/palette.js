@@ -36,6 +36,15 @@ function commands(go) {
     { id: "classes", label: "Classes", glyph: "◧", act: () => go("classes") },
     { id: "accounts", label: "Chart of accounts", glyph: "▦", act: () => go("accounts") },
     { id: "sync", label: "Sync status", glyph: "↻", act: () => go("sync") },
+    { id: "ledger-tb", label: "Ledger — trial balance", glyph: "≡", act: () => go("ledger-tb") },
+    { id: "ledger-pnl", label: "Ledger — profit and loss", glyph: "▤", act: () => go("ledger-pnl") },
+    { id: "ledger-bs", label: "Ledger — balance sheet", glyph: "▦", act: () => go("ledger-bs") },
+    { id: "ledger-tax", label: "Ledger — sales tax", glyph: "▨", act: () => go("ledger-tax") },
+    { id: "ledger-gl", label: "Ledger — general ledger", glyph: "▥", act: () => go("ledger-gl") },
+    { id: "ledger-audit", label: "Ledger — audit trail", glyph: "◈", act: () => go("ledger-audit") },
+    { id: "ledger-adjustments", label: "Ledger — adjustments", glyph: "◑", act: () => go("ledger-adjustments") },
+    { id: "ledger-bank", label: "Ledger — bank reconciliation", glyph: "◍", act: () => go("ledger-bank") },
+    { id: "ledger-close", label: "Ledger — period close", glyph: "⊘", act: () => go("ledger-close") },
   ];
 }
 

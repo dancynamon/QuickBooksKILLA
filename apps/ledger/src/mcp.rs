@@ -73,12 +73,21 @@ use ledger_core::Money;
 /// The [`mcp_stdio::ToolSet`] over one open, read-write ledger, scoped to one
 /// company for the life of the process. `pub` only so [`Server`] (a type
 /// alias over a foreign generic type) can name it; its fields stay private.
-pub struct LedgerToolSet {
-    ledger: Ledger,
+///
+/// Borrows the [`Ledger`] rather than owning it (`'a`) — every [`Ledger`]
+/// method takes `&self` (interior mutability all the way down to the
+/// `rusqlite::Connection`, same as `qbo_local::store::Store`), so nothing
+/// here needs ownership, and a caller that already holds an open `Ledger` —
+/// `apps/desktop/commands`' `ledger_query`, mirroring
+/// `qbo_local::mcp::Server<'a>`'s own borrow — can hand this a reference
+/// for the life of one call rather than moving the connection in and back
+/// out again.
+pub struct LedgerToolSet<'a> {
+    ledger: &'a Ledger,
     company: String,
 }
 
-impl ToolSet for LedgerToolSet {
+impl<'a> ToolSet for LedgerToolSet<'a> {
     fn tools(&self) -> Vec<ToolSpec> {
         tools()
     }
@@ -91,9 +100,9 @@ impl ToolSet for LedgerToolSet {
 /// The server: one open ledger, spoken to over JSON-RPC 2.0 via
 /// [`mcp_stdio::Server`]. Build one with [`new_server`]; run it with
 /// [`mcp_stdio::serve_stdio`].
-pub type Server = mcp_stdio::Server<LedgerToolSet>;
+pub type Server<'a> = mcp_stdio::Server<LedgerToolSet<'a>>;
 
-pub fn new_server(ledger: Ledger, company: String) -> Server {
+pub fn new_server(ledger: &Ledger, company: String) -> Server<'_> {
     let info = ServerInfo {
         name: "ledger",
         version: env!("CARGO_PKG_VERSION"),
@@ -105,26 +114,26 @@ pub fn new_server(ledger: Ledger, company: String) -> Server {
 // Dispatch
 // ---------------------------------------------------------------------------
 
-impl LedgerToolSet {
+impl<'a> LedgerToolSet<'a> {
     fn call_tool(&mut self, name: &str, mut args: Value) -> Result<Value, ToolError> {
         match name {
             // --- reads --------------------------------------------------
             "trial_balance" => {
                 let as_of = parse_date(&args, "as_of")?;
-                let tb = report::trial_balance(&self.ledger, &self.company, as_of)
+                let tb = report::trial_balance(self.ledger, &self.company, as_of)
                     .map_err(ledger_err)?;
                 Ok(trial_balance_json(&tb))
             }
             "profit_and_loss" => {
                 let from = parse_date(&args, "from")?;
                 let to = parse_date(&args, "to")?;
-                let pnl = report::profit_and_loss(&self.ledger, &self.company, from, to)
+                let pnl = report::profit_and_loss(self.ledger, &self.company, from, to)
                     .map_err(ledger_err)?;
                 Ok(pnl_json(&pnl))
             }
             "balance_sheet" => {
                 let as_of = parse_date(&args, "as_of")?;
-                let bs = report::balance_sheet(&self.ledger, &self.company, as_of)
+                let bs = report::balance_sheet(self.ledger, &self.company, as_of)
                     .map_err(ledger_err)?;
                 Ok(balance_sheet_json(&bs))
             }
@@ -137,13 +146,13 @@ impl LedgerToolSet {
                     .and_then(Value::as_str)
                     .map(|s| AccountId(s.to_string()));
                 let detail =
-                    accountant::general_ledger(&self.ledger, &self.company, from, to, account.as_ref())
+                    accountant::general_ledger(self.ledger, &self.company, from, to, account.as_ref())
                         .map_err(accountant_err)?;
                 Ok(gl_detail_json(&detail))
             }
             "audit_trail" => {
                 let since = parse_optional_date(&args, "since")?;
-                let rows = accountant::audit_trail(&self.ledger, &self.company, since)
+                let rows = accountant::audit_trail(self.ledger, &self.company, since)
                     .map_err(accountant_err)?;
                 Ok(json!(rows.iter().map(audit_row_json).collect::<Vec<_>>()))
             }
@@ -170,7 +179,7 @@ impl LedgerToolSet {
                     ),
                     None => None,
                 };
-                let list = accountant::list_adjustments(&self.ledger, &self.company, state)
+                let list = accountant::list_adjustments(self.ledger, &self.company, state)
                     .map_err(accountant_err)?;
                 Ok(json!(list
                     .iter()
@@ -218,7 +227,7 @@ impl LedgerToolSet {
                 )))
             }
         };
-        let lines = report::sales_tax_lines(&self.ledger, &self.company, (year, quarter), rate)
+        let lines = report::sales_tax_lines(self.ledger, &self.company, (year, quarter), rate)
             .map_err(ledger_err)?;
         Ok(sales_tax_lines_json(&lines))
     }
@@ -378,7 +387,7 @@ impl LedgerToolSet {
 
         let now = Utc::now();
         let request = accountant::propose_adjustment(
-            &self.ledger,
+            self.ledger,
             &self.company,
             &requested_by,
             &description,
@@ -400,7 +409,7 @@ impl LedgerToolSet {
         let note = args.get("note").and_then(Value::as_str).unwrap_or("");
         let now = Utc::now();
         let request = accountant::decide_adjustment(
-            &self.ledger,
+            self.ledger,
             &self.company,
             request_id,
             decided_by,
@@ -1269,12 +1278,18 @@ mod tests {
 
     const COMPANY: &str = "aquamentor";
 
-    fn seeded_server() -> Server {
+    /// `new_server` borrows (`LedgerToolSet<'a>`), so the `Ledger` a test
+    /// wants to seed has to outlive the `Server` built over it — this
+    /// returns the `Ledger` too, rather than a `seeded_server()` that
+    /// returns just the `Server` the way it did before that borrow, since a
+    /// function cannot return a struct borrowing a sibling it also moves
+    /// out.
+    fn seed_ledger() -> Ledger {
         let ledger = Ledger::open_in_memory().unwrap();
         ledger
             .create_company(COMPANY, "Test Co", None, Utc::now())
             .unwrap();
-        new_server(ledger, COMPANY.to_string())
+        ledger
     }
 
     fn call(server: &mut Server, id: i64, method: &str, params: Value) -> Value {
@@ -1347,7 +1362,8 @@ mod tests {
 
     #[test]
     fn initialize_names_the_ledger_server() {
-        let mut server = seeded_server();
+        let ledger = seed_ledger();
+        let mut server = new_server(&ledger, COMPANY.to_string());
         let response = call(
             &mut server,
             1,
@@ -1363,7 +1379,8 @@ mod tests {
 
     #[test]
     fn malformed_json_is_a_parse_error() {
-        let mut server = seeded_server();
+        let ledger = seed_ledger();
+        let mut server = new_server(&ledger, COMPANY.to_string());
         let response = server.handle_line("{ not json").unwrap();
         let response: Value = serde_json::from_str(&response).unwrap();
         assert_eq!(response["error"]["code"], json!(-32700));
@@ -1371,7 +1388,8 @@ mod tests {
 
     #[test]
     fn tools_list_carries_every_tool() {
-        let mut server = seeded_server();
+        let ledger = seed_ledger();
+        let mut server = new_server(&ledger, COMPANY.to_string());
         let response = call(&mut server, 1, "tools/list", json!({}));
         let listed = response["result"]["tools"].as_array().unwrap();
         let expected = [
@@ -1406,7 +1424,8 @@ mod tests {
 
     #[test]
     fn save_and_post_a_two_line_taxable_invoice_balances_and_moves_the_trial_balance() {
-        let mut server = seeded_server();
+        let ledger = seed_ledger();
+        let mut server = new_server(&ledger, COMPANY.to_string());
         let response = call_tool(
             &mut server,
             1,
@@ -1447,7 +1466,8 @@ mod tests {
 
     #[test]
     fn save_and_post_into_a_closed_period_is_an_is_error_containing_closed() {
-        let mut server = seeded_server();
+        let ledger = seed_ledger();
+        let mut server = new_server(&ledger, COMPANY.to_string());
         {
             let response = call_tool(
                 &mut server,
@@ -1483,7 +1503,8 @@ mod tests {
 
     #[test]
     fn refuses_to_write_while_replaying() {
-        let mut server = seeded_server();
+        let ledger = seed_ledger();
+        let mut server = new_server(&ledger, COMPANY.to_string());
         // Flip the same flag a real import replay would, then confirm every
         // write refuses. `set_replaying` takes `&self` (an `AtomicBool`
         // underneath), so the shared reference `tool_set()` hands back is
@@ -1503,7 +1524,8 @@ mod tests {
 
     #[test]
     fn propose_then_approve_an_adjustment_moves_the_trial_balance() {
-        let mut server = seeded_server();
+        let ledger = seed_ledger();
+        let mut server = new_server(&ledger, COMPANY.to_string());
         let response = call_tool(
             &mut server,
             1,
@@ -1558,7 +1580,8 @@ mod tests {
 
     #[test]
     fn reverse_entry_mirrors_the_original() {
-        let mut server = seeded_server();
+        let ledger = seed_ledger();
+        let mut server = new_server(&ledger, COMPANY.to_string());
         let posted = call_tool(
             &mut server,
             1,
@@ -1593,7 +1616,8 @@ mod tests {
 
     #[test]
     fn bad_json_is_minus_32700() {
-        let mut server = seeded_server();
+        let ledger = seed_ledger();
+        let mut server = new_server(&ledger, COMPANY.to_string());
         let response = server.handle_line("not json at all").unwrap();
         let response: Value = serde_json::from_str(&response).unwrap();
         assert_eq!(response["error"]["code"], json!(-32700));
@@ -1601,7 +1625,8 @@ mod tests {
 
     #[test]
     fn locked_through_reports_none_before_any_close() {
-        let mut server = seeded_server();
+        let ledger = seed_ledger();
+        let mut server = new_server(&ledger, COMPANY.to_string());
         let response = call_tool(&mut server, 1, "locked_through", json!({}));
         assert_eq!(
             response["result"]["structuredContent"]["locked_through"],
@@ -1611,7 +1636,8 @@ mod tests {
 
     #[test]
     fn missing_class_on_an_income_line_is_an_is_error() {
-        let mut server = seeded_server();
+        let ledger = seed_ledger();
+        let mut server = new_server(&ledger, COMPANY.to_string());
         let mut doc = invoice_document("inv-4", "foam");
         doc["header_class"] = Value::Null;
         doc["lines"][0]["class"] = Value::Null;
