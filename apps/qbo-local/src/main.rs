@@ -24,7 +24,8 @@ use qbo_local::client::MockQbo;
 use qbo_local::clock::{Clock, SystemClock};
 use qbo_local::daemon::{Cadence, Daemon, DaemonOptions, Tick};
 use qbo_local::domain::{EntityType, RealmId, SyncTier};
-use qbo_local::driver::{SyncOptions, SyncPath, SyncReport};
+use qbo_local::driver::{SyncDriver, SyncOptions, SyncPath, SyncReport};
+use qbo_local::fixture::{FixtureQbo, RecordingQbo};
 use qbo_local::ratelimit::RealmLimits;
 use qbo_local::reconcile::{ReconcileOptions, ReconcileReport, Reconciler};
 use qbo_local::store::backup::SnapshotPolicy;
@@ -112,6 +113,18 @@ enum Command {
         dir: PathBuf,
         keep: Option<usize>,
     },
+    Record {
+        db: PathBuf,
+        realm: RealmId,
+        dir: PathBuf,
+        mock: bool,
+        live: bool,
+    },
+    Replay {
+        db: PathBuf,
+        realm: RealmId,
+        dir: PathBuf,
+    },
 }
 
 const USAGE: &str = "\
@@ -125,6 +138,8 @@ USAGE:
                       [--once] [--mock]
     qbo-local sweep --db PATH --realm ID [--mock]
     qbo-local snapshot --db PATH --dir DIR [--keep N]
+    qbo-local record --db PATH --realm ID --dir DIR [--mock|--live]
+    qbo-local replay --db PATH --realm ID --dir DIR
     qbo-local --help
 
 SUBCOMMANDS:
@@ -134,6 +149,11 @@ SUBCOMMANDS:
     daemon      Run the CDC poll loop against a realm until stopped.
     sweep       Run one reconciliation sweep against QBO's index.
     snapshot    Take one nightly-style backup of the replica, with rotation.
+    record      Record every QBO response for a realm's sync into DIR as
+                fixtures (HANDOFF.md §2.6). Scrub before committing any of
+                it — see tools/scrub-fixtures.py.
+    replay      Sync a realm from fixtures previously recorded into DIR,
+                touching no network at all.
 
 FLAGS:
     --db PATH               Path to the SQLite replica file.
@@ -144,11 +164,17 @@ FLAGS:
     --snapshot-dir DIR      Where nightly snapshots go (daemon; pair with --keep).
     --keep N                Snapshots to retain (daemon, snapshot).
     --snapshot-hour-utc H   UTC hour at or after which a snapshot may fire (daemon).
-    --dir DIR               Where a snapshot is written (snapshot).
+    --dir DIR               Where a snapshot is written (snapshot), or where
+                            fixtures are recorded to / replayed from (record,
+                            replay).
     --once                  Run a single tick and exit (daemon).
     --mock                  Use an empty in-memory MockQbo instead of live QBO.
+    --live                  Record from live QBO (record only; not built yet).
 
 Without --mock, daemon and sweep exit 2: HttpQboClient is not built yet.
+record exits 2 the same way unless --mock is given; --live exits 2 too, since
+HttpQboClient does not exist yet (HANDOFF.md §2.3) — it is one arm away from
+working once it does.
 Ctrl-C is safe to stop `daemon` with — every write is transactional — or type
 \"stop\" and press Enter on its stdin for a clean exit.
 
@@ -220,6 +246,8 @@ fn parse(args: &[String]) -> Result<Command, UsageError> {
         "daemon" => parse_daemon(args),
         "sweep" => parse_sweep(args),
         "snapshot" => parse_snapshot(args),
+        "record" => parse_record(args),
+        "replay" => parse_replay(args),
         other => Err(UsageError::unknown_subcommand(other)),
     }
 }
@@ -381,6 +409,53 @@ fn parse_snapshot(mut args: Args<'_>) -> Result<Command, UsageError> {
     })
 }
 
+fn parse_record(mut args: Args<'_>) -> Result<Command, UsageError> {
+    let mut db = None;
+    let mut realm = None;
+    let mut dir = None;
+    let mut mock = false;
+    let mut live = false;
+    while let Some(flag) = args.next() {
+        match flag.as_str() {
+            "--db" => db = Some(PathBuf::from(next_value(&mut args, "--db")?)),
+            "--realm" => realm = Some(parse_realm(&next_value(&mut args, "--realm")?)?),
+            "--dir" => dir = Some(PathBuf::from(next_value(&mut args, "--dir")?)),
+            "--mock" => mock = true,
+            "--live" => live = true,
+            other => return Err(UsageError::unknown_flag(other)),
+        }
+    }
+    if mock && live {
+        return Err(UsageError::new("--mock and --live are mutually exclusive"));
+    }
+    Ok(Command::Record {
+        db: db.ok_or_else(|| UsageError::missing_flag("--db"))?,
+        realm: realm.ok_or_else(|| UsageError::missing_flag("--realm"))?,
+        dir: dir.ok_or_else(|| UsageError::missing_flag("--dir"))?,
+        mock,
+        live,
+    })
+}
+
+fn parse_replay(mut args: Args<'_>) -> Result<Command, UsageError> {
+    let mut db = None;
+    let mut realm = None;
+    let mut dir = None;
+    while let Some(flag) = args.next() {
+        match flag.as_str() {
+            "--db" => db = Some(PathBuf::from(next_value(&mut args, "--db")?)),
+            "--realm" => realm = Some(parse_realm(&next_value(&mut args, "--realm")?)?),
+            "--dir" => dir = Some(PathBuf::from(next_value(&mut args, "--dir")?)),
+            other => return Err(UsageError::unknown_flag(other)),
+        }
+    }
+    Ok(Command::Replay {
+        db: db.ok_or_else(|| UsageError::missing_flag("--db"))?,
+        realm: realm.ok_or_else(|| UsageError::missing_flag("--realm"))?,
+        dir: dir.ok_or_else(|| UsageError::missing_flag("--dir"))?,
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Execution
 // ---------------------------------------------------------------------------
@@ -423,6 +498,14 @@ fn execute(command: Command) -> Result<(), CommandError> {
         ),
         Command::Sweep { db, realm, mock } => run_sweep(&db, &realm, mock),
         Command::Snapshot { db, dir, keep } => run_snapshot(&db, &dir, keep),
+        Command::Record {
+            db,
+            realm,
+            dir,
+            mock,
+            live,
+        } => run_record(&db, &realm, &dir, mock, live),
+        Command::Replay { db, realm, dir } => run_replay(&db, &realm, &dir),
     }
 }
 
@@ -640,6 +723,59 @@ fn run_snapshot(db: &Path, dir: &Path, keep: Option<usize>) -> Result<(), Comman
     for path in &report.pruned {
         println!("  {}", path.display());
     }
+    Ok(())
+}
+
+// -- record -----------------------------------------------------------------
+
+/// `HANDOFF.md` §2.6: record every response a sync makes into `dir` as
+/// offline fixtures, via [`RecordingQbo`].
+///
+/// `--live` is deliberately its own arm rather than falling through to the
+/// `!mock` case below, even though both exit the same way today: the day
+/// `HttpQboClient` (`HANDOFF.md` §2.3) lands, this arm is the one line that
+/// changes, and every other subcommand here that will eventually take a live
+/// client shares the same shape.
+fn run_record(db: &Path, realm: &RealmId, dir: &Path, mock: bool, live: bool) -> Result<(), CommandError> {
+    if live {
+        return Err(CommandError::MissingHttpClient);
+    }
+    if !mock {
+        return Err(CommandError::MissingHttpClient);
+    }
+
+    let store = Store::open(db).map_err(runtime)?;
+    let now = Utc::now();
+    let client = MockQbo::new(now);
+    let recorder = RecordingQbo::new(client, dir);
+    let mut driver = SyncDriver::new(recorder, SyncOptions::default(), now);
+    let entity_types: Vec<EntityType> = EntityType::m0_scope().collect();
+    let report = driver
+        .sync_realm(&store, realm, &entity_types, now)
+        .map_err(runtime)?;
+
+    print_sync_report_table(&report);
+    println!();
+    println!("recorded to      : {}", dir.display());
+    println!("manifest entries : {}", driver.client_mut().manifest().len());
+    Ok(())
+}
+
+// -- replay -------------------------------------------------------------
+
+/// `HANDOFF.md` §2.6: sync a realm entirely from fixtures previously recorded
+/// into `dir`, via [`FixtureQbo`] — no network involved at any point.
+fn run_replay(db: &Path, realm: &RealmId, dir: &Path) -> Result<(), CommandError> {
+    let store = Store::open(db).map_err(runtime)?;
+    let now = Utc::now();
+    let client = FixtureQbo::new(dir);
+    let mut driver = SyncDriver::new(client, SyncOptions::default(), now);
+    let entity_types: Vec<EntityType> = EntityType::m0_scope().collect();
+    let report = driver
+        .sync_realm(&store, realm, &entity_types, now)
+        .map_err(runtime)?;
+
+    print_sync_report_table(&report);
     Ok(())
 }
 
@@ -1089,6 +1225,149 @@ mod tests {
                 db: PathBuf::from("r.db"),
                 dir: PathBuf::from("snaps"),
                 keep: Some(4),
+            })
+        );
+    }
+
+    #[test]
+    fn record_requires_db_realm_and_dir() {
+        assert_eq!(
+            parse(&args(&["record", "--realm", "1234567890123456", "--dir", "fx"])),
+            Err(UsageError::missing_flag("--db"))
+        );
+        assert_eq!(
+            parse(&args(&["record", "--db", "r.db", "--dir", "fx"])),
+            Err(UsageError::missing_flag("--realm"))
+        );
+        assert_eq!(
+            parse(&args(&[
+                "record",
+                "--db",
+                "r.db",
+                "--realm",
+                "1234567890123456"
+            ])),
+            Err(UsageError::missing_flag("--dir"))
+        );
+    }
+
+    #[test]
+    fn record_defaults_mock_and_live_to_false() {
+        let parsed = parse(&args(&[
+            "record",
+            "--db",
+            "r.db",
+            "--realm",
+            "1234567890123456",
+            "--dir",
+            "fx",
+        ]))
+        .unwrap();
+        assert_eq!(
+            parsed,
+            Command::Record {
+                db: PathBuf::from("r.db"),
+                realm: RealmId::parse("1234567890123456").unwrap(),
+                dir: PathBuf::from("fx"),
+                mock: false,
+                live: false,
+            }
+        );
+    }
+
+    #[test]
+    fn record_parses_mock() {
+        let parsed = parse(&args(&[
+            "record",
+            "--db",
+            "r.db",
+            "--realm",
+            "1234567890123456",
+            "--dir",
+            "fx",
+            "--mock",
+        ]))
+        .unwrap();
+        match parsed {
+            Command::Record { mock, live, .. } => {
+                assert!(mock);
+                assert!(!live);
+            }
+            other => panic!("expected Command::Record, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn record_rejects_mock_and_live_together() {
+        assert!(parse(&args(&[
+            "record",
+            "--db",
+            "r.db",
+            "--realm",
+            "1234567890123456",
+            "--dir",
+            "fx",
+            "--mock",
+            "--live",
+        ]))
+        .is_err());
+    }
+
+    #[test]
+    fn record_rejects_an_unknown_flag() {
+        assert_eq!(
+            parse(&args(&[
+                "record",
+                "--db",
+                "r.db",
+                "--realm",
+                "1234567890123456",
+                "--dir",
+                "fx",
+                "--bogus"
+            ])),
+            Err(UsageError::unknown_flag("--bogus"))
+        );
+    }
+
+    #[test]
+    fn replay_requires_db_realm_and_dir() {
+        assert_eq!(
+            parse(&args(&["replay", "--realm", "1234567890123456", "--dir", "fx"])),
+            Err(UsageError::missing_flag("--db"))
+        );
+        assert_eq!(
+            parse(&args(&["replay", "--db", "r.db", "--dir", "fx"])),
+            Err(UsageError::missing_flag("--realm"))
+        );
+        assert_eq!(
+            parse(&args(&[
+                "replay",
+                "--db",
+                "r.db",
+                "--realm",
+                "1234567890123456"
+            ])),
+            Err(UsageError::missing_flag("--dir"))
+        );
+    }
+
+    #[test]
+    fn replay_parses_a_complete_invocation() {
+        assert_eq!(
+            parse(&args(&[
+                "replay",
+                "--db",
+                "r.db",
+                "--realm",
+                "1234567890123456",
+                "--dir",
+                "fx",
+            ])),
+            Ok(Command::Replay {
+                db: PathBuf::from("r.db"),
+                realm: RealmId::parse("1234567890123456").unwrap(),
+                dir: PathBuf::from("fx"),
             })
         );
     }

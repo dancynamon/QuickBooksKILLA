@@ -1,0 +1,14 @@
+[
+  {
+    "entity_type": "Item",
+    "is_deleted": false,
+    "last_updated_utc": "2026-01-01T00:00:00+00:00",
+    "qbo_id": "1",
+    "raw_json": {
+      "Id": "1",
+      "Name": "50-INCH RESCUE TUBE",
+      "UnitPrice": 83.0
+    },
+    "sync_token": "0"
+  }
+]

@@ -1,0 +1,56 @@
+[
+  {
+    "entity_type": "Invoice",
+    "is_deleted": false,
+    "last_updated_utc": "2026-01-01T00:00:00+00:00",
+    "qbo_id": "101",
+    "raw_json": {
+      "Balance": 0.0,
+      "CustomerRef": {
+        "name": "Bramble Junction",
+        "value": "1"
+      },
+      "DocNumber": "101001",
+      "Id": "101",
+      "Line": [
+        {
+          "Amount": 249.0,
+          "Description": "50\" rescue tubes, red",
+          "DetailType": "SalesItemLineDetail",
+          "Id": "1",
+          "LineNum": 1,
+          "SalesItemLineDetail": {
+            "ItemRef": {
+              "name": "50-INCH RESCUE TUBE",
+              "value": "1"
+            },
+            "Qty": 3,
+            "UnitPrice": 83.0
+          }
+        }
+      ],
+      "PrivateNote": "Ship with next Friday's route",
+      "TotalAmt": 249.0,
+      "TxnDate": "2026-01-02"
+    },
+    "sync_token": "0"
+  },
+  {
+    "entity_type": "Invoice",
+    "is_deleted": false,
+    "last_updated_utc": "2026-01-01T00:00:00+00:00",
+    "qbo_id": "102",
+    "raw_json": {
+      "Balance": 830.0,
+      "CustomerRef": {
+        "name": "Slate Outfitters",
+        "value": "2"
+      },
+      "DocNumber": "101002",
+      "Id": "102",
+      "TotalAmt": 830.0,
+      "TxnDate": "2026-01-05"
+    },
+    "sync_token": "0"
+  }
+]

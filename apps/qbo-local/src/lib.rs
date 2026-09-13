@@ -20,6 +20,8 @@
 //! - [`clock`]    — `HANDOFF.md` §2.5: a testable source of time and waiting
 //! - [`daemon`]   — `HANDOFF.md` §2.5, `DESIGN.md` §8: the CDC poll loop and
 //!   nightly snapshots
+//! - [`fixture`]  — `DESIGN.md` §10, `HANDOFF.md` §2.6: record/replay HTTP
+//!   fixtures so the suite runs offline
 //! - [`mcp`]      — `ROADMAP.md` §G: an MCP server over the read-only query
 //!   API, so Dan's existing skills can be repointed off the QuickBooks MCP
 
@@ -29,6 +31,7 @@ pub mod clock;
 pub mod daemon;
 pub mod domain;
 pub mod driver;
+pub mod fixture;
 pub mod mcp;
 pub mod outbox;
 pub mod project;

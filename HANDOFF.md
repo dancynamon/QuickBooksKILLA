@@ -199,6 +199,39 @@ way out. This repository has already had to be cleaned once, and finding real
 names in a test file after the fact is much more work than inventing them up
 front.
 
+**The three commands, in the order a real recording session uses them:**
+
+1. `qbo-local record --db PATH --realm ID --dir .local/fixtures/<realm> --live`
+   — records every response a full sweep makes into `--dir`, via
+   `fixture::RecordingQbo` wrapping `HttpQboClient`. Errors are recorded too
+   (`{"error": "..."}`) and still raised, so a recording session fails exactly
+   the way a live sync would. `--mock` records from an empty `MockQbo`
+   instead — it never touches the network and proves the plumbing, which is
+   what `qbo-local`'s own CLI tests use it for; it is not how real fixtures
+   get made.
+2. `python3 tools/scrub-fixtures.py .local/fixtures/<realm> <scrubbed-dir>` —
+   the only path from a recording to something safe to `git add`. Writes a
+   fresh directory (never in place), deterministically, and refuses to write
+   anything at all if its own leak detector finds an original name surviving
+   somewhere in the output — the backstop the rule above depends on. Read the
+   module docstring for the exact field rules (names, addresses, phone,
+   email, `DocNumber`'s offset, `realmId`).
+3. `qbo-local replay --db PATH --realm ID --dir <scrubbed-dir>` — syncs a
+   realm entirely from a fixture directory, via `fixture::FixtureQbo`, touching
+   no network at all. This is what the offline suite exercises against —
+   `apps/qbo-local/tests/fixtures/synthetic/` is a small committed example,
+   and `apps/qbo-local/src/fixture.rs` has the property test proving that
+   replaying a recording reproduces a direct sync byte-for-byte, entity by
+   entity.
+
+**Only the scrubbed directory is ever `git add`ed.** `.local/fixtures/` stays
+gitignored in full (§0), same as every other extract of the real book — one
+ignored directory rather than a list of filenames someone will forget to add
+to. The leak detector inside `tools/scrub-fixtures.py` is the backstop for
+this rule, not a replacement for following it: it fails the whole run, before
+anything is written, the moment a real name survives scrubbing anywhere in
+the output.
+
 ---
 
 ## 3. Constraints that must not be relaxed

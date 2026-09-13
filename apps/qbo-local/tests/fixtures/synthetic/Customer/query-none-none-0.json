@@ -1,0 +1,37 @@
+[
+  {
+    "entity_type": "Customer",
+    "is_deleted": false,
+    "last_updated_utc": "2026-01-01T00:00:00+00:00",
+    "qbo_id": "1",
+    "raw_json": {
+      "BillAddr": {
+        "City": "Harborview",
+        "CountrySubDivisionCode": "NY",
+        "Line1": "Bramble Junction",
+        "Line2": "249 Crossing",
+        "PostalCode": "07000"
+      },
+      "DisplayName": "Bramble Junction",
+      "Id": "1",
+      "PrimaryEmailAddr": {
+        "Address": "contact-9e9fd09d6a@example.com"
+      },
+      "PrimaryPhone": {
+        "FreeFormNumber": "555-0194"
+      }
+    },
+    "sync_token": "0"
+  },
+  {
+    "entity_type": "Customer",
+    "is_deleted": false,
+    "last_updated_utc": "2026-01-01T00:00:00+00:00",
+    "qbo_id": "2",
+    "raw_json": {
+      "DisplayName": "Slate Outfitters",
+      "Id": "2"
+    },
+    "sync_token": "0"
+  }
+]

@@ -213,6 +213,132 @@ fn sweep_without_mock_exits_2_with_the_exact_message() {
 }
 
 #[test]
+fn record_mock_then_replay_round_trips_through_the_binary() {
+    let directory = tempfile::tempdir().unwrap();
+    let db = directory.path().join("replica.db");
+    init(&db, REALM, "Aquamentor, Inc.");
+    let fixtures = directory.path().join("fixtures");
+
+    let record = qbo_local(&[
+        "record",
+        "--db",
+        db.to_str().unwrap(),
+        "--realm",
+        REALM,
+        "--dir",
+        fixtures.to_str().unwrap(),
+        "--mock",
+    ]);
+    assert!(
+        record.status.success(),
+        "record --mock failed: {}",
+        stderr(&record)
+    );
+    let record_text = stdout(&record);
+    assert!(
+        record_text.contains("manifest entries"),
+        "expected a manifest summary:\n{record_text}"
+    );
+    assert!(
+        fixtures.join("manifest.json").exists(),
+        "expected a manifest.json under {}",
+        fixtures.display()
+    );
+
+    let replay_db = directory.path().join("replay.db");
+    init(&replay_db, REALM, "Aquamentor, Inc.");
+    let replay = qbo_local(&[
+        "replay",
+        "--db",
+        replay_db.to_str().unwrap(),
+        "--realm",
+        REALM,
+        "--dir",
+        fixtures.to_str().unwrap(),
+    ]);
+    assert!(
+        replay.status.success(),
+        "replay failed: {}",
+        stderr(&replay)
+    );
+    let replay_text = stdout(&replay);
+    assert!(
+        replay_text.contains("entity"),
+        "expected the sync report table:\n{replay_text}"
+    );
+}
+
+#[test]
+fn record_without_mock_or_live_exits_2_with_the_exact_message() {
+    let directory = tempfile::tempdir().unwrap();
+    let db = directory.path().join("replica.db");
+    init(&db, REALM, "Aquamentor, Inc.");
+    let fixtures = directory.path().join("fixtures");
+
+    let output = qbo_local(&[
+        "record",
+        "--db",
+        db.to_str().unwrap(),
+        "--realm",
+        REALM,
+        "--dir",
+        fixtures.to_str().unwrap(),
+    ]);
+
+    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(stderr(&output).trim_end(), HTTP_CLIENT_MISSING);
+    assert!(!fixtures.exists(), "no fixtures should have been written");
+}
+
+#[test]
+fn record_with_live_exits_2_with_the_exact_message() {
+    let directory = tempfile::tempdir().unwrap();
+    let db = directory.path().join("replica.db");
+    init(&db, REALM, "Aquamentor, Inc.");
+    let fixtures = directory.path().join("fixtures");
+
+    let output = qbo_local(&[
+        "record",
+        "--db",
+        db.to_str().unwrap(),
+        "--realm",
+        REALM,
+        "--dir",
+        fixtures.to_str().unwrap(),
+        "--live",
+    ]);
+
+    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(stderr(&output).trim_end(), HTTP_CLIENT_MISSING);
+}
+
+#[test]
+fn replay_with_no_fixtures_recorded_fails_naming_the_missing_key() {
+    let directory = tempfile::tempdir().unwrap();
+    let db = directory.path().join("replica.db");
+    init(&db, REALM, "Aquamentor, Inc.");
+    let fixtures = directory.path().join("empty-fixtures");
+    std::fs::create_dir_all(&fixtures).unwrap();
+
+    let output = qbo_local(&[
+        "replay",
+        "--db",
+        db.to_str().unwrap(),
+        "--realm",
+        REALM,
+        "--dir",
+        fixtures.to_str().unwrap(),
+    ]);
+
+    assert_eq!(output.status.code(), Some(1));
+    let text = stderr(&output);
+    assert!(
+        text.contains("no fixture for"),
+        "expected the missing-fixture message:\n{text}"
+    );
+}
+
+#[test]
 fn no_arguments_exits_2_with_usage() {
     let output = qbo_local(&[]);
 
@@ -234,7 +360,9 @@ fn help_exits_2_and_lists_every_subcommand() {
 
     assert_eq!(output.status.code(), Some(2));
     let text = stderr(&output);
-    for subcommand in ["status", "init", "daemon", "sweep", "snapshot"] {
+    for subcommand in [
+        "status", "init", "daemon", "sweep", "snapshot", "record", "replay",
+    ] {
         assert!(
             text.contains(subcommand),
             "expected {subcommand:?} in --help output:\n{text}"

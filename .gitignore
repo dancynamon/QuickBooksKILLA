@@ -7,6 +7,10 @@ apps/*/target
 node_modules/
 dist/
 
+# Python — tools/*.py are test-covered scripts, not a package
+__pycache__/
+*.pyc
+
 # SQLite — the replica and its sidecars never belong in git
 *.db
 *.db-wal
