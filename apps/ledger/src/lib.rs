@@ -20,11 +20,15 @@
 //!   exports, and the adjusting-entry request queue
 //! - [`bank`]     — §10: statement import, matching, proposals, the
 //!   per-statement close
+//! - [`mcp`]      — `ROADMAP.md` §G, §D: the MCP server over this ledger —
+//!   every report above as a read tool, plus gated writes through
+//!   [`post`] and [`store`]
 
 pub mod accountant;
 pub mod bank;
 pub mod chart;
 pub mod import;
+pub mod mcp;
 pub mod pipeline;
 pub mod post;
 pub mod report;

@@ -7,6 +7,7 @@ description = "Double-entry general ledger for Aquamentor and WaterLine CNC. LED
 [dependencies]
 ledger-core = { path = "../../crates/ledger-core" }
 qbo-local = { path = "../qbo-local" }
+mcp-stdio = { workspace = true }
 chrono = { workspace = true }
 rusqlite = { workspace = true }
 rust_decimal = { workspace = true }
@@ -27,3 +28,7 @@ path = "src/lib.rs"
 [[bin]]
 name = "ledger"
 path = "src/main.rs"
+
+[[bin]]
+name = "ledger-mcp"
+path = "src/bin/ledger-mcp.rs"
