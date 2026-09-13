@@ -7,8 +7,10 @@
       (the port is configurable; it must match exactly).
 - [ ] **Realm id** for Aquamentor. It is the `deeplinkcompanyid` parameter on
       any QBO invoice URL, and it is stored wherever `qbo_headless` keeps its
-      authorisation (`~/code/aquamentor-mcp`). Put it in `.local/config.toml`
-      inside the clone, never in a tracked file.
+      authorisation (`~/code/aquamentor-mcp`). It goes in `.local/config.toml`
+      inside the clone (template: `.local/config.example.toml`), never in a
+      tracked file. The client secret goes in the `QBO_CLIENT_SECRET`
+      environment variable, not the file.
 - [ ] **Does `qbo_headless` hold a valid refresh token?** If yes, the consent
       flow can be skipped by importing it. Check before the session so the
       session does not build a flow it does not need.

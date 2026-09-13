@@ -32,7 +32,7 @@ to goal 2 rather than a detour. Three consequences run through the phases:
 
 ## 0. Where it stands
 
-`cargo test --workspace`: 451 tests, all offline, all green. Clippy clean.
+`cargo test --workspace`: 561 tests, all offline, all green. Clippy clean.
 
 Everything that can be built **without Intuit credentials** has been built:
 money and rounding, realm scoping, SQLite replica with projection and
@@ -46,12 +46,12 @@ Everything **not** built needs credentials, Intuit's docs, or a UI toolchain:
 | Gap | Phase | Needs |
 |---|---|---|
 | `KeychainTokenStore` | A | macOS |
-| OAuth loopback flow, or import of the `qbo_headless` refresh token | A | client id/secret, redirect URI |
-| `HttpQboClient` | A | credentials |
+| OAuth loopback flow, or import of the `qbo_headless` refresh token | A | **flow built 13 Sep** (`oauth.rs`, `qbo-local auth`); running it needs the client id/secret and redirect URI on the Mac |
+| `HttpQboClient` | A | **built 13 Sep**, proven against a fake Intuit server; first real contact needs credentials |
 | First live sync, counts and wall-clock measured | A | credentials |
 | CDC daemon loop, nightly snapshot | A | **built 11 Sep**, wired into the `qbo-local` binary (`daemon`, `sweep`, `snapshot`, `init`, `status`); runs with `--mock` until `HttpQboClient` exists |
 | Reconciliation sweep (DESIGN §7) | A | **built 11 Sep**; TB diff (step 5) waits on the ledger |
-| Fixture recorder and scrubber (HANDOFF §2.6) | A | one live response |
+| Fixture recorder and scrubber (HANDOFF §2.6) | A | **built 13 Sep**; a synthetic set is committed, real scrubbed ones need one live recording |
 | Verify the four ⚠️ API facts (DESIGN §0, §12) | A, gates C | `developer.intuit.com`, blocked from the cloud sandbox |
 | Read-only query API over `Store` | B | **built 11 Sep** |
 | UI shell and read screens | B | stack decision, §B |

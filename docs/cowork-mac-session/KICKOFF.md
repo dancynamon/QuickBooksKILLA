@@ -25,18 +25,28 @@ push to any branch other than `claude/modest-allen-82wp1w`:
 2. **`KeychainTokenStore`** implementing `auth::TokenStore` with the
    `security-framework` crate, `cfg(target_os = "macos")`, `TokenGenerations`
    as the stored unit, a test that round-trips through the real keychain.
-3. **Tokens.** If `qbo_headless` holds a valid refresh token, import it into
-   the keychain store as generation zero. Otherwise run
-   `qbo-local auth --realm <id> --port 8765`, which is the loopback flow built
-   in the cloud, and complete consent in the browser. Either way, confirm
+3. **Config and tokens.** `cp .local/config.example.toml .local/config.toml`,
+   fill in the client id and the realm, and export `QBO_CLIENT_SECRET` in the
+   shell rather than writing the secret into the file. If `qbo_headless`
+   holds a valid refresh token, import it into the keychain store as
+   generation zero. Otherwise run `qbo-local auth --realm <id>`, which is the
+   loopback flow built in the cloud (`apps/qbo-local/src/oauth.rs`), and
+   complete consent in the browser. Either way, confirm
    `qbo-local status --db .local/replica.db` shows the realm authorised.
 4. **First live sync**, read-only, production realm:
-   `qbo-local init`, then `qbo-local sweep --live` for the masters, then
-   `qbo-local daemon --live --once`. Report row counts per entity type and
+   `qbo-local init --db .local/replica.db --realm <id> --name Aquamentor`,
+   then `qbo-local sweep --db .local/replica.db --realm <id> --live`, then
+   `qbo-local daemon --db .local/replica.db --realm <id> --live --once`.
+   `HttpQboClient` is built and proven against a fake Intuit server
+   (`apps/qbo-local/tests/http_client.rs`); this is its first contact with
+   the real one, so read the first error carefully rather than patching. Report row counts per entity type and
    wall-clock for the initial pull, measured, in `DECISIONS.md`. Compare the
    counts with what the QBO web UI shows for customers, invoices and bills.
-5. **Record fixtures** with `qbo-local record --live --dir .local/fixtures`
-   (built in the cloud), run `tools/scrub-fixtures.py` on the output, and
+5. **Record fixtures** with `qbo-local record --db .local/replica.db --realm
+   <id> --dir .local/fixtures/raw --live`, run
+   `python3 tools/scrub-fixtures.py .local/fixtures/raw .local/fixtures/scrubbed`
+   (deterministic, with a leak detector that fails on any surviving real
+   name), verify with `qbo-local replay --dir .local/fixtures/scrubbed`, and
    commit only the scrubbed synthetic set under `apps/qbo-local/tests/fixtures/`
    once you have read every file for real names. HANDOFF §2.6 is the rule.
 6. **Leave the daemon running** (`qbo-local daemon --live`) and confirm after

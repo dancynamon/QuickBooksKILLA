@@ -36,7 +36,7 @@ in its §13 come back answered.
 ## Build
 
 ```sh
-cargo test          # 451 tests, all offline
+cargo test          # 561 tests, all offline
 cargo clippy --all-targets
 cargo run --bin qbo-local -- --help
 cargo run --bin ledger -- --help
@@ -70,8 +70,14 @@ Built and tested:
 - The read-only query API over the replica: document, contact and item detail,
   AR/AP aging, open documents, sync status, classes, chart of accounts
 
-Not built yet: the HTTP transport behind the client trait, the OAuth flow, the
-keychain token backend, the Tauri shell and its front-end. See `ROADMAP.md`.
+- `HttpQboClient` over real HTTP, the OAuth loopback flow, `.local/config.toml`
+  and `--live`, proven against a fake Intuit server; fixture record/replay with
+  a deterministic scrubber; an exactly-once chaos test across process kills;
+  CI with thresholded benchmarks; the `qbo-local-mcp` and `ledger-mcp` servers
+  over a shared stdio crate
+
+Not built yet: the keychain token backend (macOS only), the first live sync,
+the Tauri shell. See `ROADMAP.md` and `docs/cowork-mac-session/`.
 
 ## Current state — the ledger
 
