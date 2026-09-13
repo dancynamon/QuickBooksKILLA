@@ -725,6 +725,7 @@ name = "qbo-desktop-commands"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "ledger",
  "qbo-local",
  "serde_json",
  "thiserror",

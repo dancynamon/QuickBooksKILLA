@@ -2,10 +2,11 @@
 name = "qbo-desktop-commands"
 version = "0.1.0"
 edition.workspace = true
-description = "The read-only query API as one Tauri-command-shaped function, so the Mac session's #[tauri::command] body is one call into this crate."
+description = "The read-only query API and the ledger's read/write API as two Tauri-command-shaped functions, so the Mac session's #[tauri::command] bodies are each one call into this crate."
 
 [dependencies]
 qbo-local = { path = "../../qbo-local" }
+ledger = { path = "../../ledger" }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 

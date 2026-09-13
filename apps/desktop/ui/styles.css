@@ -617,3 +617,69 @@ tbody tr[data-clickable]:hover { background: var(--accent-soft); }
   font-size: calc(12.5px * var(--fs));
 }
 .state-note.is-error { color: var(--crit); }
+
+/* ─── ledger: forms, banners ──────────────────────────────────────────
+ * `apps/desktop/README.md`'s ledger section — the accountant-facing forms
+ * (propose/decide an adjustment, confirm a bank proposal, close/reopen a
+ * period) that the read-only qbo-local screens never needed. */
+.form-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 8px 10px;
+  margin-bottom: 10px;
+}
+.form-field { display: flex; flex-direction: column; gap: 3px; }
+.form-field.wide { grid-column: 1 / -1; }
+.form-field > span.lbl { color: var(--ink-3); }
+.form-input, .form-textarea, .form-select {
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: var(--surface);
+  padding: 5px 8px;
+  font: inherit;
+  font-size: calc(12.5px * var(--fs));
+  color: var(--ink);
+  width: 100%;
+}
+.form-input:focus, .form-textarea:focus, .form-select:focus { outline: none; border-color: var(--accent-line); }
+.form-textarea { resize: vertical; min-height: 52px; font-family: var(--mono); }
+.form-actions { display: flex; gap: 8px; align-items: center; margin-top: 2px; }
+.form-note { font-size: calc(11.5px * var(--fs)); color: var(--ink-3); margin: 6px 0 0; }
+.form-error {
+  border: 1px solid color-mix(in srgb, var(--crit) 40%, transparent);
+  background: var(--crit-soft);
+  color: var(--crit);
+  border-radius: 6px;
+  padding: 8px 10px;
+  font-size: calc(12px * var(--fs));
+  margin-bottom: 10px;
+}
+.form-ok {
+  border: 1px solid color-mix(in srgb, var(--ok) 40%, transparent);
+  background: var(--ok-soft);
+  color: var(--ok);
+  border-radius: 6px;
+  padding: 8px 10px;
+  font-size: calc(12px * var(--fs));
+  margin-bottom: 10px;
+}
+
+.banner {
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--surface);
+  padding: 10px 14px;
+  margin-bottom: 14px;
+  font-size: calc(12.5px * var(--fs));
+}
+.banner-crit {
+  border-color: color-mix(in srgb, var(--crit) 45%, transparent);
+  background: var(--crit-soft);
+  color: var(--crit);
+}
+.banner-crit b { color: inherit; }
+.banner-warn {
+  border-color: color-mix(in srgb, var(--warn) 45%, transparent);
+  background: var(--warn-soft);
+  color: var(--warn);
+}

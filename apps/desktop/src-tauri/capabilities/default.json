@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Capabilities for BunzBooks' single main window: enough of the core API to run the window and invoke the `query` command, nothing that reaches the network or the filesystem beyond the replica this process already opened.",
+  "description": "Capabilities for BunzBooks' single main window: enough of the core API to run the window and invoke the `query` and `ledger_query` commands, nothing that reaches the network or the filesystem beyond the replica and the ledger this process already opened.",
   "windows": ["main"],
   "permissions": [
     "core:default",

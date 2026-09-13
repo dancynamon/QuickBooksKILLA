@@ -19,7 +19,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let ledger = Ledger::open(&db_path)
         .map_err(|err| format!("failed to open {db_path:?}: {err}"))?;
-    let server = mcp::new_server(ledger, company);
+    let server = mcp::new_server(&ledger, company);
 
     mcp_stdio::serve_stdio(server);
 }

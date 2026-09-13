@@ -16,6 +16,15 @@ import { renderContact } from "./screens/contacts.js";
 import { renderItem } from "./screens/items.js";
 import { renderAging } from "./screens/aging.js";
 import { renderSync, renderClasses, renderAccounts } from "./screens/reference.js";
+import { renderTrialBalance } from "./screens/ledger/trialBalance.js";
+import { renderProfitAndLoss } from "./screens/ledger/profitAndLoss.js";
+import { renderBalanceSheet } from "./screens/ledger/balanceSheet.js";
+import { renderSalesTax } from "./screens/ledger/salesTax.js";
+import { renderGeneralLedger } from "./screens/ledger/generalLedger.js";
+import { renderAuditTrail } from "./screens/ledger/auditTrail.js";
+import { renderAdjustments } from "./screens/ledger/adjustments.js";
+import { renderBank } from "./screens/ledger/bank.js";
+import { renderPeriodClose } from "./screens/ledger/periodClose.js";
 
 const main = document.getElementById("main");
 
@@ -39,6 +48,25 @@ const REPORTS = [
   { view: "classes", label: "Classes", glyph: "◧" },
   { view: "accounts", label: "Chart of accounts", glyph: "▦" },
   { view: "sync", label: "Sync status", glyph: "↻" },
+];
+
+// The ledger's own book (`docs/MCP.md`'s ledger section) — a separate rail
+// section because it reads through `ledgerProvider`, not `provider`, and
+// carries no realm: `ledger-mcp` is bound to one company per process
+// (`apps/desktop/ui/js/data/ledger/provider.js`). No "new journal entry"
+// item here or anywhere else in this rail (`LEDGER-DESIGN.md` §4) — every
+// entry in this book is generated from a document or an accountant's
+// decided adjustment, never hand-posted from a button.
+const LEDGER_NAV = [
+  { view: "ledger-tb", label: "Trial balance", glyph: "≡" },
+  { view: "ledger-pnl", label: "Profit and loss", glyph: "▤" },
+  { view: "ledger-bs", label: "Balance sheet", glyph: "▦" },
+  { view: "ledger-tax", label: "Sales tax", glyph: "▨" },
+  { view: "ledger-gl", label: "General ledger", glyph: "▥" },
+  { view: "ledger-audit", label: "Audit trail", glyph: "◈" },
+  { view: "ledger-adjustments", label: "Adjustments", glyph: "◑" },
+  { view: "ledger-bank", label: "Bank reconciliation", glyph: "◍" },
+  { view: "ledger-close", label: "Period close", glyph: "⊘" },
 ];
 
 function railHref(item) {
@@ -65,7 +93,8 @@ function renderRail(route) {
         <span class="ri-glyph" aria-hidden="true">${item.glyph}</span>
         <span>${esc(item.label)}</span>
       </a>`).join("")
-    + section("Reports", REPORTS);
+    + section("Reports", REPORTS)
+    + section("Ledger", LEDGER_NAV);
 }
 
 // ---------------------------------------------------------------------------
@@ -173,6 +202,24 @@ async function renderRoute(route) {
     await renderAccounts(main);
   } else if (route.view === "sync") {
     await renderSync(main);
+  } else if (route.view === "ledger-tb") {
+    await renderTrialBalance(main);
+  } else if (route.view === "ledger-pnl") {
+    await renderProfitAndLoss(main);
+  } else if (route.view === "ledger-bs") {
+    await renderBalanceSheet(main);
+  } else if (route.view === "ledger-tax") {
+    await renderSalesTax(main);
+  } else if (route.view === "ledger-gl") {
+    await renderGeneralLedger(main);
+  } else if (route.view === "ledger-audit") {
+    await renderAuditTrail(main);
+  } else if (route.view === "ledger-adjustments") {
+    await renderAdjustments(main);
+  } else if (route.view === "ledger-bank") {
+    await renderBank(main);
+  } else if (route.view === "ledger-close") {
+    await renderPeriodClose(main);
   } else {
     main.innerHTML = `<div class="state-note">Nothing here. <a href="#today">Back to Today</a>.</div>`;
   }

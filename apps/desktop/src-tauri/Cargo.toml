@@ -7,9 +7,12 @@
 # would break `cargo build --workspace` / `cargo clippy --workspace` here —
 # exactly the two commands `ROADMAP.md` §B1 needs to stay green while this
 # scaffold sits unbuilt. `qbo-desktop-commands` (`apps/desktop/commands`)
-# carries the actual logic this crate's one command calls into, and it
+# carries the actual logic both this crate's commands call into, and it
 # builds and is tested in the workspace on its own; this crate is a window,
-# a CSP, and one `#[tauri::command]` wrapping that call.
+# a CSP, and two `#[tauri::command]`s each wrapping one of those calls.
+# `ledger` is a direct dependency too, only for the `ledger::store::Ledger`
+# type `ledger_query`'s state holds — no `ledger::mcp` dispatch lives here,
+# same division as `qbo-local` below it.
 
 [package]
 name = "bunzbooks-desktop"
@@ -23,4 +26,6 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 tauri = { version = "2", features = [] }
 qbo-desktop-commands = { path = "../commands" }
+ledger = { path = "../../ledger" }
+qbo-local = { path = "../../qbo-local" }
 serde_json = "1"
