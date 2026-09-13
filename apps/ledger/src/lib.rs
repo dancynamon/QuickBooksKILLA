@@ -20,11 +20,14 @@
 //!   exports, and the adjusting-entry request queue
 //! - [`bank`]     — §10: statement import, matching, proposals, the
 //!   per-statement close
+//! - [`authnet`]  — D15, §1, §10: the Authorize.net settlement import and
+//!   the fee-aware settlement match it feeds in [`bank`]
 //! - [`mcp`]      — `ROADMAP.md` §G, §D: the MCP server over this ledger —
 //!   every report above as a read tool, plus gated writes through
 //!   [`post`] and [`store`]
 
 pub mod accountant;
+pub mod authnet;
 pub mod bank;
 pub mod chart;
 pub mod import;

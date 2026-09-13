@@ -14,12 +14,16 @@ use chrono::{NaiveDate, Utc};
 use rust_decimal::Decimal;
 
 use ledger::accountant::{self, AdjustmentRequest, AuditRow, GlDetail};
+use ledger::authnet::{self, AuthnetConfig};
 use ledger::bank::{self, MatchRules, NewStatement};
 use ledger::import::ImportOptions;
 use ledger::pipeline;
+use ledger::post::{self, Posting};
 use ledger::report::{self, BalanceSheet, Pnl, QboTbRow, SalesTaxLines, TierRules, TrialBalance};
-use ledger::store::{AdjustmentState, Ledger, LedgerError};
-use ledger::types::{AccountId, ClassId, JournalLine, Side};
+use ledger::store::{AdjustmentState, CommandMeta, Ledger, LedgerError};
+use ledger::types::{
+    AccountId, ClassId, DocKind, JournalLine, PostingConfig, PostingContext, Side,
+};
 use ledger_core::Money;
 use qbo_local::domain::RealmId;
 use qbo_local::store::Store;
@@ -201,6 +205,16 @@ enum Command {
         company: String,
         statement: String,
     },
+    AuthnetImport {
+        db: PathBuf,
+        company: String,
+        file: PathBuf,
+        clearing: String,
+        fees: String,
+        undeposited: String,
+        refund_class: String,
+        fee_class: String,
+    },
 }
 
 /// `ledger bank import --format`. §10: the files the bank and Chase already
@@ -252,6 +266,9 @@ USAGE:
     ledger bank confirm --db PATH --company ID --line ID --account NUM [--class ID]
     ledger bank close   --db PATH --company ID --statement ID
     ledger bank status  --db PATH --company ID --statement ID
+    ledger authnet import --db PATH --company ID --file PATH
+                   [--clearing NUM] [--fees NUM] [--undeposited NUM]
+                   [--refund-class CLASS] [--fee-class CLASS]
     ledger opening --db PATH --company ID --as-of YYYY-MM-DD --qbo-csv PATH
     ledger boundary --db PATH --company ID --replica PATH --realm ID
                    --snapshots DIR
@@ -302,6 +319,13 @@ SUBCOMMANDS:
     bank close    The per-statement close (§10): opening plus matched lines
                   must equal closing, with nothing left unmatched.
     bank status   Print a statement's lines: matched, and open proposals.
+    authnet import  Read an Authorize.net Merchant Interface settlement CSV
+                    (D15, `docs/AUTHNET.md`), build one Settlement per batch
+                    plus a Payment per settled sale (applied to the invoice
+                    its Invoice Number resolves to, else parked unapplied in
+                    2300) and a RefundReceipt per settled refund, and post
+                    them all. Re-running the same file posts nothing new: a
+                    document whose id was already saved is skipped.
     opening   Apply (or idempotently skip/replace) the §6 opening balance
               entry as of a date, from a QBO trial balance CSV of the same
               shape tbdiff reads.
@@ -356,6 +380,21 @@ FLAGS:
     --qbo-csv PATH        CSV of qbo_account_id,name,balance (tbdiff, opening).
     --snapshots DIR       Directory of tb-YYYY.csv files, same CSV shape as
                            --qbo-csv (boundary only).
+    --clearing NUM        Authorize.net clearing account, default 1160
+                           (authnet import only).
+    --fees NUM             Merchant fees account, default 6700 (authnet
+                           import only).
+    --undeposited NUM      Undeposited funds account, default 1150 (authnet
+                           import only; see `docs/AUTHNET.md` for what this
+                           is and is not used for).
+    --refund-class CLASS   Class an Authorize.net refund posts under, since
+                           the settlement export carries none; default
+                           \"drop\" (authnet import only).
+    --fee-class CLASS      Class a settlement's own 6700 fee leg carries, for
+                           the rare case one is supplied up front rather
+                           than discovered by `bank match`; default \"drop\"
+                           (authnet import only, and inert unless something
+                           has already set a batch's fee before this runs).
 
 EXIT CODES:
     0   ok
@@ -486,6 +525,7 @@ fn parse(args: &[String]) -> Result<Command, UsageError> {
         "adjust" => parse_adjust(args),
         "reclass" => parse_reclass(args),
         "bank" => parse_bank(args),
+        "authnet" => parse_authnet(args),
         "opening" => parse_opening(args),
         "boundary" => parse_boundary(args),
         other => Err(UsageError::unknown_subcommand(other)),
@@ -648,6 +688,57 @@ fn parse_bank_status(mut args: Args<'_>) -> Result<Command, UsageError> {
         db: db.ok_or_else(|| UsageError::missing_flag("--db"))?,
         company: company.ok_or_else(|| UsageError::missing_flag("--company"))?,
         statement: statement.ok_or_else(|| UsageError::missing_flag("--statement"))?,
+    })
+}
+
+const DEFAULT_AUTHNET_CLEARING: &str = "1160";
+const DEFAULT_AUTHNET_FEES: &str = "6700";
+const DEFAULT_AUTHNET_UNDEPOSITED: &str = "1150";
+const DEFAULT_AUTHNET_REFUND_CLASS: &str = "drop";
+const DEFAULT_AUTHNET_FEE_CLASS: &str = "drop";
+
+fn parse_authnet(mut args: Args<'_>) -> Result<Command, UsageError> {
+    let Some(sub) = args.next() else {
+        return Err(UsageError::new("authnet requires a subcommand (import)"));
+    };
+    match sub.as_str() {
+        "import" => parse_authnet_import(args),
+        other => Err(UsageError::unknown_subcommand(&format!("authnet {other}"))),
+    }
+}
+
+#[allow(clippy::too_many_lines)]
+fn parse_authnet_import(mut args: Args<'_>) -> Result<Command, UsageError> {
+    let mut db = None;
+    let mut company = None;
+    let mut file = None;
+    let mut clearing = None;
+    let mut fees = None;
+    let mut undeposited = None;
+    let mut refund_class = None;
+    let mut fee_class = None;
+    while let Some(flag) = args.next() {
+        match flag.as_str() {
+            "--db" => db = Some(PathBuf::from(next_value(&mut args, "--db")?)),
+            "--company" => company = Some(next_value(&mut args, "--company")?),
+            "--file" => file = Some(PathBuf::from(next_value(&mut args, "--file")?)),
+            "--clearing" => clearing = Some(next_value(&mut args, "--clearing")?),
+            "--fees" => fees = Some(next_value(&mut args, "--fees")?),
+            "--undeposited" => undeposited = Some(next_value(&mut args, "--undeposited")?),
+            "--refund-class" => refund_class = Some(next_value(&mut args, "--refund-class")?),
+            "--fee-class" => fee_class = Some(next_value(&mut args, "--fee-class")?),
+            other => return Err(UsageError::unknown_flag(other)),
+        }
+    }
+    Ok(Command::AuthnetImport {
+        db: db.ok_or_else(|| UsageError::missing_flag("--db"))?,
+        company: company.ok_or_else(|| UsageError::missing_flag("--company"))?,
+        file: file.ok_or_else(|| UsageError::missing_flag("--file"))?,
+        clearing: clearing.unwrap_or_else(|| DEFAULT_AUTHNET_CLEARING.to_string()),
+        fees: fees.unwrap_or_else(|| DEFAULT_AUTHNET_FEES.to_string()),
+        undeposited: undeposited.unwrap_or_else(|| DEFAULT_AUTHNET_UNDEPOSITED.to_string()),
+        refund_class: refund_class.unwrap_or_else(|| DEFAULT_AUTHNET_REFUND_CLASS.to_string()),
+        fee_class: fee_class.unwrap_or_else(|| DEFAULT_AUTHNET_FEE_CLASS.to_string()),
     })
 }
 
@@ -1242,6 +1333,26 @@ fn execute(command: Command) -> Result<ExitCode, CommandError> {
             company,
             statement,
         } => run_bank_status(&db, &company, &statement).map(ok),
+        Command::AuthnetImport {
+            db,
+            company,
+            file,
+            clearing,
+            fees,
+            undeposited,
+            refund_class,
+            fee_class,
+        } => run_authnet_import(
+            &db,
+            &company,
+            &file,
+            &clearing,
+            &fees,
+            &undeposited,
+            &refund_class,
+            &fee_class,
+        )
+        .map(ok),
         Command::Opening {
             db,
             company,
@@ -1966,6 +2077,122 @@ fn run_bank_status(
                 account.0
             );
         }
+    }
+    Ok(())
+}
+
+// -- authnet ----------------------------------------------------------------
+
+/// `ledger authnet import`: parse, group, build the documents, and post
+/// every one of them that has not already been saved — `document_id`
+/// (`authnet:<batch>`, `authnet:txn:<txn>`) is the dedupe key, so re-running
+/// the same file posts nothing new (D22's "a re-run replaces, never
+/// duplicates" rule, simplified here to "already saved, so skip": a settled
+/// Authorize.net transaction is immutable once it appears in this export,
+/// unlike a QBO document that can still change after import).
+#[allow(clippy::too_many_arguments)]
+fn run_authnet_import(
+    db: &std::path::Path,
+    company: &str,
+    file: &std::path::Path,
+    clearing: &str,
+    fees: &str,
+    undeposited: &str,
+    refund_class: &str,
+    fee_class: &str,
+) -> Result<(), CommandError> {
+    let ledger = Ledger::open(db).map_err(runtime)?;
+    let text = fs::read_to_string(file).map_err(|e| runtime(format!("{}: {e}", file.display())))?;
+    let rows = authnet::parse_transactions(&text).map_err(runtime)?;
+    let batches = authnet::group_batches(&rows).map_err(runtime)?;
+
+    let config = AuthnetConfig {
+        clearing: AccountId(clearing.to_string()),
+        fees: AccountId(fees.to_string()),
+        undeposited: AccountId(undeposited.to_string()),
+        refund_class: ClassId(refund_class.to_string()),
+        fee_class: ClassId(fee_class.to_string()),
+    };
+    let resolve_invoice = |number: &str| -> Option<(String, DocKind)> {
+        ledger.document_by_number(company, number).ok().flatten()
+    };
+    let documents = authnet::settlement_documents(&batches, &config, &resolve_invoice);
+
+    let ctx = PostingContext {
+        config: PostingConfig {
+            default_deposit_account: config.undeposited.clone(),
+            ..PostingConfig::default()
+        },
+        ..PostingContext::default()
+    };
+
+    let mut settled = 0usize;
+    let mut applied = 0usize;
+    let mut unapplied = 0usize;
+    let mut refunded = 0usize;
+    let mut skipped = 0usize;
+    let mut rejected: Vec<String> = Vec::new();
+
+    for doc in &documents {
+        let already_saved = ledger
+            .document_version_count(company, &doc.document_id)
+            .map_err(runtime)?
+            > 0;
+        if already_saved {
+            skipped += 1;
+            continue;
+        }
+
+        let now = Utc::now();
+        let result = (|| -> Result<(), LedgerError> {
+            let version = ledger.save_document(
+                company,
+                doc,
+                CommandMeta {
+                    actor_id: actor(),
+                    kind: "authnet_import".to_string(),
+                    hlc: now.to_rfc3339(),
+                },
+                now,
+            )?;
+            match post::post(doc, version.version, &ctx)? {
+                Posting::Entry(entry) => {
+                    ledger.post_entry(company, &entry, now)?;
+                }
+                Posting::NonPosting => unreachable!("authnet documents always post"),
+            }
+            Ok(())
+        })();
+
+        match result {
+            Ok(()) => match doc.kind {
+                DocKind::Settlement => settled += 1,
+                DocKind::Payment => {
+                    if doc.unapplied.is_zero() {
+                        applied += 1;
+                    } else {
+                        unapplied += 1;
+                        println!(
+                            "warning: {}",
+                            doc.memo.as_deref().unwrap_or(&doc.document_id)
+                        );
+                    }
+                }
+                DocKind::RefundReceipt => refunded += 1,
+                _ => {}
+            },
+            Err(err) => rejected.push(format!("{}: {err}", doc.document_id)),
+        }
+    }
+
+    println!("batches settled    : {settled}");
+    println!("payments applied   : {applied}");
+    println!("payments unapplied : {unapplied}");
+    println!("refunds            : {refunded}");
+    println!("skipped (already imported): {skipped}");
+    println!("rejected           : {}", rejected.len());
+    for reason in &rejected {
+        println!("  - {reason}");
     }
     Ok(())
 }

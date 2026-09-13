@@ -812,6 +812,16 @@ fn post_bank_line(doc: &LedgerDocument, ctx: &PostingContext) -> Result<Vec<Leg>
 /// what moves the batch out to the bank. The document states the batch as
 /// two `Account` lines, one naming 1160 (the gross, required) and one
 /// naming 6700 (the fee, optional; a batch with no fee simply has none).
+///
+/// Extended for `crate::authnet` (D15): the fee line's own `class` becomes
+/// the 6700 leg's class, rather than the `None` an earlier draft of this
+/// function used. §1's table calls the Authorize.net fee row's class "none,
+/// it is overhead", but §3's rule and the class check `store.rs` runs at
+/// post time apply uniformly to every 6xxx leg with no overhead exception —
+/// so a fee line with no class would post here and then be refused at
+/// `Ledger::post_entry`. Every caller that can produce a nonzero fee line
+/// (`crate::authnet::settlement_documents`, `crate::bank`'s fee-aware
+/// settlement match) now supplies one.
 fn post_settlement(doc: &LedgerDocument, ctx: &PostingContext) -> Result<Vec<Leg>, PostError> {
     let is_account_named = |line: &&DocLine, number: &str| {
         line.kind == LineKind::Account
@@ -828,12 +838,11 @@ fn post_settlement(doc: &LedgerDocument, ctx: &PostingContext) -> Result<Vec<Leg
         .ok_or(PostError::MissingAccount { line_no: 0 })?;
     let gross = gross_line.amount;
 
-    let fee = doc
+    let fee_line = doc
         .lines
         .iter()
-        .find(|line| is_account_named(line, chart::MERCHANT_FEES))
-        .map(|line| line.amount)
-        .unwrap_or(Money::ZERO);
+        .find(|line| is_account_named(line, chart::MERCHANT_FEES));
+    let fee = fee_line.map_or(Money::ZERO, |line| line.amount);
 
     let net = gross.checked_sub(fee)?;
     let bank = doc
@@ -846,7 +855,8 @@ fn post_settlement(doc: &LedgerDocument, ctx: &PostingContext) -> Result<Vec<Leg
         credit(acct(chart::AUTHNET_CLEARING), gross, None, None),
     ];
     if !fee.is_zero() {
-        legs.push(debit(acct(chart::MERCHANT_FEES), fee, None, None));
+        let class = fee_line.and_then(|line| line.class.clone());
+        legs.push(debit(acct(chart::MERCHANT_FEES), fee, class, None));
     }
     Ok(legs)
 }

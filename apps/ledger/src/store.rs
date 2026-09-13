@@ -65,6 +65,11 @@ pub enum LedgerError {
     /// pending proposal (already resolved, or never matched at all).
     #[error("bank line {line_id} is not a pending proposal")]
     NotAProposal { line_id: String },
+    /// A `document_versions.doc_type` value that does not parse as a
+    /// [`DocKind`] — a stored row this build's [`DocKind::parse`] does not
+    /// recognise, which should only ever mean a schema/version mismatch.
+    #[error("stored document type {0:?} does not parse")]
+    BadDocType(String),
 }
 
 /// A forward-only, numbered migration. Applied in a transaction, version
@@ -1079,6 +1084,35 @@ impl Ledger {
             .map_err(LedgerError::from)
     }
 
+    /// The most recently saved document whose `doc.number` is `doc_number`
+    /// — `crate::authnet::settlement_documents`'s `resolve_invoice` callback
+    /// uses this to turn a settled sale's `Invoice Number` column into the
+    /// `(document_id, DocKind)` an `Application` needs. A `doc_number` is
+    /// expected to be unique among posting documents in practice; this picks
+    /// the newest version if it somehow is not, rather than refusing.
+    pub fn document_by_number(
+        &self,
+        company: &str,
+        doc_number: &str,
+    ) -> Result<Option<(String, DocKind)>, LedgerError> {
+        let row: Option<(String, String)> = self
+            .connection
+            .query_row(
+                "SELECT document_id, doc_type FROM document_versions
+                 WHERE company_id = ?1 AND doc_number = ?2
+                 ORDER BY version DESC LIMIT 1",
+                params![company, doc_number],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        row.map(|(document_id, doc_type)| {
+            DocKind::parse(&doc_type)
+                .map(|kind| (document_id, kind))
+                .ok_or(LedgerError::BadDocType(doc_type))
+        })
+        .transpose()
+    }
+
     /// The number of versions saved for `document_id` — most directly useful
     /// for proving a pipeline re-run's skip-when-unchanged path did not add
     /// one (`LEDGER-DESIGN.md` §6).
@@ -1857,6 +1891,63 @@ impl Ledger {
             )?
             .collect::<Result<Vec<_>, rusqlite::Error>>()?;
         Ok(rows)
+    }
+
+    /// Like [`Ledger::entries_with_credit_sum`] but for `crate::bank`'s
+    /// fee-aware settlement match (§10): entries whose credit sum on
+    /// `account` is **at least** `min_amount` rather than exactly it,
+    /// returned together with that sum so the caller can judge whether the
+    /// excess over `min_amount` is a plausible processing fee.
+    /// `source_types` is always a small internal constant, never external
+    /// input.
+    pub fn entries_with_credit_sum_at_least(
+        &self,
+        company: &str,
+        account: &str,
+        min_amount: Money,
+        source_types: &[&str],
+        from: NaiveDate,
+        to: NaiveDate,
+    ) -> Result<Vec<(EntryId, Money)>, LedgerError> {
+        if source_types.is_empty() {
+            return Ok(Vec::new());
+        }
+        let list = source_types
+            .iter()
+            .map(|kind| format!("'{kind}'"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            "SELECT l.entry_id, SUM(l.credit_minor)
+             FROM journal_lines l
+             JOIN journal_entries e ON e.company_id = l.company_id AND e.entry_id = l.entry_id
+             WHERE l.company_id = ?1 AND l.account_id = ?2 AND e.is_posted = 1
+               AND e.entry_date BETWEEN ?3 AND ?4 AND e.source_type IN ({list})
+             GROUP BY l.entry_id
+             HAVING SUM(l.credit_minor) >= ?5
+             ORDER BY l.entry_id"
+        );
+        let mut stmt = self.connection.prepare(&sql)?;
+        let rows = stmt
+            .query_map(
+                params![
+                    company,
+                    account,
+                    from.to_string(),
+                    to.to_string(),
+                    min_amount.minor()
+                ],
+                |row| {
+                    let entry_id: String = row.get(0)?;
+                    let sum: i64 = row.get(1)?;
+                    Ok((entry_id, sum))
+                },
+            )?
+            .collect::<Result<Vec<_>, rusqlite::Error>>()?;
+        Ok(rows
+            .into_iter()
+            .map(|(entry_id, sum)| (entry_id, Money::from_minor(sum)))
+            .collect())
     }
 }
 

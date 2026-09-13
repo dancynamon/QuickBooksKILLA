@@ -25,6 +25,7 @@ pub use csv::{parse_csv, AmountCols, CsvProfile};
 pub use ofx::{parse_ofx, parse_ofx_ledger_balance, parse_ofx_statement_period};
 
 use chrono::{DateTime, Duration, NaiveDate, Utc};
+use rust_decimal::Decimal;
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -91,16 +92,27 @@ pub struct StatementImportReport {
 
 /// §10's match rules, parameterised. `date_window_days` is the "configurable
 /// window (default four days either side)" of the design document; this
-/// crate's default is 3, per the concrete build spec.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// crate's default is 3, per the concrete build spec. `max_fee_ratio` and
+/// `fee_class` are D15/`crate::authnet`'s addition: how large a processing
+/// fee [`Ledger::try_settlement_fee_match`] will accept as the reason a
+/// deposit line comes in under a settlement's recorded net, expressed as a
+/// fraction of that net (0.04 = 4%), and the class the correcting entry's
+/// 6700 leg carries — required by §3's class rule, which (unlike §1's table)
+/// draws no "overhead" exception for a settlement's own fee leg; see
+/// `crate::post::post_settlement`'s doc comment.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MatchRules {
     pub date_window_days: i64,
+    pub max_fee_ratio: Decimal,
+    pub fee_class: ClassId,
 }
 
 impl Default for MatchRules {
     fn default() -> Self {
         MatchRules {
             date_window_days: 3,
+            max_fee_ratio: Decimal::new(4, 2),
+            fee_class: ClassId("drop".to_string()),
         }
     }
 }
@@ -129,6 +141,12 @@ pub struct Proposal {
 pub struct MatchReport {
     pub exact: usize,
     pub settlement: usize,
+    /// Matched by [`Ledger::try_settlement_fee_match`]: the line came in
+    /// under a settlement entry's recorded net by a plausible processing
+    /// fee, which was then posted as its own correcting entry (D15,
+    /// `crate::authnet`'s module doc). Counted apart from `settlement`
+    /// because, unlike an exact match, this one also posts something new.
+    pub settlement_fee: usize,
     pub proposals: Vec<Proposal>,
 }
 
@@ -282,6 +300,13 @@ impl Ledger {
             return Ok(());
         }
 
+        if is_money_in
+            && self.try_settlement_fee_match(company, line, amount_abs, rules, from, to, now)?
+        {
+            report.settlement_fee += 1;
+            return Ok(());
+        }
+
         let (suggested_account, reason) = suggest_account(&line.description);
         let kind = if is_money_in {
             ProposalKind::Deposit
@@ -342,6 +367,160 @@ impl Ledger {
             return Ok(true);
         }
         Ok(false)
+    }
+
+    /// D15/`crate::authnet`'s extension to rule 3: a settlement's `Settlement`
+    /// entry credits 1160 for the batch's net *before* Authorize.net's
+    /// per-transaction discount fee (`crate::authnet`'s module doc explains
+    /// why the fee cannot be known at import time), so the real bank deposit
+    /// comes in under that recorded net by exactly the fee the processor
+    /// took. This looks for a settlement (or deposit) entry whose credits to
+    /// 1160 sum to *more* than `amount` — by no more than
+    /// `rules.max_fee_ratio` of that sum, a plausible discount fee rather
+    /// than a coincidence — and if one matches:
+    ///
+    /// 1. clears that entry's own bank-account leg, exactly as
+    ///    [`Ledger::try_settlement_match`] would for an exact match, since
+    ///    this bank statement line *is* that batch's payout;
+    /// 2. posts the shortfall as its own `BankLine` adjustment, **Dr 6700,
+    ///    Cr the bank account** — not Cr 1160. 1160 already nets to zero the
+    ///    moment the settlement entry posts (its credit exactly matches what
+    ///    the batch's `Payment`/`RefundReceipt` documents already debited and
+    ///    credited it for), so crediting it again here would be the one thing
+    ///    that unbalances it. What is actually wrong is the settlement
+    ///    entry's guess that the whole net reached the bank; this corrects
+    ///    that guess by moving the fee out of the bank account and into the
+    ///    expense it always was.
+    #[allow(clippy::too_many_arguments)]
+    fn try_settlement_fee_match(
+        &self,
+        company: &str,
+        line: &BankLineRow,
+        amount: Money,
+        rules: &MatchRules,
+        from: NaiveDate,
+        to: NaiveDate,
+        now: DateTime<Utc>,
+    ) -> Result<bool, LedgerError> {
+        if rules.max_fee_ratio <= Decimal::ZERO {
+            return Ok(false);
+        }
+
+        let mut candidates = self.entries_with_credit_sum_at_least(
+            company,
+            chart::AUTHNET_CLEARING,
+            amount,
+            SETTLEMENT_SOURCE_KINDS,
+            from,
+            to,
+        )?;
+        candidates.retain(|(_, gross)| {
+            fee_ratio(*gross, amount).is_some_and(|ratio| ratio <= rules.max_fee_ratio)
+        });
+
+        for (entry_id, gross) in candidates {
+            let (entry, _posted) = self.entry(company, &entry_id)?;
+            let bank_leg = entry.lines.iter().find(|entry_line| {
+                entry_line.account == line.account_id && !entry_line.debit.is_zero()
+            });
+            let Some(bank_leg) = bank_leg else { continue };
+            if self.is_line_cleared(company, &entry_id, bank_leg.line_no)? {
+                continue;
+            }
+            let fee = gross.checked_sub(amount)?;
+
+            self.clear_journal_line(company, &entry_id, bank_leg.line_no, now)?;
+            self.set_bank_line_match(
+                company,
+                &line.line_id,
+                "settlement",
+                Some(&entry_id),
+                Some(bank_leg.line_no),
+                now,
+            )?;
+            self.post_settlement_fee_adjustment(
+                company,
+                &line.account_id,
+                fee,
+                rules.fee_class.clone(),
+                line.posted_on,
+                &entry_id,
+                now,
+            )?;
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    /// The correcting entry [`Ledger::try_settlement_fee_match`] posts: a
+    /// `BankLine` document with one negative `Account` line naming 6700,
+    /// which `crate::post::post_bank_line` turns into Dr 6700 / Cr
+    /// `bank_account` — see that method's doc comment for why the bank
+    /// account, not 1160, is the credit side.
+    #[allow(clippy::too_many_arguments)]
+    fn post_settlement_fee_adjustment(
+        &self,
+        company: &str,
+        bank_account: &AccountId,
+        fee: Money,
+        fee_class: ClassId,
+        posted_on: NaiveDate,
+        settlement_entry_id: &str,
+        now: DateTime<Utc>,
+    ) -> Result<EntryId, LedgerError> {
+        let doc_line = DocLine {
+            line_no: 1,
+            kind: LineKind::Account,
+            amount: fee.checked_neg()?,
+            class: Some(fee_class),
+            item_id: None,
+            account: Some(AccountId(chart::MERCHANT_FEES.to_string())),
+            is_taxable: false,
+            qty: None,
+            unit_cost: None,
+            description: Some(format!(
+                "Authorize.net processing fee, settlement {settlement_entry_id}"
+            )),
+            posting: None,
+            entity: None,
+        };
+        let doc = LedgerDocument {
+            document_id: format!("authnet-fee:{settlement_entry_id}"),
+            kind: DocKind::BankLine,
+            number: None,
+            txn_date: posted_on,
+            due_date: None,
+            contact: None,
+            header_class: None,
+            lines: vec![doc_line],
+            tax: None,
+            deposit_to: None,
+            pay_from: Some(bank_account.clone()),
+            applications: Vec::new(),
+            unapplied: Money::ZERO,
+            is_voided: false,
+            source_ref: None,
+            memo: Some(format!(
+                "Authorize.net processing fee for settlement {settlement_entry_id}"
+            )),
+        };
+
+        let version = self.save_document(
+            company,
+            &doc,
+            CommandMeta {
+                actor_id: "dan".to_string(),
+                kind: "authnet_fee_adjustment".to_string(),
+                hlc: now.to_rfc3339(),
+            },
+            now,
+        )?;
+        let ctx = PostingContext::default();
+        let entry = match post::post(&doc, version.version, &ctx)? {
+            Posting::Entry(entry) => entry,
+            Posting::NonPosting => unreachable!("BankLine always posts, DocKind::posts()"),
+        };
+        self.post_entry(company, &entry, now)
     }
 
     /// Turns a confirmed proposal into a `BankLine` document: one `Account`
@@ -505,6 +684,24 @@ fn is_resolved(match_kind: Option<&str>) -> bool {
         match_kind,
         Some("exact") | Some("settlement") | Some("manual")
     )
+}
+
+/// `(gross - net) / gross` as a fraction, or `None` when `net` is not
+/// actually less than `gross` (nothing to call a fee) or `gross` is zero
+/// (nothing to take a ratio of). Used only to decide whether a shortfall is
+/// small enough to be a plausible processing fee — see
+/// [`Ledger::try_settlement_fee_match`].
+fn fee_ratio(gross: Money, net: Money) -> Option<Decimal> {
+    if gross.is_zero() {
+        return None;
+    }
+    let fee = gross.checked_sub(net).ok()?;
+    if fee.is_negative() || fee.is_zero() {
+        return None;
+    }
+    let fee_decimal = Decimal::new(fee.minor(), 2);
+    let gross_decimal = Decimal::new(gross.minor(), 2);
+    Some(fee_decimal / gross_decimal)
 }
 
 /// §10's small keyword table for an unmatched line's suggested account.
