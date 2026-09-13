@@ -7,8 +7,8 @@ use std::path::Path;
 use std::process::{Command, Output};
 
 const REALM: &str = "1234567890123456";
-const HTTP_CLIENT_MISSING: &str =
-    "HttpQboClient is not built yet (HANDOFF.md §2.3); run with --mock to exercise the loop";
+const NO_CLIENT_SELECTED: &str =
+    "no QBO client selected: pass --live (see `qbo-local auth`) or --mock to exercise the loop";
 
 fn qbo_local(args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_qbo-local"))
@@ -185,7 +185,7 @@ fn snapshot_creates_a_file() {
 }
 
 #[test]
-fn daemon_without_mock_exits_2_with_the_exact_message() {
+fn daemon_without_live_or_mock_exits_2_with_the_exact_message() {
     let directory = tempfile::tempdir().unwrap();
     let db = directory.path().join("replica.db");
     init(&db, REALM, "Aquamentor, Inc.");
@@ -193,7 +193,7 @@ fn daemon_without_mock_exits_2_with_the_exact_message() {
     let output = qbo_local(&["daemon", "--db", db.to_str().unwrap(), "--realm", REALM]);
 
     assert_eq!(output.status.code(), Some(2));
-    assert_eq!(stderr(&output).trim_end(), HTTP_CLIENT_MISSING);
+    assert_eq!(stderr(&output).trim_end(), NO_CLIENT_SELECTED);
     assert!(
         stdout(&output).is_empty(),
         "no tick output should have been printed"
@@ -201,7 +201,7 @@ fn daemon_without_mock_exits_2_with_the_exact_message() {
 }
 
 #[test]
-fn sweep_without_mock_exits_2_with_the_exact_message() {
+fn sweep_without_live_or_mock_exits_2_with_the_exact_message() {
     let directory = tempfile::tempdir().unwrap();
     let db = directory.path().join("replica.db");
     init(&db, REALM, "Aquamentor, Inc.");
@@ -209,7 +209,59 @@ fn sweep_without_mock_exits_2_with_the_exact_message() {
     let output = qbo_local(&["sweep", "--db", db.to_str().unwrap(), "--realm", REALM]);
 
     assert_eq!(output.status.code(), Some(2));
-    assert_eq!(stderr(&output).trim_end(), HTTP_CLIENT_MISSING);
+    assert_eq!(stderr(&output).trim_end(), NO_CLIENT_SELECTED);
+}
+
+#[test]
+fn sweep_rejects_mock_and_live_together_as_a_usage_error() {
+    let directory = tempfile::tempdir().unwrap();
+    let db = directory.path().join("replica.db");
+    init(&db, REALM, "Aquamentor, Inc.");
+
+    let output = qbo_local(&[
+        "sweep",
+        "--db",
+        db.to_str().unwrap(),
+        "--realm",
+        REALM,
+        "--mock",
+        "--live",
+    ]);
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        stderr(&output).contains("--mock and --live cannot both be given"),
+        "expected the conflicting-flags message:\n{}",
+        stderr(&output)
+    );
+}
+
+#[test]
+fn sweep_live_without_a_config_file_is_a_runtime_error_not_a_panic() {
+    let directory = tempfile::tempdir().unwrap();
+    let db = directory.path().join("replica.db");
+    init(&db, REALM, "Aquamentor, Inc.");
+
+    let output = qbo_local(&[
+        "sweep",
+        "--db",
+        db.to_str().unwrap(),
+        "--realm",
+        REALM,
+        "--live",
+        "--config",
+        directory
+            .path()
+            .join("does-not-exist.toml")
+            .to_str()
+            .unwrap(),
+    ]);
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        !stderr(&output).is_empty(),
+        "expected a runtime error message on stderr"
+    );
 }
 
 #[test]
@@ -286,12 +338,12 @@ fn record_without_mock_or_live_exits_2_with_the_exact_message() {
     ]);
 
     assert_eq!(output.status.code(), Some(2));
-    assert_eq!(stderr(&output).trim_end(), HTTP_CLIENT_MISSING);
+    assert_eq!(stderr(&output).trim_end(), NO_CLIENT_SELECTED);
     assert!(!fixtures.exists(), "no fixtures should have been written");
 }
 
 #[test]
-fn record_with_live_exits_2_with_the_exact_message() {
+fn record_live_without_a_config_file_is_a_runtime_error_not_a_panic() {
     let directory = tempfile::tempdir().unwrap();
     let db = directory.path().join("replica.db");
     init(&db, REALM, "Aquamentor, Inc.");
@@ -306,10 +358,19 @@ fn record_with_live_exits_2_with_the_exact_message() {
         "--dir",
         fixtures.to_str().unwrap(),
         "--live",
+        "--config",
+        directory
+            .path()
+            .join("does-not-exist.toml")
+            .to_str()
+            .unwrap(),
     ]);
 
-    assert_eq!(output.status.code(), Some(2));
-    assert_eq!(stderr(&output).trim_end(), HTTP_CLIENT_MISSING);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        !stderr(&output).is_empty(),
+        "expected a runtime error naming the missing config"
+    );
 }
 
 #[test]
@@ -361,7 +422,7 @@ fn help_exits_2_and_lists_every_subcommand() {
     assert_eq!(output.status.code(), Some(2));
     let text = stderr(&output);
     for subcommand in [
-        "status", "init", "daemon", "sweep", "snapshot", "record", "replay",
+        "status", "init", "auth", "daemon", "sweep", "snapshot", "record", "replay",
     ] {
         assert!(
             text.contains(subcommand),

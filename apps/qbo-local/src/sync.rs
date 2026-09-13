@@ -203,7 +203,12 @@ mod tests {
     #[test]
     fn a_fresh_cursor_polls_incrementally() {
         let strategy = plan_sync(&cursor(Some(at(0))), at(1), max_age(), true);
-        assert_eq!(strategy, SyncStrategy::Cdc { changed_since: at(0) });
+        assert_eq!(
+            strategy,
+            SyncStrategy::Cdc {
+                changed_since: at(0)
+            }
+        );
     }
 
     #[test]
@@ -263,8 +268,14 @@ mod tests {
 
     #[test]
     fn a_response_at_the_cap_is_treated_as_truncated() {
-        assert_eq!(classify_response(CDC_RESPONSE_CAP), CdcOutcome::PossiblyTruncated);
-        assert_eq!(classify_response(CDC_RESPONSE_CAP + 1), CdcOutcome::PossiblyTruncated);
+        assert_eq!(
+            classify_response(CDC_RESPONSE_CAP),
+            CdcOutcome::PossiblyTruncated
+        );
+        assert_eq!(
+            classify_response(CDC_RESPONSE_CAP + 1),
+            CdcOutcome::PossiblyTruncated
+        );
     }
 
     #[test]
@@ -272,7 +283,11 @@ mod tests {
         // The invariant that stops silent data loss.
         let mut cursor = cursor(Some(at(0)));
         cursor.advance(&CdcOutcome::PossiblyTruncated, at(5));
-        assert_eq!(cursor.last_cdc_cursor, Some(at(0)), "cursor moved on a truncated response");
+        assert_eq!(
+            cursor.last_cdc_cursor,
+            Some(at(0)),
+            "cursor moved on a truncated response"
+        );
 
         cursor.advance(&CdcOutcome::Complete, at(5));
         assert_eq!(cursor.last_cdc_cursor, Some(at(5)));
@@ -287,7 +302,9 @@ mod tests {
         // And the next plan polls rather than sweeping again.
         assert_eq!(
             plan_sync(&cursor, at(4), max_age(), true),
-            SyncStrategy::Cdc { changed_since: at(3) }
+            SyncStrategy::Cdc {
+                changed_since: at(3)
+            }
         );
     }
 

@@ -1,0 +1,38 @@
+# Template for .local/config.toml — copy this file there and fill in real
+# values. `.local/` is gitignored in full except for this example
+# (HANDOFF.md §0); nothing you put in the real copy ever reaches git.
+
+[intuit]
+# From the Intuit developer app (HANDOFF.md §0).
+client_id = "YOUR_INTUIT_CLIENT_ID"
+
+# Prefer the QBO_CLIENT_SECRET environment variable over writing the secret
+# here at all. Set this only if there is no reasonable way to supply the
+# environment variable in your setup.
+client_secret = ""
+
+# "production" or "sandbox". M0 is read-only and can point at production;
+# switch to "sandbox" before any write path is exercised (HANDOFF.md §3).
+environment = "production"
+
+# Must match the redirect URI registered on the Intuit app, as
+# http://localhost:<redirect_port>/callback.
+redirect_port = 8765
+
+# One [[realms]] entry per company. The realm id is deliberately not
+# recorded anywhere in the tracked repository — read it from the QBO web
+# link on any invoice (the `deeplinkcompanyid` parameter), or from wherever
+# `qbo_headless` already keeps it (HANDOFF.md §0).
+[[realms]]
+id = "0000000000000000"
+name = "Aquamentor, Inc."
+
+# [[realms]]
+# id = "0000000000000001"
+# name = "WaterLine CNC"
+
+# Both paths below default to these values when omitted; listed explicitly
+# here so they are easy to point elsewhere (e.g. an external drive) if
+# needed. Both already live under the gitignored .local/ tree.
+# tokens_dir = ".local/tokens"
+# rotation_log = ".local/rotation-log.jsonl"

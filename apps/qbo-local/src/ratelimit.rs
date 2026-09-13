@@ -171,7 +171,9 @@ pub const MAX_BACKOFF_SECONDS: i64 = 300;
 /// every queued request retries at the same instant and the thundering herd
 /// reproduces the overload that caused the 429.
 pub fn backoff_delay(attempt: u32, jitter: f64) -> Duration {
-    let exponential = 2f64.powi(attempt.min(16) as i32).min(MAX_BACKOFF_SECONDS as f64);
+    let exponential = 2f64
+        .powi(attempt.min(16) as i32)
+        .min(MAX_BACKOFF_SECONDS as f64);
     let jittered = exponential * jitter.clamp(0.0, 1.0);
     Duration::milliseconds((jittered * 1000.0) as i64)
 }
@@ -314,7 +316,10 @@ mod tests {
         assert_eq!(backoff_delay(0, 1.0), Duration::seconds(1));
         assert_eq!(backoff_delay(1, 1.0), Duration::seconds(2));
         assert_eq!(backoff_delay(4, 1.0), Duration::seconds(16));
-        assert_eq!(backoff_delay(20, 1.0), Duration::seconds(MAX_BACKOFF_SECONDS));
+        assert_eq!(
+            backoff_delay(20, 1.0),
+            Duration::seconds(MAX_BACKOFF_SECONDS)
+        );
     }
 
     #[test]

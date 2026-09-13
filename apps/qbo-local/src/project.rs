@@ -164,12 +164,11 @@ pub struct ParsedLink {
 pub fn parse(entity: &MirroredEntity) -> Projection {
     let raw = &entity.raw_json;
     let result = match entity.entity_type {
-        EntityType::Customer => parse_contact(raw, entity, ContactType::Customer).map(|c| {
-            Some(ParsedEntity::Contact(c))
-        }),
-        EntityType::Vendor => parse_contact(raw, entity, ContactType::Vendor).map(|c| {
-            Some(ParsedEntity::Contact(c))
-        }),
+        EntityType::Customer => parse_contact(raw, entity, ContactType::Customer)
+            .map(|c| Some(ParsedEntity::Contact(c))),
+        EntityType::Vendor => {
+            parse_contact(raw, entity, ContactType::Vendor).map(|c| Some(ParsedEntity::Contact(c)))
+        }
         EntityType::Item => parse_item(raw, entity).map(|i| Some(ParsedEntity::Item(i))),
         EntityType::Account => parse_account(raw, entity).map(|a| Some(ParsedEntity::Account(a))),
         EntityType::Class => parse_class(raw, entity).map(|c| Some(ParsedEntity::Class(c))),
@@ -345,7 +344,10 @@ fn parse_lines(raw: &Value) -> Result<Vec<ParsedLine>, ProjectError> {
             line_no: line_number(line, index),
             item_id: detail.and_then(|d| reference(d, "ItemRef")),
             description: text(line, "Description"),
-            qty: detail.map(|d| optional_decimal(d, "Qty")).transpose()?.flatten(),
+            qty: detail
+                .map(|d| optional_decimal(d, "Qty"))
+                .transpose()?
+                .flatten(),
             unit_price: detail
                 .map(|d| optional_decimal(d, "UnitPrice"))
                 .transpose()?
@@ -657,7 +659,12 @@ mod tests {
         let document = document_of(&entity(EntityType::Invoice, "418", invoice_payload()));
         assert_eq!(document.po_number.as_deref(), Some("BH-99214"));
 
-        for name in ["PO Number", "ponumber", "P.O. NUMBER", "Purchase Order Number"] {
+        for name in [
+            "PO Number",
+            "ponumber",
+            "P.O. NUMBER",
+            "Purchase Order Number",
+        ] {
             let mut payload = invoice_payload();
             payload["CustomField"][0]["Name"] = json!(name);
             let document = document_of(&entity(EntityType::Invoice, "418", payload));
@@ -740,8 +747,16 @@ mod tests {
         assert_eq!(
             document.links,
             vec![
-                ParsedLink { to_qbo_id: "801".into(), to_type: "Bill".into(), line_no: Some(1) },
-                ParsedLink { to_qbo_id: "812".into(), to_type: "Bill".into(), line_no: Some(2) },
+                ParsedLink {
+                    to_qbo_id: "801".into(),
+                    to_type: "Bill".into(),
+                    line_no: Some(1)
+                },
+                ParsedLink {
+                    to_qbo_id: "812".into(),
+                    to_type: "Bill".into(),
+                    line_no: Some(2)
+                },
             ]
         );
     }
@@ -756,7 +771,10 @@ mod tests {
         });
         let document = document_of(&entity(EntityType::Invoice, "5", payload));
         assert_eq!(document.lines[0].amount, Money::ZERO);
-        assert_eq!(document.lines[0].description.as_deref(), Some("See attached drawing"));
+        assert_eq!(
+            document.lines[0].description.as_deref(),
+            Some("See attached drawing")
+        );
     }
 
     #[test]
@@ -894,7 +912,11 @@ mod tests {
 
     #[test]
     fn entities_with_no_projected_form_say_so() {
-        for entity_type in [EntityType::CompanyInfo, EntityType::Preferences, EntityType::TaxCode] {
+        for entity_type in [
+            EntityType::CompanyInfo,
+            EntityType::Preferences,
+            EntityType::TaxCode,
+        ] {
             assert_eq!(
                 parse(&entity(entity_type, "1", json!({ "Id": "1" }))),
                 Projection::NotProjected,

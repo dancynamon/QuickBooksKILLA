@@ -49,14 +49,22 @@ fn range_bounds(updated: Option<UpdatedRange>) -> (String, String) {
     }
 }
 
-fn query_path(entity_type: EntityType, updated: Option<UpdatedRange>, start_position: usize) -> PathBuf {
+fn query_path(
+    entity_type: EntityType,
+    updated: Option<UpdatedRange>,
+    start_position: usize,
+) -> PathBuf {
     let (from, to) = range_bounds(updated);
     PathBuf::from(entity_type.as_str()).join(format!("query-{from}-{to}-{start_position}.json"))
 }
 
 fn cdc_path(changed_since: DateTime<Utc>, entity_types: &[EntityType]) -> PathBuf {
     let names: Vec<&str> = entity_types.iter().map(|e| e.as_str()).collect();
-    PathBuf::from("cdc").join(format!("{}-{}.json", ts_key(changed_since), names.join("+")))
+    PathBuf::from("cdc").join(format!(
+        "{}-{}.json",
+        ts_key(changed_since),
+        names.join("+")
+    ))
 }
 
 fn fetch_path(entity_type: EntityType, qbo_id: &str) -> PathBuf {
@@ -110,7 +118,9 @@ fn payload_to_json(payload: &EntityPayload) -> Value {
 }
 
 fn payload_from_json(rel: &Path, value: &Value) -> Result<EntityPayload, QboError> {
-    let obj = value.as_object().ok_or_else(|| corrupt(rel, "expected an object"))?;
+    let obj = value
+        .as_object()
+        .ok_or_else(|| corrupt(rel, "expected an object"))?;
     let entity_type = obj
         .get("entity_type")
         .and_then(Value::as_str)
@@ -134,7 +144,10 @@ fn payload_from_json(rel: &Path, value: &Value) -> Result<EntityPayload, QboErro
     let last_updated_utc = DateTime::parse_from_rfc3339(raw_timestamp)
         .map_err(|e| corrupt(rel, &format!("bad last_updated_utc: {e}")))?
         .with_timezone(&Utc);
-    let is_deleted = obj.get("is_deleted").and_then(Value::as_bool).unwrap_or(false);
+    let is_deleted = obj
+        .get("is_deleted")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     let raw_json = obj.get("raw_json").cloned().unwrap_or(Value::Null);
     Ok(EntityPayload {
         entity_type,
@@ -155,7 +168,9 @@ fn index_entry_to_json(entry: &IndexEntry) -> Value {
 }
 
 fn index_entry_from_json(rel: &Path, value: &Value) -> Result<IndexEntry, QboError> {
-    let obj = value.as_object().ok_or_else(|| corrupt(rel, "expected an object"))?;
+    let obj = value
+        .as_object()
+        .ok_or_else(|| corrupt(rel, "expected an object"))?;
     let qbo_id = obj
         .get("qbo_id")
         .and_then(Value::as_str)
@@ -168,7 +183,10 @@ fn index_entry_from_json(rel: &Path, value: &Value) -> Result<IndexEntry, QboErr
     let last_updated_utc = DateTime::parse_from_rfc3339(raw_timestamp)
         .map_err(|e| corrupt(rel, &format!("bad last_updated_utc: {e}")))?
         .with_timezone(&Utc);
-    let is_deleted = obj.get("is_deleted").and_then(Value::as_bool).unwrap_or(false);
+    let is_deleted = obj
+        .get("is_deleted")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     Ok(IndexEntry {
         qbo_id,
         last_updated_utc,
@@ -228,7 +246,10 @@ fn read_fixture(dir: &Path, rel: &Path) -> Result<Value, QboError> {
 }
 
 fn io_error(rel: &Path, error: io::Error) -> QboError {
-    QboError::Network(format!("fixture io error writing {}: {error}", rel.display()))
+    QboError::Network(format!(
+        "fixture io error writing {}: {error}",
+        rel.display()
+    ))
 }
 
 fn rel_to_string(rel: &Path) -> String {
@@ -330,7 +351,9 @@ impl<C: QboClient> QboClient for RecordingQbo<C> {
         start_position: usize,
         max_results: usize,
     ) -> Result<Vec<EntityPayload>, QboError> {
-        let result = self.inner.query(realm, entity_type, updated, start_position, max_results);
+        let result = self
+            .inner
+            .query(realm, entity_type, updated, start_position, max_results);
         let rel = query_path(entity_type, updated, start_position);
         let params = json!({
             "realm": realm.as_str(),
@@ -390,8 +413,14 @@ impl<C: QboClient> QboClient for RecordingQbo<C> {
         base_sync_token: &str,
         request_id: Uuid,
     ) -> Result<EntityPayload, QboError> {
-        self.inner
-            .update(realm, entity_type, qbo_id, payload, base_sync_token, request_id)
+        self.inner.update(
+            realm,
+            entity_type,
+            qbo_id,
+            payload,
+            base_sync_token,
+            request_id,
+        )
     }
 
     fn find_by_name(
@@ -430,7 +459,9 @@ impl<C: QboClient> QboClient for RecordingQbo<C> {
         // `self.inner.index` keeps whatever the wrapped client actually does
         // (a real index projection, or the default's delegation to its own
         // `query`) invisible to the recording layer.
-        let result = self.inner.index(realm, entity_type, start_position, max_results);
+        let result = self
+            .inner
+            .index(realm, entity_type, start_position, max_results);
         let rel = index_path(entity_type, start_position);
         let params = json!({
             "realm": realm.as_str(),
@@ -509,7 +540,9 @@ impl QboClient for FixtureQbo {
         if let Some(error) = as_recorded_error(&value) {
             return Err(error);
         }
-        let array = value.as_array().ok_or_else(|| corrupt(&rel, "expected an array"))?;
+        let array = value
+            .as_array()
+            .ok_or_else(|| corrupt(&rel, "expected an array"))?;
         let payloads = array
             .iter()
             .map(|v| payload_from_json(&rel, v))
@@ -528,7 +561,9 @@ impl QboClient for FixtureQbo {
         if let Some(error) = as_recorded_error(&value) {
             return Err(error);
         }
-        let array = value.as_array().ok_or_else(|| corrupt(&rel, "expected an array"))?;
+        let array = value
+            .as_array()
+            .ok_or_else(|| corrupt(&rel, "expected an array"))?;
         array.iter().map(|v| payload_from_json(&rel, v)).collect()
     }
 
@@ -583,7 +618,9 @@ impl QboClient for FixtureQbo {
         if let Some(error) = as_recorded_error(&value) {
             return Err(error);
         }
-        let array = value.as_array().ok_or_else(|| corrupt(&rel, "expected an array"))?;
+        let array = value
+            .as_array()
+            .ok_or_else(|| corrupt(&rel, "expected an array"))?;
         let entries = array
             .iter()
             .map(|v| index_entry_from_json(&rel, v))
@@ -628,7 +665,12 @@ mod tests {
             .with_timezone(&Utc)
     }
 
-    fn payload(entity_type: EntityType, qbo_id: &str, raw_json: Value, at: DateTime<Utc>) -> EntityPayload {
+    fn payload(
+        entity_type: EntityType,
+        qbo_id: &str,
+        raw_json: Value,
+        at: DateTime<Utc>,
+    ) -> EntityPayload {
         EntityPayload {
             entity_type,
             qbo_id: qbo_id.to_string(),
@@ -717,7 +759,10 @@ mod tests {
     fn query_path_differs_by_window_and_start() {
         let bounded = query_path(
             EntityType::Invoice,
-            Some(UpdatedRange { from: now(), to: now() }),
+            Some(UpdatedRange {
+                from: now(),
+                to: now(),
+            }),
             0,
         );
         let unbounded = query_path(EntityType::Invoice, None, 0);
@@ -844,7 +889,9 @@ mod tests {
         let recorder = RecordingQbo::new(seeded_mock(now), directory.path());
         let mut record_driver = SyncDriver::new(recorder, SyncOptions::default(), now);
         let record_store = Store::open_in_memory().unwrap();
-        record_store.register_realm(&realm, "recording", now).unwrap();
+        record_store
+            .register_realm(&realm, "recording", now)
+            .unwrap();
         record_driver
             .sync_realm(&record_store, &realm, &entity_types, now)
             .unwrap();

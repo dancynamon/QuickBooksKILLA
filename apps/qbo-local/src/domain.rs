@@ -353,11 +353,14 @@ mod tests {
 
     #[test]
     fn realm_id_rejects_things_that_are_not_realm_ids() {
-        for bad in ["", "Aquamentor", "1234567890123456 ", "/tmp/replica.db", "-1"] {
-            assert!(
-                RealmId::parse(bad).is_err(),
-                "should have rejected {bad:?}"
-            );
+        for bad in [
+            "",
+            "Aquamentor",
+            "1234567890123456 ",
+            "/tmp/replica.db",
+            "-1",
+        ] {
+            assert!(RealmId::parse(bad).is_err(), "should have rejected {bad:?}");
         }
     }
 
@@ -436,7 +439,10 @@ mod tests {
         // order or every document lands with dangling references.
         let tiers: Vec<SyncTier> = EntityType::ALL.iter().map(|e| e.tier()).collect();
         let last_master = tiers.iter().rposition(|t| *t == SyncTier::Masters).unwrap();
-        let first_document = tiers.iter().position(|t| *t == SyncTier::Documents).unwrap();
+        let first_document = tiers
+            .iter()
+            .position(|t| *t == SyncTier::Documents)
+            .unwrap();
         assert!(last_master < first_document);
     }
 
