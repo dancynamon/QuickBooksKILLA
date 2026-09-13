@@ -23,14 +23,21 @@
 //! - [`mcp`]      — `ROADMAP.md` §G, §D: the MCP server over this ledger —
 //!   every report above as a read tool, plus gated writes through
 //!   [`post`] and [`store`]
+//! - [`verify`]   — §4, §5: an invariants sweep recomputed independently of
+//!   the schema's own triggers and foreign keys
+//! - [`nightly`]  — ROADMAP.md §E: the parallel-run command — import, diff
+//!   against a QBO trial balance CSV, write the §7 report, and the launchd
+//!   plist that schedules it
 
 pub mod accountant;
 pub mod bank;
 pub mod chart;
 pub mod import;
 pub mod mcp;
+pub mod nightly;
 pub mod pipeline;
 pub mod post;
 pub mod report;
 pub mod store;
 pub mod types;
+pub mod verify;

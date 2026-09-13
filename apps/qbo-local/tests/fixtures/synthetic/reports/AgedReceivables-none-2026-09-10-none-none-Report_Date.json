@@ -1,0 +1,62 @@
+{
+  "Header": {
+    "Time": "2026-09-11T02:14:00-04:00",
+    "ReportName": "AgedReceivables",
+    "ReportBasis": "Accrual",
+    "Currency": "USD"
+  },
+  "Columns": {
+    "Column": [
+      { "ColTitle": "", "ColType": "Customer" },
+      { "ColTitle": "Current", "ColType": "Money" },
+      { "ColTitle": "1 - 30", "ColType": "Money" },
+      { "ColTitle": "31 - 60", "ColType": "Money" },
+      { "ColTitle": "61 - 90", "ColType": "Money" },
+      { "ColTitle": "91 and over", "ColType": "Money" },
+      { "ColTitle": "Total", "ColType": "Money" }
+    ]
+  },
+  "Rows": {
+    "Row": [
+      {
+        "type": "Data",
+        "ColData": [
+          { "value": "Blue Harbor Swim Club", "id": "31" },
+          { "value": "1200.00" },
+          { "value": "300.00" },
+          { "value": "" },
+          { "value": "" },
+          { "value": "" },
+          { "value": "1500.00" }
+        ]
+      },
+      {
+        "type": "Data",
+        "ColData": [
+          { "value": "Fairview County Parks & Rec.", "id": "44" },
+          { "value": "" },
+          { "value": "" },
+          { "value": "830.00" },
+          { "value": "" },
+          { "value": "" },
+          { "value": "830.00" }
+        ]
+      },
+      {
+        "type": "Total",
+        "group": "GrandTotal",
+        "Summary": {
+          "ColData": [
+            { "value": "TOTAL" },
+            { "value": "1200.00" },
+            { "value": "300.00" },
+            { "value": "830.00" },
+            { "value": "" },
+            { "value": "" },
+            { "value": "2330.00" }
+          ]
+        }
+      }
+    ]
+  }
+}

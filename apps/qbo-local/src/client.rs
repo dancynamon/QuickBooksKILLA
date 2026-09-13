@@ -8,7 +8,7 @@
 
 use std::collections::HashMap;
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
@@ -16,6 +16,54 @@ use uuid::Uuid;
 use crate::domain::{EntityType, RealmId};
 
 pub mod journal;
+
+// ---------------------------------------------------------------------------
+// The Reports API (LEDGER-DESIGN.md §6, §7)
+// ---------------------------------------------------------------------------
+
+/// One of the reports the Reports API serves under
+/// `GET /v3/company/<realm>/reports/<Name>`. The variant is the URL path
+/// segment via [`ReportName::as_str`].
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub enum ReportName {
+    TrialBalance,
+    AgedReceivables,
+    AgedPayables,
+    ProfitAndLoss,
+    BalanceSheet,
+}
+
+impl ReportName {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            ReportName::TrialBalance => "TrialBalance",
+            ReportName::AgedReceivables => "AgedReceivables",
+            ReportName::AgedPayables => "AgedPayables",
+            ReportName::ProfitAndLoss => "ProfitAndLoss",
+            ReportName::BalanceSheet => "BalanceSheet",
+        }
+    }
+}
+
+/// The query parameters a Reports API call may carry. Every field is
+/// optional because which ones apply depends on the report — a trial balance
+/// takes `start_date`/`end_date`/`accounting_method`; an aging report takes
+/// `end_date` (as of) and `aging_method` instead. A caller passes only the
+/// fields the report it is asking for actually uses; [`crate::http::HttpQboClient`]
+/// puts only the `Some` ones on the wire.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ReportParams {
+    pub start_date: Option<NaiveDate>,
+    pub end_date: Option<NaiveDate>,
+    /// `"Accrual"` or `"Cash"`.
+    pub accounting_method: Option<String>,
+    /// QBO's canned date ranges (`"This Fiscal Year"`, and so on) — an
+    /// alternative to `start_date`/`end_date` this codebase does not
+    /// generate itself but a fixture or a caller may still supply.
+    pub date_macro: Option<String>,
+    /// Aging reports only: `"Current"` or `"Report_Date"`.
+    pub aging_method: Option<String>,
+}
 
 /// One entity as QBO returns it.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -161,6 +209,28 @@ pub trait QboClient {
         entity_type: EntityType,
         qbo_id: &str,
     ) -> Result<Option<EntityPayload>, QboError>;
+
+    /// One Reports API call: `GET /v3/company/<realm>/reports/<name>` with
+    /// whatever of `params` applies (`LEDGER-DESIGN.md` §6, §7). The raw JSON
+    /// comes back whole — `crate::reports` is what turns it into rows — so
+    /// this trait stays ignorant of any one report's shape.
+    ///
+    /// The default refuses: most implementors of this trait ([`MockQbo`]) are
+    /// exercising sync, not reports, and a client that does not really talk
+    /// to Intuit has no business inventing report data. [`crate::http::HttpQboClient`],
+    /// [`crate::fixture::RecordingQbo`] and [`crate::fixture::FixtureQbo`]
+    /// override this with the real thing.
+    fn report(
+        &mut self,
+        realm: &RealmId,
+        name: ReportName,
+        params: &ReportParams,
+    ) -> Result<serde_json::Value, QboError> {
+        let _ = (realm, name, params);
+        Err(QboError::Validation(
+            "reports not supported by this client".to_string(),
+        ))
+    }
 }
 
 /// The field carrying a master's unique name, per entity type.
@@ -811,6 +881,15 @@ mod tests {
             replayed.qbo_id, "3",
             "the id counter must not restart and collide"
         );
+    }
+
+    #[test]
+    fn the_default_report_impl_refuses() {
+        let mut qbo = MockQbo::new(at(0));
+        let err = qbo
+            .report(&realm(), ReportName::TrialBalance, &ReportParams::default())
+            .unwrap_err();
+        assert!(matches!(err, QboError::Validation(_)));
     }
 
     #[test]

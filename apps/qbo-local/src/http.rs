@@ -76,7 +76,8 @@ use uuid::Uuid;
 
 use crate::auth::{AuthError, RotationLogEntry, TokenGenerations, TokenSet, TokenStore};
 use crate::client::{
-    unique_name_field, EntityPayload, IndexEntry, QboClient, QboError, UpdatedRange,
+    unique_name_field, EntityPayload, IndexEntry, QboClient, QboError, ReportName, ReportParams,
+    UpdatedRange,
 };
 use crate::domain::{EntityType, RealmId};
 use crate::oauth::{self, OAuthConfig};
@@ -275,9 +276,9 @@ impl HttpQboClient {
 
     // -- request plumbing -----------------------------------------------------
 
-    /// Spend a rate-limit token, run `body` (which may itself hit the
-    /// network more than once, for the 401-retry case), then release the
-    /// concurrency slot regardless of outcome.
+    /// Spend a rate-limit token from the `General` bucket, run `body` (which
+    /// may itself hit the network more than once, for the 401-retry case),
+    /// then release the concurrency slot regardless of outcome.
     fn request_json(
         &mut self,
         method: Method,
@@ -285,8 +286,23 @@ impl HttpQboClient {
         query: &[(String, String)],
         body: Option<&Value>,
     ) -> Result<Value, QboError> {
+        self.request_json_bucketed(BucketClass::General, method, path, query, body)
+    }
+
+    /// As [`Self::request_json`], spending from `bucket` instead of always
+    /// `General` — the Reports API draws down its own budget
+    /// (`ratelimit::BucketClass::Reports`), which is what keeps a nightly
+    /// trial-balance pull from ever throttling ordinary sync traffic.
+    fn request_json_bucketed(
+        &mut self,
+        bucket: BucketClass,
+        method: Method,
+        path: &str,
+        query: &[(String, String)],
+        body: Option<&Value>,
+    ) -> Result<Value, QboError> {
         let now = Utc::now();
-        if !self.limiter.try_acquire(BucketClass::General, now) {
+        if !self.limiter.try_acquire(bucket, now) {
             return Err(QboError::RateLimited);
         }
         let outcome = self.request_json_inner(method, path, query, body);
@@ -595,6 +611,35 @@ impl QboClient for HttpQboClient {
             Err(QboError::NotFound) => Ok(None),
             Err(other) => Err(other),
         }
+    }
+
+    /// `GET /v3/company/<realm>/reports/<name>`, spending from the
+    /// `Reports` bucket rather than `General` (`LEDGER-DESIGN.md` §6, §7).
+    /// Only the `Some` fields of `params` go on the wire.
+    fn report(
+        &mut self,
+        realm: &RealmId,
+        name: ReportName,
+        params: &ReportParams,
+    ) -> Result<Value, QboError> {
+        let path = format!("/v3/company/{}/reports/{}", realm.as_str(), name.as_str());
+        let mut query = vec![self.minorversion_param()];
+        if let Some(start) = params.start_date {
+            query.push(("start_date".to_string(), start.to_string()));
+        }
+        if let Some(end) = params.end_date {
+            query.push(("end_date".to_string(), end.to_string()));
+        }
+        if let Some(method) = &params.accounting_method {
+            query.push(("accounting_method".to_string(), method.clone()));
+        }
+        if let Some(date_macro) = &params.date_macro {
+            query.push(("date_macro".to_string(), date_macro.clone()));
+        }
+        if let Some(aging_method) = &params.aging_method {
+            query.push(("aging_method".to_string(), aging_method.clone()));
+        }
+        self.request_json_bucketed(BucketClass::Reports, Method::Get, &path, &query, None)
     }
 }
 

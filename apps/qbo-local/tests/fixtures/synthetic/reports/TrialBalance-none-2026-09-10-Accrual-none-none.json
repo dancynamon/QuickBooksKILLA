@@ -1,0 +1,84 @@
+{
+  "Header": {
+    "Time": "2026-09-11T02:14:00-04:00",
+    "ReportName": "TrialBalance",
+    "StartPeriod": "2026-01-01",
+    "EndPeriod": "2026-09-10",
+    "SummarizeColumnsBy": "Total",
+    "Currency": "USD",
+    "Option": []
+  },
+  "Columns": {
+    "Column": [
+      { "ColTitle": "", "ColType": "Account" },
+      { "ColTitle": "Debit", "ColType": "Money" },
+      { "ColTitle": "Credit", "ColType": "Money" }
+    ]
+  },
+  "Rows": {
+    "Row": [
+      {
+        "type": "Section",
+        "group": "TB",
+        "Header": { "ColData": [ { "value": "ASSETS" }, { "value": "" }, { "value": "" } ] },
+        "Rows": {
+          "Row": [
+            {
+              "type": "Data",
+              "ColData": [
+                { "value": "Checking", "id": "35" },
+                { "value": "412884.19" },
+                { "value": "" }
+              ]
+            },
+            {
+              "type": "Data",
+              "ColData": [
+                { "value": "Accounts Receivable", "id": "42" },
+                { "value": "12345.67" },
+                { "value": "" }
+              ]
+            }
+          ]
+        },
+        "Summary": {
+          "ColData": [ { "value": "Total Assets" }, { "value": "425229.86" }, { "value": "" } ]
+        }
+      },
+      {
+        "type": "Section",
+        "group": "TB",
+        "Header": {
+          "ColData": [ { "value": "LIABILITIES AND EQUITY" }, { "value": "" }, { "value": "" } ]
+        },
+        "Rows": {
+          "Row": [
+            {
+              "type": "Data",
+              "ColData": [
+                { "value": "Sales Tax Payable", "id": "61" },
+                { "value": "" },
+                { "value": "8412.06" }
+              ]
+            },
+            {
+              "type": "Data",
+              "ColData": [
+                { "value": "Owner Capital", "id": "70" },
+                { "value": "" },
+                { "value": "416817.80" }
+              ]
+            }
+          ]
+        },
+        "Summary": {
+          "ColData": [
+            { "value": "Total Liabilities and Equity" },
+            { "value": "" },
+            { "value": "425229.86" }
+          ]
+        }
+      }
+    ]
+  }
+}

@@ -16,10 +16,12 @@ use rust_decimal::Decimal;
 use ledger::accountant::{self, AdjustmentRequest, AuditRow, GlDetail};
 use ledger::bank::{self, MatchRules, NewStatement};
 use ledger::import::ImportOptions;
+use ledger::nightly;
 use ledger::pipeline;
 use ledger::report::{self, BalanceSheet, Pnl, QboTbRow, SalesTaxLines, TierRules, TrialBalance};
 use ledger::store::{AdjustmentState, Ledger, LedgerError};
 use ledger::types::{AccountId, ClassId, JournalLine, Side};
+use ledger::verify;
 use ledger_core::Money;
 use qbo_local::domain::RealmId;
 use qbo_local::store::Store;
@@ -201,6 +203,20 @@ enum Command {
         company: String,
         statement: String,
     },
+    Verify {
+        db: PathBuf,
+        company: String,
+    },
+    Nightly {
+        db: PathBuf,
+        company: String,
+        replica: PathBuf,
+        realm: RealmId,
+        qbo_csv: PathBuf,
+        out: PathBuf,
+        as_of: Option<NaiveDate>,
+        plist: bool,
+    },
 }
 
 /// `ledger bank import --format`. §10: the files the bank and Chase already
@@ -255,6 +271,11 @@ USAGE:
     ledger opening --db PATH --company ID --as-of YYYY-MM-DD --qbo-csv PATH
     ledger boundary --db PATH --company ID --replica PATH --realm ID
                    --snapshots DIR
+    ledger verify  --db PATH --company ID
+    ledger nightly --db PATH --company ID --replica PATH --realm ID
+                   --qbo-csv PATH --out DIR [--as-of YYYY-MM-DD]
+    ledger nightly --plist --db PATH --company ID --replica PATH --realm ID
+                   --qbo-csv PATH --out DIR
     ledger --help
 
 SUBCOMMANDS:
@@ -308,6 +329,19 @@ SUBCOMMANDS:
     boundary  Walk the §6 boundary-year procedure against a directory of
               QBO trial balance CSVs named tb-YYYY.csv, one per year, and
               print the per-year agreement table and the boundary year.
+    verify    An invariants sweep over the ledger file (§4, §5), recomputed
+              in Rust rather than trusted from the schema's own triggers and
+              foreign keys. Prints a table of what failed and exits 1 on any
+              fatal finding; a needs_mapping account with a non-zero balance
+              is reported but never fails the run on its own.
+    nightly   The §E parallel run: import the whole replica, diff the
+              resulting trial balance against --qbo-csv (produced by
+              `qbo-local report --live` on the Mac's cron), and write
+              tbdiff-<as-of>.txt and .csv into --out. --as-of defaults to
+              yesterday (§7: \"as of the previous day\"). Exits 1 on any
+              must-tier failure or import rejection. With --plist, prints a
+              launchd plist that runs `qbo-local report --live` and then
+              this command at 02:00 local, instead of running anything.
 
 FLAGS:
     --db PATH            Path to the SQLite ledger file.
@@ -356,11 +390,17 @@ FLAGS:
     --qbo-csv PATH        CSV of qbo_account_id,name,balance (tbdiff, opening).
     --snapshots DIR       Directory of tb-YYYY.csv files, same CSV shape as
                            --qbo-csv (boundary only).
+    --out DIR             Directory tbdiff-<as-of>.txt/.csv are written into
+                           (nightly only); created if it does not exist.
+    --plist               Print a launchd plist instead of running (nightly
+                           only).
 
 EXIT CODES:
     0   ok
-    1   runtime error, tbdiff found a must-match failure (§7), or a bank
-        statement does not close (§10)
+    1   runtime error, tbdiff found a must-match failure (§7), a bank
+        statement does not close (§10), verify found a fatal invariant
+        failure (§4), or nightly found a must-tier failure or an import
+        rejection (§7)
     2   usage error (this message)
 ";
 
@@ -488,6 +528,8 @@ fn parse(args: &[String]) -> Result<Command, UsageError> {
         "bank" => parse_bank(args),
         "opening" => parse_opening(args),
         "boundary" => parse_boundary(args),
+        "verify" => parse_verify(args),
+        "nightly" => parse_nightly(args),
         other => Err(UsageError::unknown_subcommand(other)),
     }
 }
@@ -1255,6 +1297,17 @@ fn execute(command: Command) -> Result<ExitCode, CommandError> {
             realm,
             snapshots,
         } => run_boundary(&db, &company, &replica, &realm, &snapshots).map(ok),
+        Command::Verify { db, company } => run_verify(&db, &company),
+        Command::Nightly {
+            db,
+            company,
+            replica,
+            realm,
+            qbo_csv,
+            out,
+            as_of,
+            plist,
+        } => run_nightly(&db, &company, &replica, &realm, &qbo_csv, &out, as_of, plist),
     }
 }
 
@@ -2024,6 +2077,57 @@ fn parse_boundary(mut args: Args<'_>) -> Result<Command, UsageError> {
     })
 }
 
+fn parse_verify(mut args: Args<'_>) -> Result<Command, UsageError> {
+    let mut db = None;
+    let mut company = None;
+    while let Some(flag) = args.next() {
+        match flag.as_str() {
+            "--db" => db = Some(PathBuf::from(next_value(&mut args, "--db")?)),
+            "--company" => company = Some(next_value(&mut args, "--company")?),
+            other => return Err(UsageError::unknown_flag(other)),
+        }
+    }
+    Ok(Command::Verify {
+        db: db.ok_or_else(|| UsageError::missing_flag("--db"))?,
+        company: company.ok_or_else(|| UsageError::missing_flag("--company"))?,
+    })
+}
+
+#[allow(clippy::too_many_lines)]
+fn parse_nightly(mut args: Args<'_>) -> Result<Command, UsageError> {
+    let mut db = None;
+    let mut company = None;
+    let mut replica = None;
+    let mut realm = None;
+    let mut qbo_csv = None;
+    let mut out = None;
+    let mut as_of = None;
+    let mut plist = false;
+    while let Some(flag) = args.next() {
+        match flag.as_str() {
+            "--db" => db = Some(PathBuf::from(next_value(&mut args, "--db")?)),
+            "--company" => company = Some(next_value(&mut args, "--company")?),
+            "--replica" => replica = Some(PathBuf::from(next_value(&mut args, "--replica")?)),
+            "--realm" => realm = Some(parse_realm(&next_value(&mut args, "--realm")?)?),
+            "--qbo-csv" => qbo_csv = Some(PathBuf::from(next_value(&mut args, "--qbo-csv")?)),
+            "--out" => out = Some(PathBuf::from(next_value(&mut args, "--out")?)),
+            "--as-of" => as_of = Some(parse_date(&next_value(&mut args, "--as-of")?, "--as-of")?),
+            "--plist" => plist = true,
+            other => return Err(UsageError::unknown_flag(other)),
+        }
+    }
+    Ok(Command::Nightly {
+        db: db.ok_or_else(|| UsageError::missing_flag("--db"))?,
+        company: company.ok_or_else(|| UsageError::missing_flag("--company"))?,
+        replica: replica.ok_or_else(|| UsageError::missing_flag("--replica"))?,
+        realm: realm.ok_or_else(|| UsageError::missing_flag("--realm"))?,
+        qbo_csv: qbo_csv.ok_or_else(|| UsageError::missing_flag("--qbo-csv"))?,
+        out: out.ok_or_else(|| UsageError::missing_flag("--out"))?,
+        as_of,
+        plist,
+    })
+}
+
 fn run_opening(
     db: &std::path::Path,
     company: &str,
@@ -2070,6 +2174,75 @@ fn run_boundary(
     .map_err(runtime)?;
     print!("{}", report.render_text(company));
     Ok(())
+}
+
+// -- verify -----------------------------------------------------------------
+
+fn run_verify(db: &std::path::Path, company: &str) -> Result<ExitCode, CommandError> {
+    let ledger = Ledger::open(db).map_err(runtime)?;
+    let report = verify::verify(&ledger, company).map_err(runtime)?;
+    print!("{}", report.render_text(company));
+    if report.is_ok() {
+        Ok(ExitCode::SUCCESS)
+    } else {
+        Ok(ExitCode::from(1))
+    }
+}
+
+// -- nightly ------------------------------------------------------------
+
+/// §7: "as of the previous day" — yesterday in UTC, when `--as-of` is not
+/// given.
+fn yesterday(now: chrono::DateTime<Utc>) -> NaiveDate {
+    now.date_naive() - chrono::Duration::days(1)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_nightly(
+    db: &std::path::Path,
+    company: &str,
+    replica: &std::path::Path,
+    realm: &RealmId,
+    qbo_csv: &std::path::Path,
+    out: &std::path::Path,
+    as_of: Option<NaiveDate>,
+    plist: bool,
+) -> Result<ExitCode, CommandError> {
+    if plist {
+        let label = format!("com.aquamentor.ledger.nightly.{company}");
+        let text = nightly::render_launchd_plist(&label, realm, company, db, replica, qbo_csv, out);
+        print!("{text}");
+        return Ok(ExitCode::SUCCESS);
+    }
+
+    let now = Utc::now();
+    let as_of = as_of.unwrap_or_else(|| yesterday(now));
+    let ledger = Ledger::open(db).map_err(runtime)?;
+    let store = Store::open(replica).map_err(runtime)?;
+    let qbo_rows = read_qbo_csv(qbo_csv).map_err(runtime)?;
+
+    let outcome = nightly::run_nightly(&ledger, &store, realm, company, &qbo_rows, as_of, out, now)
+        .map_err(runtime)?;
+
+    print!("{}", outcome.diff.render_text(company, as_of));
+    println!("{}", outcome.summary_line());
+    println!("wrote {}", outcome.text_path.display());
+    println!("wrote {}", outcome.csv_path.display());
+    if !outcome.import.rejected.is_empty() {
+        println!(
+            "\nimport rejected {} document(s):",
+            outcome.import.rejected.len()
+        );
+        for row in &outcome.import.rejected {
+            println!("  - {}: {}", row.document_id, row.reason);
+        }
+    }
+
+    if outcome.passed() {
+        Ok(ExitCode::SUCCESS)
+    } else {
+        Ok(ExitCode::from(1))
+    }
 }
 
 /// Every `tb-YYYY.csv` file directly inside `dir`, each read with
@@ -2507,6 +2680,109 @@ mod tests {
         ]))
         .unwrap_err();
         assert!(err.reason.unwrap().contains("--realm"));
+    }
+
+    #[test]
+    fn verify_parses_and_requires_company() {
+        assert_eq!(
+            parse(&args(&["verify", "--db", "l.sqlite", "--company", "aquamentor"])),
+            Ok(Command::Verify {
+                db: PathBuf::from("l.sqlite"),
+                company: "aquamentor".to_string(),
+            })
+        );
+        assert_eq!(
+            parse(&args(&["verify", "--db", "l.sqlite"])),
+            Err(UsageError::missing_flag("--company"))
+        );
+    }
+
+    #[test]
+    fn nightly_parses_a_complete_invocation_with_as_of() {
+        assert_eq!(
+            parse(&args(&[
+                "nightly",
+                "--db",
+                "l.sqlite",
+                "--company",
+                "aquamentor",
+                "--replica",
+                "r.sqlite",
+                "--realm",
+                "1234567890123456",
+                "--qbo-csv",
+                "tb.csv",
+                "--out",
+                "out",
+                "--as-of",
+                "2026-09-10",
+            ])),
+            Ok(Command::Nightly {
+                db: PathBuf::from("l.sqlite"),
+                company: "aquamentor".to_string(),
+                replica: PathBuf::from("r.sqlite"),
+                realm: RealmId::parse("1234567890123456").unwrap(),
+                qbo_csv: PathBuf::from("tb.csv"),
+                out: PathBuf::from("out"),
+                as_of: Some(NaiveDate::from_ymd_opt(2026, 9, 10).unwrap()),
+                plist: false,
+            })
+        );
+    }
+
+    #[test]
+    fn nightly_as_of_is_optional_and_plist_toggles() {
+        let command = parse(&args(&[
+            "nightly",
+            "--db",
+            "l.sqlite",
+            "--company",
+            "aquamentor",
+            "--replica",
+            "r.sqlite",
+            "--realm",
+            "1234567890123456",
+            "--qbo-csv",
+            "tb.csv",
+            "--out",
+            "out",
+            "--plist",
+        ]))
+        .unwrap();
+        match command {
+            Command::Nightly { as_of, plist, .. } => {
+                assert_eq!(as_of, None);
+                assert!(plist);
+            }
+            other => panic!("expected Command::Nightly, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn nightly_requires_realm() {
+        let err = parse(&args(&[
+            "nightly",
+            "--db",
+            "l.sqlite",
+            "--company",
+            "aquamentor",
+            "--replica",
+            "r.sqlite",
+            "--qbo-csv",
+            "tb.csv",
+            "--out",
+            "out",
+        ]))
+        .unwrap_err();
+        assert!(err.reason.unwrap().contains("--realm"));
+    }
+
+    #[test]
+    fn yesterday_is_one_day_before_now_in_utc() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-09-12T05:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        assert_eq!(yesterday(now), NaiveDate::from_ymd_opt(2026, 9, 11).unwrap());
     }
 
     #[test]
