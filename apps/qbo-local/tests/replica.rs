@@ -17,6 +17,19 @@ fn realm() -> RealmId {
     RealmId::parse("1234567890123456").unwrap()
 }
 
+/// Enforces a `DESIGN.md` §11 measurement's budget only when `QBO_BENCH_ASSERT=1`
+/// is set, so an ordinary `cargo test -p qbo-local -- --ignored` reports a
+/// number without failing a slower laptop, while the dedicated CI `bench` job
+/// (`.github/workflows/ci.yml`) — a fixed, comparable machine — enforces it.
+fn bench_assert(label: &str, elapsed: std::time::Duration, budget_ms: u128) {
+    if std::env::var("QBO_BENCH_ASSERT").as_deref() == Ok("1") {
+        assert!(
+            elapsed.as_millis() < budget_ms,
+            "{label} took {elapsed:?}, over the {budget_ms}ms QBO_BENCH_ASSERT budget"
+        );
+    }
+}
+
 fn other_realm() -> RealmId {
     RealmId::parse("1234567890123457").unwrap()
 }
@@ -41,7 +54,9 @@ fn mirrored(entity_type: EntityType, id: &str, raw: Value) -> MirroredEntity {
 /// payment.
 fn seeded() -> Store {
     let store = Store::open_in_memory().unwrap();
-    store.register_realm(&realm(), "Test Company", now()).unwrap();
+    store
+        .register_realm(&realm(), "Test Company", now())
+        .unwrap();
     store
         .register_realm(&other_realm(), "Second Company", now())
         .unwrap();
@@ -202,7 +217,10 @@ fn projecting_a_document_writes_its_header_lines_and_links() {
     assert_eq!(invoice.total, Money::from_minor(123_456));
     assert_eq!(invoice.po_number.as_deref(), Some("BH-99214"));
     // Joined, not fetched per row.
-    assert_eq!(invoice.contact_name.as_deref(), Some("Blue Harbor Swim Club"));
+    assert_eq!(
+        invoice.contact_name.as_deref(),
+        Some("Blue Harbor Swim Club")
+    );
 
     let lines = store.document_lines(&realm(), "418").unwrap();
     assert_eq!(lines.len(), 2);
@@ -231,7 +249,10 @@ fn a_line_deleted_in_qbo_disappears_from_the_projection() {
 
     let lines = store.document_lines(&realm(), "418").unwrap();
     assert_eq!(lines.len(), 1);
-    assert_eq!(lines[0].description.as_deref(), Some("Rescue tube, 50 inch, red"));
+    assert_eq!(
+        lines[0].description.as_deref(),
+        Some("Rescue tube, 50 inch, red")
+    );
 }
 
 #[test]
@@ -252,7 +273,10 @@ fn reprojection_rebuilds_the_whole_projection_from_local_disk() {
     assert_eq!(counts(ProjectedTable::Documents), documents);
     assert_eq!(counts(ProjectedTable::DocumentLines), lines);
     assert_eq!(counts(ProjectedTable::DocumentLinks), links);
-    assert_eq!(store.get_document(&realm(), "418").unwrap().unwrap(), before);
+    assert_eq!(
+        store.get_document(&realm(), "418").unwrap().unwrap(),
+        before
+    );
 }
 
 #[test]
@@ -287,12 +311,21 @@ fn one_realm_cannot_see_another_realms_documents() {
     let store = seeded();
     let entity = mirrored(EntityType::Invoice, "418", invoice_payload());
     store.upsert_entity(&other_realm(), &entity, now()).unwrap();
-    store.project_entity(&other_realm(), &entity, now()).unwrap();
+    store
+        .project_entity(&other_realm(), &entity, now())
+        .unwrap();
 
     // Same QBO id, both realms, no bleed in either direction.
-    assert_eq!(store.count_projected(&realm(), ProjectedTable::Documents).unwrap(), 6);
     assert_eq!(
-        store.count_projected(&other_realm(), ProjectedTable::Documents).unwrap(),
+        store
+            .count_projected(&realm(), ProjectedTable::Documents)
+            .unwrap(),
+        6
+    );
+    assert_eq!(
+        store
+            .count_projected(&other_realm(), ProjectedTable::Documents)
+            .unwrap(),
         1
     );
     assert!(store.search(&other_realm(), "3590", 10).unwrap().is_empty());
@@ -304,7 +337,9 @@ fn one_realm_cannot_see_another_realms_documents() {
 
 fn only_document(store: &Store, query: &str) -> (MatchReason, String) {
     let hits = store.search(&realm(), query, 10).unwrap();
-    let first = hits.first().unwrap_or_else(|| panic!("no hit for {query:?}"));
+    let first = hits
+        .first()
+        .unwrap_or_else(|| panic!("no hit for {query:?}"));
     match &first.hit {
         Hit::Document(document) => (first.reason, document.qbo_id.clone()),
         other => panic!("expected a document for {query:?}, got {other:?}"),
@@ -364,8 +399,14 @@ fn an_amount_finds_documents_only_when_the_query_says_money() {
             _ => None,
         })
         .collect();
-    assert!(ids.contains(&"418".to_string()), "invoice total, got {ids:?}");
-    assert!(ids.contains(&"377".to_string()), "estimate total, got {ids:?}");
+    assert!(
+        ids.contains(&"418".to_string()),
+        "invoice total, got {ids:?}"
+    );
+    assert!(
+        ids.contains(&"377".to_string()),
+        "estimate total, got {ids:?}"
+    );
 
     // A bare number is a reference, not a dollar figure.
     let hits = store.search(&realm(), "160000", 10).unwrap();
@@ -391,7 +432,10 @@ fn a_few_letters_of_a_customer_name_is_enough() {
         Hit::Contact(contact) => contact.display_name == "Blue Harbor Swim Club",
         _ => false,
     });
-    assert!(named, "prefix search should reach the customer, got {hits:?}");
+    assert!(
+        named,
+        "prefix search should reach the customer, got {hits:?}"
+    );
 }
 
 #[test]
@@ -399,13 +443,15 @@ fn text_on_a_line_finds_the_document_that_line_belongs_to() {
     let store = seeded();
     let hits = store.search(&realm(), "dock bumpers", 10).unwrap();
     assert!(
-        hits.iter().any(|hit| matches!(&hit.hit, Hit::Document(d) if d.qbo_id == "418")),
+        hits.iter()
+            .any(|hit| matches!(&hit.hit, Hit::Document(d) if d.qbo_id == "418")),
         "memo text should reach the invoice"
     );
 
     let hits = store.search(&realm(), "XLPE sheet", 10).unwrap();
     assert!(
-        hits.iter().any(|hit| matches!(&hit.hit, Hit::Document(d) if d.qbo_id == "700")),
+        hits.iter()
+            .any(|hit| matches!(&hit.hit, Hit::Document(d) if d.qbo_id == "700")),
         "a line description should reach its purchase order"
     );
 }
@@ -413,7 +459,10 @@ fn text_on_a_line_finds_the_document_that_line_belongs_to() {
 #[test]
 fn the_search_index_follows_an_edit_rather_than_drifting_from_it() {
     let store = seeded();
-    assert!(!store.search(&realm(), "Blue Harbor", 10).unwrap().is_empty());
+    assert!(!store
+        .search(&realm(), "Blue Harbor", 10)
+        .unwrap()
+        .is_empty());
 
     let renamed = mirrored(
         EntityType::Customer,
@@ -475,11 +524,19 @@ fn a_lineage_walk_reaches_the_whole_chain() {
 
     let sales = store.lineage(&realm(), "377", 5).unwrap();
     let ids: Vec<_> = sales.documents.iter().map(|d| d.qbo_id.as_str()).collect();
-    assert_eq!(ids, vec!["377", "418", "500"], "estimate to invoice to payment");
+    assert_eq!(
+        ids,
+        vec!["377", "418", "500"],
+        "estimate to invoice to payment"
+    );
     assert!(sales.unresolved.is_empty());
 
     let purchases = store.lineage(&realm(), "902", 5).unwrap();
-    let ids: Vec<_> = purchases.documents.iter().map(|d| d.qbo_id.as_str()).collect();
+    let ids: Vec<_> = purchases
+        .documents
+        .iter()
+        .map(|d| d.qbo_id.as_str())
+        .collect();
     assert_eq!(ids, vec!["700", "801", "902"], "PO to bill to bill payment");
 }
 
@@ -487,7 +544,11 @@ fn a_lineage_walk_reaches_the_whole_chain() {
 fn a_lineage_walk_stops_at_the_depth_it_was_given() {
     let store = seeded();
     let one_hop = store.lineage(&realm(), "377", 1).unwrap();
-    let ids: Vec<_> = one_hop.documents.iter().map(|d| d.qbo_id.as_str()).collect();
+    let ids: Vec<_> = one_hop
+        .documents
+        .iter()
+        .map(|d| d.qbo_id.as_str())
+        .collect();
     assert_eq!(ids, vec!["377", "418"], "the payment is two hops out");
 }
 
@@ -624,4 +685,10 @@ fn search_stays_fast_at_a_realistic_book_size() {
         "document-number search took {by_number:?}, which reads like a table scan"
     );
     assert!(by_text.as_millis() < 100, "name search took {by_text:?}");
+
+    // DESIGN.md §11 measured ~7ms and ~41ms on this same shape (debug build);
+    // these budgets are 3x that, enforced only under QBO_BENCH_ASSERT=1
+    // (`.github/workflows/ci.yml`'s `bench` job).
+    bench_assert("search by document number", by_number, 25);
+    bench_assert("search by line description", by_line_text, 125);
 }
