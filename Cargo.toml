@@ -5,6 +5,7 @@ members = [
     "crates/mcp-stdio",
     "apps/qbo-local",
     "apps/ledger",
+    "apps/desktop/commands",
 ]
 
 [workspace.package]

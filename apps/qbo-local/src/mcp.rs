@@ -35,12 +35,16 @@ use crate::store::Store;
 /// need a second call.
 const DEFAULT_SEARCH_LIMIT: usize = 20;
 
-/// The [`mcp_stdio::ToolSet`] over one open replica.
-struct QboToolSet {
-    store: Store,
+/// The [`mcp_stdio::ToolSet`] over one open replica. Borrows the store
+/// (`ROADMAP.md` §B1, `apps/desktop/commands`): the stdio binary opens one
+/// `Store` for the life of the process, and a Tauri command handler holding
+/// the replica in its own state can run one `tools/call` against it without
+/// giving up ownership.
+struct QboToolSet<'a> {
+    store: &'a Store,
 }
 
-impl ToolSet for QboToolSet {
+impl ToolSet for QboToolSet<'_> {
     fn tools(&self) -> Vec<ToolSpec> {
         tools()
     }
@@ -54,12 +58,12 @@ impl ToolSet for QboToolSet {
 /// [`mcp_stdio::Server`]. A thin wrapper — `new` and `handle_line` are the
 /// entire public surface, unchanged from before this module was built on the
 /// shared transport crate.
-pub struct Server {
-    inner: mcp_stdio::Server<QboToolSet>,
+pub struct Server<'a> {
+    inner: mcp_stdio::Server<QboToolSet<'a>>,
 }
 
-impl Server {
-    pub fn new(store: Store) -> Self {
+impl<'a> Server<'a> {
+    pub fn new(store: &'a Store) -> Self {
         let info = ServerInfo {
             name: "qbo-local",
             version: env!("CARGO_PKG_VERSION"),
@@ -77,7 +81,7 @@ impl Server {
     }
 }
 
-impl QboToolSet {
+impl QboToolSet<'_> {
     /// Dispatch one `tools/call` to the query API and serialise its result.
     ///
     /// Every tool takes `realm_id` — checked first, uniformly, so a bad or
@@ -534,10 +538,10 @@ mod tests {
         store.project_entity(&realm(), &entity, now()).unwrap();
     }
 
-    /// A server over a store that already carries one customer and one open
-    /// invoice against them — enough for every tool that takes a `qbo_id` to
-    /// have something real to find.
-    fn seeded_server() -> Server {
+    /// A store that already carries one customer and one open invoice
+    /// against them — enough for every tool that takes a `qbo_id` to have
+    /// something real to find.
+    fn seeded_store() -> Store {
         let store = Store::open_in_memory().unwrap();
         store.register_realm(&realm(), "Test Co", now()).unwrap();
         seed(
@@ -572,10 +576,16 @@ mod tests {
                 json!({ "Id": "12", "Name": "Rescue tube, 50 inch", "Sku": "RT-50-RED", "Active": true }),
             ),
         );
+        store
+    }
+
+    /// A server borrowing a seeded store, for tests that don't care about
+    /// holding the store themselves.
+    fn seeded_server(store: &Store) -> Server<'_> {
         Server::new(store)
     }
 
-    fn call(server: &mut Server, id: i64, method: &str, params: Value) -> Value {
+    fn call(server: &mut Server<'_>, id: i64, method: &str, params: Value) -> Value {
         let line =
             json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }).to_string();
         let response = server
@@ -590,7 +600,8 @@ mod tests {
 
     #[test]
     fn initialize_echoes_a_supported_protocol_version_and_names_the_server() {
-        let mut server = seeded_server();
+        let store = seeded_store();
+        let mut server = seeded_server(&store);
         let response = call(
             &mut server,
             1,
@@ -612,7 +623,8 @@ mod tests {
 
     #[test]
     fn initialize_states_its_own_version_when_the_client_asks_for_one_it_does_not_know() {
-        let mut server = seeded_server();
+        let store = seeded_store();
+        let mut server = seeded_server(&store);
         let response = call(
             &mut server,
             1,
@@ -627,14 +639,16 @@ mod tests {
 
     #[test]
     fn ping_returns_an_empty_result() {
-        let mut server = seeded_server();
+        let store = seeded_store();
+        let mut server = seeded_server(&store);
         let response = call(&mut server, 1, "ping", json!({}));
         assert_eq!(response["result"], json!({}));
     }
 
     #[test]
     fn a_notification_gets_no_response() {
-        let mut server = seeded_server();
+        let store = seeded_store();
+        let mut server = seeded_server(&store);
         let line = json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }).to_string();
         assert_eq!(server.handle_line(&line), None);
 
@@ -646,7 +660,8 @@ mod tests {
 
     #[test]
     fn malformed_json_is_a_parse_error_with_a_null_id() {
-        let mut server = seeded_server();
+        let store = seeded_store();
+        let mut server = seeded_server(&store);
         let response = server.handle_line("{ not json").unwrap();
         let response: Value = serde_json::from_str(&response).unwrap();
         assert_eq!(response["error"]["code"], json!(-32700));
@@ -655,7 +670,8 @@ mod tests {
 
     #[test]
     fn an_unknown_method_is_method_not_found() {
-        let mut server = seeded_server();
+        let store = seeded_store();
+        let mut server = seeded_server(&store);
         let response = call(&mut server, 7, "not/a/real/method", json!({}));
         assert_eq!(response["error"]["code"], json!(-32601));
         assert_eq!(response["id"], json!(7));
@@ -663,7 +679,8 @@ mod tests {
 
     #[test]
     fn an_empty_line_is_silently_ignored() {
-        let mut server = seeded_server();
+        let store = seeded_store();
+        let mut server = seeded_server(&store);
         assert_eq!(server.handle_line(""), None);
         assert_eq!(server.handle_line("   "), None);
     }
@@ -674,7 +691,8 @@ mod tests {
 
     #[test]
     fn tools_list_carries_every_tool_with_a_schema() {
-        let mut server = seeded_server();
+        let store = seeded_store();
+        let mut server = seeded_server(&store);
         let response = call(&mut server, 1, "tools/list", json!({}));
         let listed = response["result"]["tools"].as_array().unwrap();
 
@@ -712,7 +730,8 @@ mod tests {
 
     #[test]
     fn an_unknown_tool_is_a_tool_error_not_a_json_rpc_error() {
-        let mut server = seeded_server();
+        let store = seeded_store();
+        let mut server = seeded_server(&store);
         let response = call(
             &mut server,
             1,
@@ -730,7 +749,8 @@ mod tests {
 
     #[test]
     fn a_missing_realm_id_is_a_tool_error() {
-        let mut server = seeded_server();
+        let store = seeded_store();
+        let mut server = seeded_server(&store);
         let response = call(
             &mut server,
             1,
@@ -742,7 +762,8 @@ mod tests {
 
     #[test]
     fn search_finds_the_seeded_invoice_by_document_number() {
-        let mut server = seeded_server();
+        let store = seeded_store();
+        let mut server = seeded_server(&store);
         let response = call(
             &mut server,
             1,
@@ -762,7 +783,8 @@ mod tests {
 
     #[test]
     fn document_detail_returns_lines_and_renders_money_as_a_decimal_string() {
-        let mut server = seeded_server();
+        let store = seeded_store();
+        let mut server = seeded_server(&store);
         let response = call(
             &mut server,
             1,
@@ -781,7 +803,8 @@ mod tests {
 
     #[test]
     fn document_detail_on_a_missing_id_is_a_tool_error() {
-        let mut server = seeded_server();
+        let store = seeded_store();
+        let mut server = seeded_server(&store);
         let response = call(
             &mut server,
             1,
@@ -798,7 +821,8 @@ mod tests {
 
     #[test]
     fn list_documents_and_open_documents_return_the_seeded_invoice() {
-        let mut server = seeded_server();
+        let store = seeded_store();
+        let mut server = seeded_server(&store);
 
         let response = call(
             &mut server,
@@ -829,7 +853,8 @@ mod tests {
 
     #[test]
     fn contact_detail_splits_open_from_recent_and_accepts_lower_case_contact_type() {
-        let mut server = seeded_server();
+        let store = seeded_store();
+        let mut server = seeded_server(&store);
         let response = call(
             &mut server,
             1,
@@ -868,7 +893,8 @@ mod tests {
 
     #[test]
     fn item_detail_reports_units_sold() {
-        let mut server = seeded_server();
+        let store = seeded_store();
+        let mut server = seeded_server(&store);
         let response = call(
             &mut server,
             1,
@@ -885,7 +911,8 @@ mod tests {
 
     #[test]
     fn ar_aging_buckets_the_seeded_invoice_and_totals_match_the_rows() {
-        let mut server = seeded_server();
+        let store = seeded_store();
+        let mut server = seeded_server(&store);
         let response = call(
             &mut server,
             1,
@@ -905,7 +932,8 @@ mod tests {
 
     #[test]
     fn ap_aging_answers_with_no_bills_seeded() {
-        let mut server = seeded_server();
+        let store = seeded_store();
+        let mut server = seeded_server(&store);
         let response = call(
             &mut server,
             1,
@@ -922,7 +950,8 @@ mod tests {
 
     #[test]
     fn ar_aging_rejects_an_unparseable_date() {
-        let mut server = seeded_server();
+        let store = seeded_store();
+        let mut server = seeded_server(&store);
         let response = call(
             &mut server,
             1,
@@ -937,7 +966,8 @@ mod tests {
 
     #[test]
     fn sync_status_reports_write_disabled_and_the_seeded_mirror_counts() {
-        let mut server = seeded_server();
+        let store = seeded_store();
+        let mut server = seeded_server(&store);
         let response = call(
             &mut server,
             1,
@@ -958,7 +988,8 @@ mod tests {
 
     #[test]
     fn class_tree_and_chart_of_accounts_return_empty_lists_when_nothing_is_mirrored() {
-        let mut server = seeded_server();
+        let store = seeded_store();
+        let mut server = seeded_server(&store);
         let response = call(
             &mut server,
             1,

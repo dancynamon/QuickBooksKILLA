@@ -1,0 +1,26 @@
+# Compiled on the Mac session with `cargo tauri dev` / `cargo tauri build`.
+#
+# Outside the repo root's workspace `members` list on purpose: the Tauri
+# toolchain and the system libraries it links against on Linux (webkit2gtk,
+# libappindicator, and the rest of tauri.app's prerequisites) are not
+# installed in this environment, so folding this crate into the workspace
+# would break `cargo build --workspace` / `cargo clippy --workspace` here —
+# exactly the two commands `ROADMAP.md` §B1 needs to stay green while this
+# scaffold sits unbuilt. `qbo-desktop-commands` (`apps/desktop/commands`)
+# carries the actual logic this crate's one command calls into, and it
+# builds and is tested in the workspace on its own; this crate is a window,
+# a CSP, and one `#[tauri::command]` wrapping that call.
+
+[package]
+name = "bunzbooks-desktop"
+version = "0.1.0"
+edition = "2021"
+description = "BunzBooks — Tauri v2 shell over qbo-desktop-commands."
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+qbo-desktop-commands = { path = "../commands" }
+serde_json = "1"
