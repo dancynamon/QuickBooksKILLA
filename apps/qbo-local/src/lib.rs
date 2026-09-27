@@ -11,7 +11,9 @@
 //! - [`project`]  — §3.2: raw payloads to the parsed projection
 //! - [`sync`]     — §4: CDC cursor strategy and its failure modes
 //! - [`driver`]   — §4: the loop that runs them against a client and a store
+//! - [`poll`]     — §4: the CDC poll cadence that drives it
 //! - [`auth`]     — §5: token rotation and durable persistence
+//! - [`keychain`] — §5: the OS keychain token store
 //! - [`ratelimit`]— §4.4: per-realm token buckets
 //! - [`outbox`]   — §6: the write queue and its state machine
 //! - [`client`]   — the QBO API boundary, plus an in-memory double
@@ -21,7 +23,9 @@ pub mod auth;
 pub mod client;
 pub mod domain;
 pub mod driver;
+pub mod keychain;
 pub mod outbox;
+pub mod poll;
 pub mod project;
 pub mod ratelimit;
 pub mod store;

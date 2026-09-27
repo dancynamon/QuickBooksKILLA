@@ -25,6 +25,8 @@ pub enum AuthError {
     Io(#[from] std::io::Error),
     #[error("token store is corrupt: {0}")]
     Corrupt(#[from] serde_json::Error),
+    #[error("keychain: {0}")]
+    Keychain(String),
     #[error("no usable token generation remains for realm {0}; re-authorisation required")]
     Lockout(RealmId),
 }

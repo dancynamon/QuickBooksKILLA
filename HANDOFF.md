@@ -43,7 +43,7 @@ backend in §2.1. Never in the repo, never in a dotfile Dropbox syncs.
 
 ## 1. Where the work stands
 
-`cargo test` — 128 tests, all offline, all green. `cargo clippy --all-targets` —
+`cargo test` — 203 tests, all offline, all green. `cargo clippy --all-targets` —
 clean.
 
 Built and tested:
@@ -59,18 +59,27 @@ Built and tested:
 | `outbox` | State machine with enforced transitions |
 | `client` | The QBO trait boundary + `MockQbo` double |
 | `worker` | Drain loop, dependency resolution, local-id rewriting |
+| `driver` | Initial sweep, CDC poll, bounded backfill on a truncated response |
+| `keychain` | `KeychainTokenStore` over a `SecretBackend`; macOS login-keychain backend |
+| `poll` | 15 s focused / 5 min idle cadence, backoff on refusal, sleeping run loop |
 
 **Not built:** the HTTP transport behind `QboClient`, the OAuth authorisation
-flow, the keychain token backend, the initial-sync driver, the CDC poll loop,
-the reconciliation sweep, the Tauri shell, the React UI.
+flow, the reconciliation sweep, the Tauri shell, the React UI.
 
-M0 needs the first five of those. The last two are M1.
+M0 needs the first two of those. The last two are M1.
+
+**Keychain, untested on a Mac.** `MacKeychain` is the only code in the crate
+that cannot run in CI. Everything above it is tested through `MemoryBackend`,
+and the macOS calls were type-checked against `security-framework` for
+`aarch64-apple-darwin`, but no test has written to a real keychain yet. The
+first run on the Mac should save, load and re-save one realm's generations
+under a throwaway service name before trusting it with the real refresh token.
 
 ---
 
 ## 2. What to build, in order
 
-### 2.1 `KeychainTokenStore`
+### 2.1 `KeychainTokenStore` — built, see §1
 
 Implement the existing `auth::TokenStore` trait against the macOS keychain.
 
@@ -155,7 +164,7 @@ Report actual row counts and wall-clock time. The brief is explicit that these
 are measured and reported, never asserted. Expect roughly nine thousand invoices
 and tens of thousands of documents in total, going back to 2012.
 
-### 2.5 CDC poll loop
+### 2.5 CDC poll loop — built, see §1
 
 15 seconds focused, 5 minutes idle, both configurable.
 

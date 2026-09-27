@@ -31,7 +31,7 @@ than engineering judgement.
 ## Build
 
 ```sh
-cargo test          # 128 tests, all offline
+cargo test          # 203 tests, all offline
 cargo clippy --all-targets
 cargo run --bin qbo-local
 ```
