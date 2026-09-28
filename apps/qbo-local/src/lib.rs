@@ -40,6 +40,8 @@ pub mod domain;
 pub mod driver;
 pub mod fixture;
 pub mod http;
+#[cfg(target_os = "macos")]
+pub mod keychain;
 pub mod mcp;
 pub mod oauth;
 pub mod outbox;

@@ -27,6 +27,8 @@ pub enum AuthError {
     Corrupt(#[from] serde_json::Error),
     #[error("no usable token generation remains for realm {0}; re-authorisation required")]
     Lockout(RealmId),
+    #[error("keychain: {0}")]
+    Keychain(String),
 }
 
 /// How many previous generations to retain (§5.2).

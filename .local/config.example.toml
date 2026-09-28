@@ -2,6 +2,11 @@
 # values. `.local/` is gitignored in full except for this example
 # (HANDOFF.md §0); nothing you put in the real copy ever reaches git.
 
+# Where OAuth tokens live. Omitted: "keychain" on macOS (the login keychain,
+# service com.aquamentor.qbo-local.tokens, one item per realm), "file" (under
+# tokens_dir) everywhere else. Must sit above the first [table] header.
+# token_store = "keychain"
+
 [intuit]
 # From the Intuit developer app (HANDOFF.md §0).
 client_id = "YOUR_INTUIT_CLIENT_ID"

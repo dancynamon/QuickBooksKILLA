@@ -25,7 +25,7 @@ use uuid::Uuid;
 use qbo_local::auth::{FileTokenStore, TokenGenerations, TokenStore};
 use qbo_local::client::{MockQbo, QboClient, ReportName, ReportParams};
 use qbo_local::clock::{Clock, SystemClock};
-use qbo_local::config::LocalConfig;
+use qbo_local::config::{LocalConfig, TokenStoreKind};
 use qbo_local::daemon::{Cadence, Daemon, DaemonOptions, Tick};
 use qbo_local::domain::{EntityType, RealmId, SyncTier};
 use qbo_local::driver::{SyncDriver, SyncOptions, SyncPath, SyncReport};
@@ -107,6 +107,7 @@ fn main() -> ExitCode {
 enum Command {
     Status {
         db: Option<PathBuf>,
+        config: Option<PathBuf>,
     },
     Init {
         db: PathBuf,
@@ -117,6 +118,11 @@ enum Command {
         realm: RealmId,
         port: Option<u16>,
         config: Option<PathBuf>,
+    },
+    ImportToken {
+        realm: RealmId,
+        config: Option<PathBuf>,
+        force: bool,
     },
     Daemon {
         db: PathBuf,
@@ -215,9 +221,10 @@ const USAGE: &str = "\
 qbo-local — local SQLite replica of QuickBooks Online
 
 USAGE:
-    qbo-local status [--db PATH]
+    qbo-local status [--db PATH] [--config PATH]
     qbo-local init --db PATH --realm ID --name \"Display Name\"
     qbo-local auth --realm ID [--port N] [--config PATH]
+    qbo-local import-token --realm ID [--config PATH] [--force] < refresh-token
     qbo-local daemon --db PATH --realm ID [--focused-secs N] [--idle-secs N]
                       [--snapshot-dir DIR --keep N] [--snapshot-hour-utc H]
                       [--once] (--live [--config PATH] | --mock)
@@ -234,12 +241,21 @@ USAGE:
 
 SUBCOMMANDS:
     status      Print the M0 foundations, and sync status per realm with --db.
+                With --config (or when .local/config.toml exists), also
+                whether each configured realm holds tokens — fingerprints
+                and expiry times only, never a token.
     init        Open (creating if absent) a file store and register a realm.
                 Idempotent — registering an existing realm is not an error.
     auth        Run the OAuth loopback flow and save generation zero for a
-                realm through FileTokenStore. (The macOS keychain backend
-                arrives when this runs on Dan's machine — HANDOFF.md §2.1;
-                FileTokenStore is the store everywhere else, tests included.)
+                realm through the configured token store: the macOS
+                keychain by default on a Mac (HANDOFF.md §2.1), the file
+                store elsewhere or with token_store = \"file\".
+    import-token
+                Read a refresh token for this app from stdin (one line, e.g.
+                from the Intuit OAuth Playground), exchange it once for a
+                fresh token set, and save that as generation zero. Prints a
+                fingerprint only. Refuses to overwrite existing tokens
+                without --force.
     daemon      Run the CDC poll loop against a realm until stopped.
     sweep       Run one reconciliation sweep against QBO's index.
     snapshot    Take one nightly-style backup of the replica, with rotation.
@@ -359,6 +375,7 @@ fn parse(args: &[String]) -> Result<Command, UsageError> {
         "status" => parse_status(args),
         "init" => parse_init(args),
         "auth" => parse_auth(args),
+        "import-token" => parse_import_token(args),
         "daemon" => parse_daemon(args),
         "sweep" => parse_sweep(args),
         "snapshot" => parse_snapshot(args),
@@ -413,13 +430,34 @@ fn parse_date(raw: &str, flag: &str) -> Result<NaiveDate, UsageError> {
 
 fn parse_status(mut args: Args<'_>) -> Result<Command, UsageError> {
     let mut db = None;
+    let mut config = None;
     while let Some(flag) = args.next() {
         match flag.as_str() {
             "--db" => db = Some(PathBuf::from(next_value(&mut args, "--db")?)),
+            "--config" => config = Some(PathBuf::from(next_value(&mut args, "--config")?)),
             other => return Err(UsageError::unknown_flag(other)),
         }
     }
-    Ok(Command::Status { db })
+    Ok(Command::Status { db, config })
+}
+
+fn parse_import_token(mut args: Args<'_>) -> Result<Command, UsageError> {
+    let mut realm = None;
+    let mut config = None;
+    let mut force = false;
+    while let Some(flag) = args.next() {
+        match flag.as_str() {
+            "--realm" => realm = Some(parse_realm(&next_value(&mut args, "--realm")?)?),
+            "--config" => config = Some(PathBuf::from(next_value(&mut args, "--config")?)),
+            "--force" => force = true,
+            other => return Err(UsageError::unknown_flag(other)),
+        }
+    }
+    Ok(Command::ImportToken {
+        realm: realm.ok_or_else(|| UsageError::missing_flag("--realm"))?,
+        config,
+        force,
+    })
 }
 
 fn parse_init(mut args: Args<'_>) -> Result<Command, UsageError> {
@@ -748,13 +786,18 @@ fn runtime<E: std::fmt::Display>(error: E) -> CommandError {
 
 fn execute(command: Command) -> Result<(), CommandError> {
     match command {
-        Command::Status { db } => run_status(db),
+        Command::Status { db, config } => run_status(db, config.as_deref()),
         Command::Init { db, realm, name } => run_init(&db, &realm, &name),
         Command::Auth {
             realm,
             port,
             config,
         } => run_auth(&realm, port, config.as_deref()),
+        Command::ImportToken {
+            realm,
+            config,
+            force,
+        } => run_import_token(&realm, config.as_deref(), force),
         Command::Daemon {
             db,
             realm,
@@ -855,7 +898,7 @@ fn build_http_client(
     let secret = config.client_secret().map_err(runtime)?;
     let redirect_uri = format!("http://localhost:{}/callback", config.intuit.redirect_port);
     let oauth_config = OAuthConfig::intuit(config.intuit.client_id.clone(), secret, redirect_uri);
-    let token_store: Box<dyn TokenStore> = Box::new(FileTokenStore::new(&config.tokens_dir));
+    let (token_store, _) = open_token_store(&config)?;
     let tokens = TokenSource::new(token_store, oauth_config, realm.clone());
     Ok(HttpQboClient::new(
         config.base_url(),
@@ -864,9 +907,34 @@ fn build_http_client(
     ))
 }
 
+/// The token store `config` selects (`token_store`, defaulting to the
+/// keychain on macOS), plus a one-line description for messages. Every path
+/// that reads or writes tokens goes through here so `auth`, `import-token`,
+/// `status` and `--live` can never disagree about where tokens live.
+fn open_token_store(
+    config: &LocalConfig,
+) -> Result<(Box<dyn TokenStore>, String), CommandError> {
+    match config.token_store_kind() {
+        TokenStoreKind::File => Ok((
+            Box::new(FileTokenStore::new(&config.tokens_dir)),
+            format!("file store {}", config.tokens_dir.display()),
+        )),
+        #[cfg(target_os = "macos")]
+        TokenStoreKind::Keychain => {
+            let store = qbo_local::keychain::KeychainTokenStore::new();
+            let description = format!("macOS keychain, service {}", store.service());
+            Ok((Box::new(store), description))
+        }
+        #[cfg(not(target_os = "macos"))]
+        TokenStoreKind::Keychain => Err(CommandError::Runtime(
+            "token_store = \"keychain\" needs macOS; use token_store = \"file\" here".to_string(),
+        )),
+    }
+}
+
 // -- status -------------------------------------------------------------
 
-fn run_status(db: Option<PathBuf>) -> Result<(), CommandError> {
+fn run_status(db: Option<PathBuf>, config: Option<&Path>) -> Result<(), CommandError> {
     println!("qbo-local — M0 foundations");
     println!();
 
@@ -916,8 +984,45 @@ fn run_status(db: Option<PathBuf>) -> Result<(), CommandError> {
         }
     }
 
+    print_token_status(config)?;
+
     println!("  writes: disabled for every realm until explicitly enabled");
     println!("  generated at {}", Utc::now().to_rfc3339());
+    Ok(())
+}
+
+/// Whether each configured realm is authorised: which store, and for the
+/// current generation its fingerprint and expiry times. Never a token. Runs
+/// when `--config` is given, or silently when the default config exists.
+fn print_token_status(config: Option<&Path>) -> Result<(), CommandError> {
+    let path = match config {
+        Some(path) => path.to_path_buf(),
+        None if Path::new(DEFAULT_CONFIG_PATH).exists() => PathBuf::from(DEFAULT_CONFIG_PATH),
+        None => return Ok(()),
+    };
+    let config = LocalConfig::load(&path).map_err(runtime)?;
+    let (store, description) = open_token_store(&config)?;
+    let now = Utc::now();
+    println!("  tokens ({description})");
+    for configured in &config.realms {
+        let realm = config.realm(&configured.id).map_err(runtime)?;
+        match store.load(&realm).map_err(runtime)? {
+            None => println!("    {realm} : NOT AUTHORISED (no tokens)"),
+            Some(generations) => {
+                let state = match generations.newest_usable(now) {
+                    Ok(_) => "authorised",
+                    Err(_) => "LOCKED OUT (every refresh token expired)",
+                };
+                let current = &generations.current;
+                println!("    {realm} : {state}");
+                println!("      refresh token     : {}", current.fingerprint());
+                println!("      access expires    : {}", current.access_expires_at().to_rfc3339());
+                println!("      refresh expires   : {}", current.refresh_expires_at().to_rfc3339());
+                println!("      generations kept  : {}", 1 + generations.previous.len());
+            }
+        }
+    }
+    println!();
     Ok(())
 }
 
@@ -1015,9 +1120,8 @@ fn run_init(db: &Path, realm: &RealmId, name: &str) -> Result<(), CommandError> 
 // -- auth -------------------------------------------------------------------
 
 /// Run the OAuth loopback flow for one realm and save generation zero
-/// through [`FileTokenStore`] (`HANDOFF.md` §2.1, §2.2). The keychain-backed
-/// store arrives when this runs on Dan's machine; `FileTokenStore` is the
-/// store everywhere else, `--live` included.
+/// through the configured token store ([`open_token_store`]: the keychain on
+/// macOS, `FileTokenStore` elsewhere). `HANDOFF.md` §2.1, §2.2.
 fn run_auth(
     realm: &RealmId,
     port: Option<u16>,
@@ -1053,12 +1157,65 @@ fn run_auth(
         oauth::exchange_code(&oauth_config, &auth_code.code, &agent).map_err(runtime)?;
 
     let generations = TokenGenerations::new(realm.clone(), token_set);
-    let store = FileTokenStore::new(&config.tokens_dir);
+    let (store, description) = open_token_store(&config)?;
     store.save(&generations).map_err(runtime)?;
 
     println!(
-        "Saved generation zero for realm {realm} to {}",
-        config.tokens_dir.display()
+        "Saved generation zero for realm {realm} ({}) to the {description}",
+        generations.current.fingerprint()
+    );
+    Ok(())
+}
+
+// -- import-token -------------------------------------------------------------
+
+/// Import a refresh token obtained elsewhere for this same Intuit app — the
+/// OAuth Playground, or another tool's store — as generation zero
+/// (`HANDOFF.md` §0, `ROADMAP.md` decision 4).
+///
+/// The token is read from stdin so it never appears in argv, shell history
+/// or `ps`. It is exchanged once straight away: that proves it is live for
+/// this client id and yields a complete [`TokenSet`] (access token and both
+/// expiries) rather than a half-filled one. **The exchange rotates it** — if
+/// another tool still holds the same refresh token, that tool's copy goes
+/// stale on Intuit's schedule, so import a token minted for qbo-local, not a
+/// shared one.
+fn run_import_token(
+    realm: &RealmId,
+    config_path: Option<&Path>,
+    force: bool,
+) -> Result<(), CommandError> {
+    let path = config_path.unwrap_or(Path::new(DEFAULT_CONFIG_PATH));
+    let config = LocalConfig::load(path).map_err(runtime)?;
+    config.realm(realm.as_str()).map_err(runtime)?;
+    let (store, description) = open_token_store(&config)?;
+    if !force && store.load(realm).map_err(runtime)?.is_some() {
+        return Err(CommandError::Runtime(format!(
+            "realm {realm} already has tokens in the {description}; pass --force to replace them"
+        )));
+    }
+
+    let mut line = String::new();
+    std::io::stdin().lock().read_line(&mut line).map_err(runtime)?;
+    let refresh_token = line.trim();
+    if refresh_token.is_empty() {
+        return Err(CommandError::Runtime(
+            "no refresh token on stdin".to_string(),
+        ));
+    }
+
+    let secret = config.client_secret().map_err(runtime)?;
+    let redirect_uri = format!("http://localhost:{}/callback", config.intuit.redirect_port);
+    let oauth_config = OAuthConfig::intuit(config.intuit.client_id.clone(), secret, redirect_uri);
+    let agent = ureq::AgentBuilder::new().build();
+    let token_set = oauth::refresh(&oauth_config, refresh_token, &agent).map_err(runtime)?;
+
+    let generations = TokenGenerations::new(realm.clone(), token_set);
+    store.save(&generations).map_err(runtime)?;
+    println!(
+        "Imported generation zero for realm {realm} ({}) into the {description}; refresh expires {}",
+        generations.current.fingerprint(),
+        generations.current.refresh_expires_at().to_rfc3339()
     );
     Ok(())
 }
@@ -1563,7 +1720,13 @@ mod tests {
 
     #[test]
     fn status_defaults_to_no_db() {
-        assert_eq!(parse(&args(&["status"])), Ok(Command::Status { db: None }));
+        assert_eq!(
+            parse(&args(&["status"])),
+            Ok(Command::Status {
+                db: None,
+                config: None
+            })
+        );
     }
 
     #[test]
@@ -1571,9 +1734,24 @@ mod tests {
         assert_eq!(
             parse(&args(&["status", "--db", "replica.db"])),
             Ok(Command::Status {
-                db: Some(PathBuf::from("replica.db"))
+                db: Some(PathBuf::from("replica.db")),
+                config: None
             })
         );
+    }
+
+    #[test]
+    fn import_token_needs_a_realm_and_takes_force() {
+        assert_eq!(
+            parse(&args(&["import-token", "--realm", "123", "--force"])),
+            Ok(Command::ImportToken {
+                realm: RealmId::parse("123").unwrap(),
+                config: None,
+                force: true
+            })
+        );
+        assert!(parse(&args(&["import-token"])).is_err());
+        assert!(parse(&args(&["import-token", "--realm", "1", "--token", "x"])).is_err());
     }
 
     #[test]

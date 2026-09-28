@@ -53,6 +53,17 @@ fn default_rotation_log() -> PathBuf {
     PathBuf::from(".local/rotation-log.jsonl")
 }
 
+/// Which [`crate::auth::TokenStore`] backend `--live` and `auth` use.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TokenStoreKind {
+    /// `keychain::KeychainTokenStore` — macOS only, and the default there
+    /// (`HANDOFF.md` §3.5: secrets keychain-only).
+    Keychain,
+    /// [`crate::auth::FileTokenStore`] under `tokens_dir`.
+    File,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct IntuitConfig {
     pub client_id: String,
@@ -76,6 +87,10 @@ pub struct RealmConfig {
 #[derive(Debug, Clone, Deserialize)]
 pub struct LocalConfig {
     pub intuit: IntuitConfig,
+    /// Where tokens live. Omitted: the keychain on macOS, the file store
+    /// everywhere else ([`LocalConfig::token_store_kind`]).
+    #[serde(default)]
+    pub token_store: Option<TokenStoreKind>,
     #[serde(default, rename = "realms")]
     pub realms: Vec<RealmConfig>,
     #[serde(default = "default_tokens_dir")]
@@ -109,6 +124,14 @@ impl LocalConfig {
                     .filter(|value| !value.is_empty())
             })
             .ok_or(ConfigError::MissingClientSecret)
+    }
+
+    pub fn token_store_kind(&self) -> TokenStoreKind {
+        self.token_store.unwrap_or(if cfg!(target_os = "macos") {
+            TokenStoreKind::Keychain
+        } else {
+            TokenStoreKind::File
+        })
     }
 
     pub fn base_url(&self) -> &'static str {
@@ -236,5 +259,30 @@ mod tests {
         );
         assert_eq!(without_secret.client_secret().unwrap(), "from-env");
         std::env::remove_var("QBO_CLIENT_SECRET");
+    }
+
+    #[test]
+    fn the_token_store_defaults_per_platform_and_can_be_forced() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = write(
+            directory.path(),
+            "[intuit]\nclient_id = \"x\"\n[[realms]]\nid = \"1\"\nname = \"A\"\n",
+        );
+        let config = LocalConfig::load(&path).unwrap();
+        let expected = if cfg!(target_os = "macos") {
+            TokenStoreKind::Keychain
+        } else {
+            TokenStoreKind::File
+        };
+        assert_eq!(config.token_store_kind(), expected);
+
+        let path = write(
+            directory.path(),
+            "token_store = \"file\"\n[intuit]\nclient_id = \"x\"\n",
+        );
+        assert_eq!(
+            LocalConfig::load(&path).unwrap().token_store_kind(),
+            TokenStoreKind::File
+        );
     }
 }
