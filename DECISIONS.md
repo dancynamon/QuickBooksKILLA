@@ -454,3 +454,24 @@ a twelve-month one.
 year, and the only way to make the date was to shorten the parallel-run bar.
 *Rejected: open the new books on the cutover date.* A mid-year opening splits
 FY2027 across two systems and makes the year-end package a merge.
+
+## D25 — The four ⚠️ API facts, checked against Intuit's own pages
+
+28 Sep 2026, Cowork session on Dan's machine, pages read in Chrome
+(developer.intuit.com renders client-side; plain fetchers get an empty shell).
+
+| # | Claim | Intuit says | Verdict | Code |
+|---|---|---|---|---|
+| 1 | Batch 120/min/realm | Limits page: "Throttled at 40 Batch requests per minute, per realm ID and app" and "120 Batch requests per minute per realm ID"; general 500/min/realm, 10/s per realm and app; 429 → wait 60 s; query max 1000 rows | **Wrong for us**: one app per realm, so 40 binds | `RealmLimits::default().batch` 120 → 40 |
+| 2 | `RequestId` does not dedupe Customer/Item | Help article "What is RequestId and its usage": same RequestId → "sends the same response as it did for the original request"; max 50 chars (36 for batch). No entity exceptions listed | **Unconfirmed either way**; Intuit states no exception | None. The query-before-create guard stays (harmless if coverage is total). Settle empirically in the sandbox if Phase C is ever built (D24 defers it) |
+| 3 | CDC exclusion list | CDC page: "all API entities except" JournalCode, TaxAgency, TimeActivity, TaxCode, TaxRate | **Obtained** | `sync::CDC_EXCLUDED` = TaxCode, TaxRate; `cdc_coverage_confirmed` returns false for them. Before this they were CDC-polled and would silently never refresh |
+| 4 | CDC lookback 30 days | CDC page: "CDC operations can track changes within the last 30 days"; "a maximum of 1,000 objects" | **Confirmed** | None (`CDC_LOOKBACK_DAYS` = 30, max-age 25) |
+| 5 | Query supports a `LastUpdatedTime` range (D12 backfill) | Query page: multiple filters joined with AND, range example on `MetaData.CreateTime >= … AND <= …`; OR unsupported; Id supports only = and IN | **Syntax confirmed**; `LastUpdatedTime` filterability is per entity in the API reference. Proven for real on the first live truncation backfill | None |
+
+URLs: developer.intuit.com/app/developer/qbo/docs/learn/limits-and-throttles ·
+…/explore-the-quickbooks-online-api/change-data-capture ·
+…/explore-the-quickbooks-online-api/data-queries ·
+help.developer.intuit.com/s/article/What-is-RequestId-and-its-usage.
+
+DESIGN §0 and §4.4 updated. Phase C's gate (verified facts) is now met except
+item 2, which only a sandbox can settle.

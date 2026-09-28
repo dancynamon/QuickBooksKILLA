@@ -126,15 +126,22 @@ pub fn classify_response_with_cap(returned: usize, cap: usize) -> CdcOutcome {
 
 /// Whether CDC is known to cover this entity type.
 ///
-/// ⚠️ §0 records the exact CDC exclusion list as unverified against Intuit's own
-/// documentation (open item 1). The tiers are the honest split available now:
-/// masters and documents are the entities CDC is documented to serve, and the
-/// peripheral tier is where the uncertainty sits. Unconfirmed means the full
-/// sweep, which §4.3 treats as the correctness baseline rather than a fallback —
-/// so being wrong here costs bandwidth, not accuracy.
+/// Intuit's CDC page (verified 28 Sep 2026, D25) documents CDC for "all API
+/// entities except" JournalCode, TaxAgency, TimeActivity, TaxCode and TaxRate.
+/// Of the types this replica syncs, TaxCode and TaxRate are on that list: a
+/// CDC poll would silently never see them change, so they always take the
+/// sweep path. The peripheral tier stays unconfirmed as before; §4.3 treats
+/// the sweep as the correctness baseline, so being conservative here costs
+/// bandwidth, not accuracy.
 pub fn cdc_coverage_confirmed(entity_type: EntityType) -> bool {
-    entity_type.tier() != crate::domain::SyncTier::Peripheral
+    !CDC_EXCLUDED.contains(&entity_type)
+        && entity_type.tier() != crate::domain::SyncTier::Peripheral
 }
+
+/// Entity types Intuit documents as not served by CDC, restricted to the ones
+/// [`EntityType`] models (JournalCode, TaxAgency and TimeActivity are not
+/// replicated). D25.
+pub const CDC_EXCLUDED: [EntityType; 2] = [EntityType::TaxCode, EntityType::TaxRate];
 
 impl SyncCursor {
     pub fn new(realm_id: RealmId, entity_type: EntityType) -> Self {
@@ -245,6 +252,16 @@ mod tests {
         // path over the faster possibly-incomplete one.
         let strategy = plan_sync(&cursor(Some(at(0))), at(25), max_age(), true);
         assert!(matches!(strategy, SyncStrategy::FullSweep { .. }));
+    }
+
+    #[test]
+    fn the_documented_cdc_exclusions_are_never_polled() {
+        // D25: Intuit's CDC page excludes TaxCode and TaxRate.
+        assert!(!cdc_coverage_confirmed(EntityType::TaxCode));
+        assert!(!cdc_coverage_confirmed(EntityType::TaxRate));
+        assert!(cdc_coverage_confirmed(EntityType::Customer));
+        assert!(cdc_coverage_confirmed(EntityType::Invoice));
+        assert!(cdc_coverage_confirmed(EntityType::JournalEntry));
     }
 
     #[test]

@@ -16,8 +16,10 @@ Decisions taken during review are logged in `DECISIONS.md`.
 ## 0. Verified API facts, and where the kickoff prompt was wrong
 
 The kickoff prompt asked for every API claim to be verified against current Intuit
-documentation and cited. **`developer.intuit.com` is blocked by this environment's
-network egress policy**, so the primary source was unreachable. What follows was
+documentation and cited. **`developer.intuit.com` was blocked by the cloud session's
+network egress policy**, so the primary source was unreachable when this was
+written. **Update 28 Sep 2026 (D25):** read in a real browser on Dan's machine; the
+confidence column below now cites Intuit where it could. What follows was
 verified against secondary sources and is marked with a confidence level. Anything
 below marked ⚠️ must be confirmed against Intuit's own docs before the write path
 (M2) is built.
@@ -27,13 +29,13 @@ below marked ⚠️ must be confirmed against Intuit's own docs before the write
 | ~500 req/min per realm | Confirmed: 500/min per realm ID | High — consistent across sources |
 | ~10 concurrent per company | Confirmed | High |
 | ~200/min on some report endpoints | Confirmed: resource-intensive endpoints drop to 200/min | Medium |
-| **~40 batch req/min** | **Wrong — now 120/min per realm**, changed 31 Oct 2025 | Medium ⚠️ |
+| **~40 batch req/min** | **Right after all:** 120 batch req/min per realm, but *throttled at 40/min per realm and app*; one app per realm, so 40 binds (D25) | **High — Intuit limits page, 28 Sep 2026** |
 | 30 operations per batch | Confirmed | High |
 | `STARTPOSITION`/`MAXRESULTS`, 1000 rows max | Confirmed | High |
-| CDC lookback ~30 days | Confirmed: up to 30 days | High |
+| CDC lookback ~30 days | Confirmed: "CDC operations can track changes within the last 30 days"; max 1,000 objects per response | **High — Intuit CDC page, 28 Sep 2026** |
 | CDC includes deletes | Confirmed | High |
-| CDC covers which entities? | "All entities except…" — **exclusion list not obtained** | Unknown ⚠️ |
-| `RequestId` gives idempotency | Confirmed generally — **but reportedly does NOT apply to Customer or Item** | Medium ⚠️ |
+| CDC covers which entities? | All entities except JournalCode, TaxAgency, TimeActivity, TaxCode, TaxRate. TaxCode and TaxRate are replicated here, so they always sweep (D25) | **High — Intuit CDC page, 28 Sep 2026** |
+| `RequestId` gives idempotency | Confirmed generally ("the service sends the same response as it did for the original request"); max 50 chars, 36 for batch. **Intuit documents no Customer/Item exception**; the exception remains a secondary-source report, unconfirmed. Query-before-create guard kept (D25) | Medium ⚠️ — settle against sandbox in C |
 
 Two of these change the design materially and are handled below: the batch limit
 (§4.4) and the `RequestId` gap on Customer/Item (§6.5).
@@ -514,7 +516,7 @@ constants:
 | Bucket | Budget | Note |
 |---|---|---|
 | General | 500/min/realm | |
-| Batch | **120/min/realm** | Corrects prompt's ~40; changed Oct 2025 ⚠️ |
+| Batch | **40/min per realm and app** | Intuit: 120/min/realm, throttled 40/min/realm/app; D25 |
 | Reports | 200/min/realm | Resource-intensive endpoints |
 | Concurrency | 10 in flight/realm | Semaphore, not a bucket |
 
