@@ -36,7 +36,7 @@ in its §13 come back answered.
 ## Build
 
 ```sh
-cargo test          # 669 tests, all offline
+cargo test          # 672 tests, all offline
 cargo clippy --all-targets
 cargo run --bin qbo-local -- --help
 cargo run --bin ledger -- --help

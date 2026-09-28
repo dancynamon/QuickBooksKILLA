@@ -1,3 +1,40 @@
+# Kickoff — what is left, and how to run it
+
+**Updated 28 Sep 2026.** Steps 1–3 of the original prompt below are done
+(D24 plan change, D25 API facts, `KeychainTokenStore`, `import-token`,
+`status --config`; `.local/config.toml` converted). The rest needs the Mac's
+own shell — `cargo`, the login keychain, a long-running daemon — which a
+Cowork session does not have (its shell is a Linux VM; Terminal is
+click-only). Run it from Terminal on the Mac:
+
+```sh
+cd ~/code/QuickBooksKILLA
+tools/m0-live.sh build keychain     # offline suite + real keychain round trip
+tools/m0-live.sh tokens             # paste a Playground-minted refresh token
+tools/m0-live.sh sync fixtures ledger daemon
+```
+
+Logs land in `.local/m0-run/` (row counts, `wall_clock_secs`, the tbdiff
+report). A Cowork session then reads those logs, records the counts and the
+tbdiff baseline in `DECISIONS.md`, reads every scrubbed fixture before
+committing it, and ticks `ACCEPTANCE.md`.
+
+Corrections to the prompt below:
+
+- `HttpQboClient`, the OAuth loopback flow and `--live` **exist** (13 Sep,
+  `38db865`). A clone 16 commits behind origin is what made them look absent.
+- **Do not import `qbo-transaction-jumper`'s refresh token.** That server
+  refreshes `tokens.json` itself; importing its token forks one rotation chain
+  between two holders and one of them loses. Mint a token for qbo-local in the
+  Intuit OAuth Playground (the redirect that is registered on the app) and
+  `import-token` it. `qbo-local auth` works only if
+  `http://localhost:8765/callback` is also registered.
+- The client secret stays in `.local/config.toml` (Dan, 28 Sep);
+  `QBO_CLIENT_SECRET` still overrides it when set.
+- Step 8 (Tauri) is M1 and not part of this run.
+
+---
+
 # Kickoff prompt — paste this into the Mac session
 
 TIER: Sonnet is enough for everything here except step 1, which is reading and

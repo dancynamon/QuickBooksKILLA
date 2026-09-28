@@ -65,12 +65,11 @@ Built and tested:
 | `store::query` | Read-only query API for the UI and the ledger import |
 | `http`, `oauth`, `config` | Live transport, OAuth loopback flow, `.local/config.toml` (§2.2, §2.3) |
 
-**Not built:** the macOS keychain token backend (§2.1 — `FileTokenStore` is
-the store everywhere else, `--live` included), wiring the daemon into a Tauri
-shell and its front-end.
-
-The keychain backend is the one item left from M0's original list. The Tauri
-shell is M1. `ROADMAP.md` has the phases.
+**Built 28 Sep:** `KeychainTokenStore` (§2.1, `keychain.rs`), the default
+token store on macOS via `token_store` in `.local/config.toml`;
+`qbo-local import-token`; `status --config`. **Not built:** wiring the daemon
+into a Tauri shell and its front-end (M1). What remains of M0 is running it
+live on the Mac — `tools/m0-live.sh`, `docs/cowork-mac-session/KICKOFF.md`.
 
 **Built in the cloud on 13 Sep** — `apps/qbo-local/src/http.rs`
 (`HttpQboClient`, implementing `client::QboClient` over real HTTP),
