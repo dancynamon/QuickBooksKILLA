@@ -415,3 +415,42 @@ the cent.* That would make line E's whole reason for existing — catching a
 line that disagrees with the tax account — invisible exactly when rounding
 is the only thing separating them, which is the common case, not the rare
 one.
+
+## D24 — Quarterly cutover: books open 1/1/27, QBO stays the entry point until cutover
+
+28 Sep 2026, Dan.
+
+Replaces the 1/1/27-cutover / 1/1/28-fallback plan (ROADMAP §F as of 11 Sep).
+
+- **New books open 1 January 2027** with opening balances as of 31 December
+  2026, taken from QBO.
+- **January–March 2027: QBO stays the entry point.** The nightly
+  `ledger import` + `ledger tbdiff` is the parallel run and backfills Q1 into
+  the new books as it goes.
+- **After Joel's FY2026 close**, re-apply the opening balances (his adjusting
+  entries move 12/31/26) and lock 12/31/26 and earlier.
+- **Go/no-go ~15 March 2027; cutover 1 April 2027.** A no-go rolls to the next
+  quarter boundary: 7/1/27, 10/1/27, 1/1/28. The parallel run continues until
+  one is clean. **FY2027 lives whole in the new books** regardless of which
+  quarter cutover lands on.
+- **Q1 2027 sales tax is filed from QBO**; the own four-line report runs
+  alongside as a check.
+- **Phase C (outbox live to QBO) becomes optional and deferred.** QBO is
+  current because it is the entry point until cutover; nothing needs mirroring
+  to it. Reprioritised ahead of it: write UI into the own store, skill
+  repointing via `ledger-mcp`, Authorize.net, Joel's written sign-off.
+- **October–November 2026: practice parallel run** on Q3/Q4 2026 data, to
+  surface posting-policy differences early while there is time to decide them
+  with Joel.
+
+Why: the 1/1/27 cutover needed a full quarter of parallel run starting ~1 Oct,
+and Phase A had not started. Opening the books on a year boundary but cutting
+over on a quarter boundary keeps the fiscal year whole, keeps QBO as the
+single entry point (so there is no dual entry and no write path to production
+QBO before cutover), and turns a missed date into a three-month slip instead of
+a twelve-month one.
+
+*Rejected: keep 1/1/27 as the cutover with a 1/1/28 fallback.* A miss costs a
+year, and the only way to make the date was to shorten the parallel-run bar.
+*Rejected: open the new books on the cutover date.* A mid-year opening splits
+FY2027 across two systems and makes the year-end package a merge.

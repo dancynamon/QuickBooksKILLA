@@ -9,9 +9,12 @@ Dan restated the goals. Companion to `HANDOFF.md` (how to finish M0) and
 1. **Speed and UI over the QBO book.** Every lookup local, every screen faster
    than the browser, QBO's own model as the guide. This is `qbo-local`, M0 and
    M1, and it pays off on its own.
-2. **Own accounting software, decoupled from QBO.** The ledger project. Target
-   cutover **1 January 2027**, fallback **1 January 2028** (Dan, 11 Sep 2026;
-   fiscal year is calendar year per D7, so cutover is a year boundary).
+2. **Own accounting software, decoupled from QBO.** The ledger project. The
+   new books **open 1 January 2027** with opening balances as of 31 December
+   2026; the **cutover** (the day the new books become the entry point) is
+   **1 April 2027**, rolling quarterly (7/1, 10/1, 1/1/28) if the parallel run
+   is not clean. FY2027 lives whole in the new books either way (D24, 28 Sep
+   2026, replacing the 1/1/27-cutover / 1/1/28-fallback plan of 11 Sep).
 
 The revision this document makes over the first draft: the ledger is the main
 line, not a "later" item, and everything built for goal 1 has to be an on-ramp
@@ -190,23 +193,33 @@ liability, undeposited funds), and record each one in `DECISIONS.md`.
 
 ---
 
-## C. M2 — outbox live against sandbox
+## C. M2 — outbox live against sandbox (optional, deferred — D24)
 
-Gate: the ⚠️ facts verified. The `RequestId` scope on Customer and Item decides
-whether the adopt path is a guard or the whole mechanism.
+Under the quarterly cutover QBO stays the **entry point** until cutover, so it
+is current by construction and nothing has to be pushed to it. The outbox-live
+work below is no longer on the critical path; it is kept, specified, for the
+case where some document class has to be entered in the own store first and
+mirrored to QBO before cutover. It does not start unless that case appears.
 
-1. `HttpQboClient::create` and `update` against an Intuit sandbox company.
-2. `RequestId` reuse on retry checked against real responses.
-3. Chaos and convergence tests pass against the sandbox, not only the mock.
-4. Failure inbox in the UI: `conflicted` and `rejected` records with the QBO
-   response and the resolution actions.
+What moves ahead of it, in order:
 
-Acceptance: zero duplicates under induced network failure. `is_write_enabled`
-stays 0 for both production realms throughout.
+1. **Write UI into the own store** (§D, without the QBO leg): invoice, PO,
+   estimate, bill, receive payment, posting to the own ledger.
+2. **Skill repointing through `ledger-mcp`**: the Shopify, Amazon and
+   wholesale skills read and write the own store, not QBO.
+3. **Authorize.net**: hosted payment link on the own invoice, settlement
+   import (built) exercised against the live account.
+4. **Joel's sign-off** on accountant mode, in writing.
 
-Framing: this is the **export shim**. It is worth building only because QBO has
-to stay current for the CPA and bank feeds until cutover. Nothing here is the
-destination.
+If C is ever built, its spec is unchanged:
+
+- Gate: the ⚠️ facts verified. The `RequestId` scope on Customer and Item
+  decides whether the adopt path is a guard or the whole mechanism.
+- `HttpQboClient::create` and `update` against an Intuit sandbox company;
+  `RequestId` reuse on retry checked against real responses; chaos and
+  convergence tests against the sandbox; the failure inbox in the UI.
+- Acceptance: zero duplicates under induced network failure.
+  `is_write_enabled` stays 0 for both production realms throughout.
 
 ---
 
@@ -228,49 +241,63 @@ realm at a time, Aquamentor first. No delete, no void, in either book.
 
 ## E. Parallel run
 
-Both books post every document. Nightly:
+QBO is the entry point throughout; the own books are derived from it.
 
-- Trial balance, own ledger versus QBO `TrialBalance` report, same date. Any
-  variance is an unmissable error with the offending entries listed.
-- AR and AP aging diffed by customer and vendor.
-- Reconciliation sweep of the replica (Phase A) still runs, because the mirror
-  can drift independently of the ledger.
+**Practice run, October–November 2026**, on Q3 and Q4 2026 data. Its only job
+is to surface posting-policy differences early (ROADMAP risk 4), while there is
+still time to decide them with Joel before the real run starts. Variances found
+here become `DECISIONS.md` entries, not code patches to force a match.
 
-Minimum duration before cutover: **one full quarter with zero unexplained
-variance.** Explained variances are recorded in `DECISIONS.md` with the policy
-that produced them.
+**Real run, January–March 2027:**
+
+- The new books open 1/1/27 with opening balances as of 12/31/26, taken from
+  QBO (`ledger opening`).
+- Nightly: `qbo-local` daemon keeps the replica current, `ledger import`
+  backfills Q1 2027 into the new books, `ledger tbdiff` compares the own trial
+  balance with QBO's `TrialBalance` report for the same date. Any variance is
+  an unmissable error with the offending entries listed. AR and AP aging diffed
+  by customer and vendor. The replica reconciliation sweep still runs.
+- After Joel closes FY2026 in QBO, **re-apply the opening balances** (his
+  adjusting entries change 12/31/26) and **lock the period** 12/31/26 and
+  earlier in the new books.
+- Q1 2027 sales tax is **filed from QBO**; the own four-line report (§G) is run
+  alongside it as a check and its variance recorded.
+
+Bar for cutover: the quarter closes with zero unexplained TB variance.
+Explained variances are recorded in `DECISIONS.md` with the policy that
+produced them.
 
 ---
 
-## F. Cutover — 1 January 2027, fallback 1 January 2028
+## F. Cutover — 1 April 2027, rolling quarterly
 
-**Go/no-go on 1 November 2026.** Go requires all of:
+**Go/no-go around 15 March 2027.** Go requires all of:
 
-- Phase E has been running with zero unexplained TB variance for at least four
-  weeks, and will reach a full quarter by 31 December.
-- Phase G's blockers for the first quarter of 2027 are done: statement import
-  with match-and-clear, the sales-tax reports Dan actually files from, an
-  accountant mode Joel has seen and accepted in writing, and Authorize.net
-  wired for customer payments.
-- Channel intake (Shopify, Amazon, wholesale POs) lands in the own store
-  through the MCP server, and the skills that write orders have been repointed.
+- Q1 2027 parallel run with zero unexplained TB variance to date, on track to
+  close the quarter clean.
+- FY2026 opening balances re-applied after Joel's close, period locked.
+- Write UI into the own store in daily use for the document types Dan enters
+  (§C's reprioritised list, item 1).
+- Skills that write orders repointed through `ledger-mcp`.
+- Authorize.net live on the own invoice.
+- Accountant mode accepted by Joel in writing.
 
-If any of those is missing on 1 November, the target moves to 1/1/28 without
-argument, and the parallel run continues for all of 2027. That is the whole
-point of a fallback: a bad cutover costs a year of books, a late one costs
-nothing.
+**If it is a no-go**, nothing is lost: the cutover moves to the next quarter
+boundary — 1 July 2027, then 1 October 2027, then 1 January 2028 — and the
+parallel run simply continues, with a go/no-go about two weeks before each
+boundary. Because the new books opened on 1/1/27 and have been backfilled
+nightly, **FY2027 lives whole in the new books** whichever quarter cutover
+lands on; there is never a split fiscal year.
 
-At cutover: outbox off; QBO kept read-only for history and the FY2026 close; the
-replica retained as the import source it always was; FY2026 1099-NEC and the
-FY2026 tax package come from QBO, since the 2026 books live there.
+At cutover: QBO stops being the entry point and becomes read-only history. The
+FY2026 1099-NEC and tax package come from QBO. Sales tax for every quarter
+after cutover is filed from the own report. The outbox is not switched on at
+cutover: under D24 QBO is not mirrored after it.
 
-Honest read on 1/1/27: today is 11 September. Phase A has not started, needs
-the Mac, and a full quarter of parallel run means both books posting by
-1 October. That is not going to happen in three weeks. The realistic 1/1/27
-case is a parallel run from early November, checked at the go/no-go with the
-four-week bar rather than the quarter bar, and the quarter bar reached by
-31 December. It is a stretch, it is not impossible, and the fallback makes
-missing it cheap.
+Honest read: the Rust side has still not made one HTTP call to Intuit as of 28
+September. The practice run needs a live replica in October. That is the
+dependency to protect; everything after it has two quarters of slack before
+the first cutover date.
 
 ---
 
@@ -284,8 +311,8 @@ books in QBO, each scoped as its own item with its own acceptance:
 | Bank and credit-card statements | **Statement import** (Dan, 11 Sep): the CSV/OFX/QFX files the bank and Chase already generate, parsed into a `bank_lines` table, then a match-and-clear screen that pairs each line to a payment, deposit, bill payment or expense and flags the unmatched. Reconciliation is a per-statement close: beginning balance + cleared lines = ending balance, or it does not close | Plaid, if manual import ever becomes the bottleneck |
 | Sales tax | **Dan's actual quarterly method** (11 Sep): A = Total Income from the P&L for the quarter; B = total sales tax collected for the quarter (from the Sales Tax Liability Report); C = B / 6.625% = taxable sales; D = A - C = non-taxable sales. The own report reproduces exactly those four lines for a quarter and entity, from the ledger: A from income accounts, B from the sales-tax-payable account's credits, C and D derived. No tax engine. Line-level taxability stays in the projection for the day the derivation and the line totals disagree | Rate tables per jurisdiction if nexus ever widens |
 | 1099-NEC | **Out of scope** (Dan, 11 Sep). The vendor 1099 flag stays in the design as a column; nothing is generated | |
-| CPA handoff | **Accountant mode** (Dan, 11 Sep): a read-only role in the app with what QBO's accountant view gives Joel today. Scoped in `LEDGER-DESIGN.md`: period-locked view, GL detail and TB/P&L/BS exports, an adjusting-entry request queue Dan approves rather than direct posting, a reclassify tool, the close-history log from D7, and an audit trail of every change since the last close. Joel sees it before 1 November and accepts it in writing | A hosted read-only login instead of a local install |
-| Customer payments | **Authorize.net** (Dan, 11 Sep; D15 amended). QBO Payments is used sparingly and is not a hard blocker. The own invoice carries an Authorize.net hosted payment link; a settled payment posts as a customer payment against the invoice. Wire the account, the link, and the settlement import before the 1 November go/no-go | Card-present or ACH if ever needed |
+| CPA handoff | **Accountant mode** (Dan, 11 Sep): a read-only role in the app with what QBO's accountant view gives Joel today. Scoped in `LEDGER-DESIGN.md`: period-locked view, GL detail and TB/P&L/BS exports, an adjusting-entry request queue Dan approves rather than direct posting, a reclassify tool, the close-history log from D7, and an audit trail of every change since the last close. Joel sees it before the ~15 March 2027 go/no-go and accepts it in writing | A hosted read-only login instead of a local install |
+| Customer payments | **Authorize.net** (Dan, 11 Sep; D15 amended). QBO Payments is used sparingly and is not a hard blocker. The own invoice carries an Authorize.net hosted payment link; a settled payment posts as a customer payment against the invoice. Wire the account, the link, and the settlement import before the ~15 March 2027 go/no-go (D24) | Card-present or ACH if ever needed |
 | Channel intake | **MCP server over the own store** (Dan, 11 Sep). The Shopify, Amazon and wholesale skills in `claude-config` write to QBO through the QuickBooks MCP today; they get repointed to the own platform's MCP server rather than rewritten. The server exists (`qbo-local-mcp`, `docs/MCP.md`) with the 11 read tools; document-write tools arrive in Phase D. This is also how every other skill that reads QBO keeps working after cutover | Native channel integrations |
 | Payroll | Already SurePayroll; journal the summary. Not a blocker | |
 | Inventory quantities | QBO's inventory tracking is not used for foam; the own system's manufacturing costing replaces it after cutover | |
@@ -317,8 +344,9 @@ and has never fetched an invoice.
 
 ## Risks, ranked
 
-1. **The 1/1/27 date.** Mitigated entirely by the go/no-go and the fallback.
-   The one way it goes wrong is skipping the parallel-run bar to hit the date.
+1. **The cutover date.** Mitigated entirely by the go/no-go and the rolling
+   quarterly fallback (D24). The one way it goes wrong is skipping the
+   parallel-run bar to hit a date.
 2. **The four ⚠️ API facts**, baked into `RealmLimits::default`,
    `requires_query_before_create` and D12's backfill. Thirty minutes on a
    machine with access.
@@ -339,7 +367,7 @@ and has never fetched an invoice.
 
 | # | Decision | Status |
 |---|---|---|
-| 1 | Cutover date | 1/1/27 target, 1/1/28 fallback, go/no-go 1 Nov 2026 |
+| 1 | Cutover date | **Books open 1/1/27; cutover 4/1/27, rolling quarterly; go/no-go ~15 Mar 2027** (D24, 28 Sep 2026; replaces 1/1/27 cutover, 1/1/28 fallback) |
 | 2 | M1 UI stack | **A**, D14 |
 | 3 | The three posting policies in B2 | Open; needed before B' starts |
 | 4 | Reuse the `qbo_headless` refresh token or build the consent flow | Open; recommendation reuse if valid |
