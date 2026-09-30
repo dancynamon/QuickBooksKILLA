@@ -187,6 +187,9 @@ being a stub.
    of the import diffed against QBO's `TrialBalance` report for the same date.
    Non-zero variance blocks everything downstream.
 
+Channel ingest (Shopify, Amazon) is built on `feat/channel-sync`: D26,
+`docs/CHANNEL.md`. Walmart and Etsy are stubs.
+
 Step 4 is the first real test of whether the posting rules are right. Expect it
 to find policy differences (QBO's own treatment of inventory, sales tax
 liability, undeposited funds), and record each one in `DECISIONS.md`.

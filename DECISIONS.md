@@ -475,3 +475,23 @@ help.developer.intuit.com/s/article/What-is-RequestId-and-its-usage.
 
 DESIGN §0 and §4.4 updated. Phase C's gate (verified facts) is now met except
 item 2, which only a sandbox can settle.
+
+## D26 — Sales-channel ingest: Shopify and Amazon post through the ledger, per payout
+
+30 Sep 2026. Posting rules approved in `docs/CHANNEL_POSTING_MAP.md`; detail in
+`docs/CHANNEL.md`.
+
+- Gross revenue by product family (NonInventory-style families, class per
+  family), fees as a separate expense, facilitator tax excluded, channel
+  clearing accounts (1170-1173) that net to zero per payout.
+- Idempotent on a unique external key (`channel_postings`, migration 6). A
+  posting whose clearing does not equal the payout, or whose facilitator tax
+  does not net to zero, is quarantined, never plugged.
+- Order-level facts (`order_lines`) drive `ledger report channel-sales`;
+  the journal drives `channel-recon`. The two are separate on purpose.
+- *Rejected: post per order.* Payout-level posting is what the bank sees and
+  what clearing must tie to.
+- *Rejected: guess family for unknown SKUs.* They land in Custom / Other,
+  flagged.
+- Restatement of history stays gated per month (posting map); Walmart and Etsy
+  are stubs until real exports exist.

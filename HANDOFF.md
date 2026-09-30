@@ -46,6 +46,9 @@ backend in §2.1. Never in the repo, never in a dotfile Dropbox syncs.
 `cargo test` — 498 tests, all offline, all green. `cargo clippy --all-targets` —
 clean.
 
+Sales-channel ingest (Shopify payouts/orders, Amazon unified and V2, channel
+reports) is built on branch `feat/channel-sync`; see D26 and `docs/CHANNEL.md`.
+
 Built and tested:
 
 | Module | What it holds |
