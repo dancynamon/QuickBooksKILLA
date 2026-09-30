@@ -15,7 +15,7 @@ ledger import amazon-settlement-v2 --db D --company C --file F.txt
 ledger import walmart-recon | etsy      # stubs: exit non-zero, NotImplemented
 ledger report channel-sales --from --to [--by family|sku] [--channel c] [--format csv|json|text]
 ledger report channel-recon --from --to [--format csv|json|text]
-ledger sku-map [--unmapped] | set --channel --sku --family
+ledger sku-map list|unmapped|set --db D --company C [--channel c --sku s --family f]
 ledger quarantine [list]
 ```
 
