@@ -248,7 +248,7 @@ pub fn channel_recon(
             "4900" => row.discounts += debit - credit,
             "4950" => row.refunds += debit - credit,
             "4985" => row.unallocated += credit - debit,
-            "6610" | "6611" | "6612" | "6613" | "6614" | "6615" | "6616" | "6617" => {
+            "6600" | "6610" | "6611" | "6612" | "6613" | "6614" | "6615" | "6616" | "6617" => {
                 row.fees += debit - credit;
             }
             "6620" | "6621" => row.adjustments += debit - credit,

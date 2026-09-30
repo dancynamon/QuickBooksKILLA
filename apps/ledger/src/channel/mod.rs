@@ -24,7 +24,8 @@ pub mod db;
 pub mod report;
 pub mod shopify;
 pub mod sku;
-pub mod stubs;
+pub mod walmart;
+pub mod etsy;
 
 use std::collections::BTreeMap;
 

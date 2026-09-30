@@ -12,8 +12,7 @@ use std::path::PathBuf;
 use chrono::NaiveDate;
 
 use ledger::channel::report::{self, By};
-use ledger::channel::stubs::{ChannelParser, EtsyParser, WalmartReconParser};
-use ledger::channel::{amazon, db, shopify, Channel, ImportSummary};
+use ledger::channel::{amazon, db, etsy, shopify, walmart, Channel, ImportSummary};
 use ledger::store::Ledger;
 
 use super::{next_value, parse_date, runtime, Args, CommandError, UsageError};
@@ -64,8 +63,23 @@ pub enum ChannelCommand {
         to: Option<NaiveDate>,
         fallback_class: Option<String>,
     },
-    Walmart,
-    Etsy,
+    Walmart {
+        db: PathBuf,
+        company: String,
+        files: Vec<PathBuf>,
+        from: Option<NaiveDate>,
+        to: Option<NaiveDate>,
+        fallback_class: Option<String>,
+        as_of: Option<NaiveDate>,
+    },
+    Etsy {
+        db: PathBuf,
+        company: String,
+        files: Vec<PathBuf>,
+        from: Option<NaiveDate>,
+        to: Option<NaiveDate>,
+        fallback_class: Option<String>,
+    },
     Sales {
         db: PathBuf,
         company: String,
@@ -117,6 +131,7 @@ struct Flags {
     channel: Option<String>,
     format: Option<String>,
     fallback_class: Option<String>,
+    as_of: Option<NaiveDate>,
     unmapped: bool,
     sku: Option<String>,
     family: Option<String>,
@@ -138,6 +153,7 @@ fn read_flags(mut args: Args<'_>) -> Result<Flags, UsageError> {
             "--channel" => f.channel = Some(next_value(&mut args, "--channel")?),
             "--format" => f.format = Some(next_value(&mut args, "--format")?),
             "--fallback-class" => f.fallback_class = Some(next_value(&mut args, "--fallback-class")?),
+            "--as-of" => f.as_of = Some(parse_date(&next_value(&mut args, "--as-of")?, "--as-of")?),
             "--unmapped" => f.unmapped = true,
             "--sku" => f.sku = Some(next_value(&mut args, "--sku")?),
             "--family" => f.family = Some(next_value(&mut args, "--family")?),
@@ -228,8 +244,37 @@ pub fn parse_import(mut args: Args<'_>) -> Result<ChannelCommand, UsageError> {
                 fallback_class: f.fallback_class.clone(),
             })
         }
-        "walmart-recon" => Ok(ChannelCommand::Walmart),
-        "etsy" => Ok(ChannelCommand::Etsy),
+        "walmart-recon" | "etsy" => {
+            let files: Vec<PathBuf> = f
+                .files
+                .iter()
+                .filter(|(n, _)| n == "file")
+                .map(|(_, p)| p.clone())
+                .collect();
+            if files.is_empty() {
+                return Err(UsageError::missing_flag("--file"));
+            }
+            if sub == "etsy" {
+                Ok(ChannelCommand::Etsy {
+                    db: f.db()?,
+                    company: f.company()?,
+                    files,
+                    from: f.from,
+                    to: f.to,
+                    fallback_class: f.fallback_class.clone(),
+                })
+            } else {
+                Ok(ChannelCommand::Walmart {
+                    db: f.db()?,
+                    company: f.company()?,
+                    files,
+                    from: f.from,
+                    to: f.to,
+                    fallback_class: f.fallback_class.clone(),
+                    as_of: f.as_of,
+                })
+            }
+        }
         other => Err(UsageError::unknown_subcommand(&format!("import {other}"))),
     }
 }
@@ -418,13 +463,54 @@ pub fn run(cmd: ChannelCommand) -> Result<std::process::ExitCode, CommandError> 
             }
             Ok(worst)
         }
-        ChannelCommand::Walmart => {
-            WalmartReconParser.parse("").map_err(runtime)?;
-            Ok(ExitCode::SUCCESS)
+        ChannelCommand::Walmart {
+            db,
+            company,
+            files,
+            from,
+            to,
+            fallback_class,
+            as_of,
+        } => {
+            let ledger = Ledger::open(&db).map_err(runtime)?;
+            let mut cfg = walmart::WalmartConfig::default();
+            if let Some(c) = fallback_class {
+                cfg.fallback_class = c;
+            }
+            if let Some(d) = as_of {
+                cfg.as_of = d;
+            }
+            let mut worst = ExitCode::SUCCESS;
+            for file in files {
+                println!("{}", file.display());
+                let summary = walmart::import_recon(&ledger, &company, &read(&file)?, &cfg, from, to)
+                    .map_err(runtime)?;
+                print_summary(&summary);
+                if exit(&summary) != ExitCode::SUCCESS {
+                    worst = ExitCode::from(1);
+                }
+            }
+            Ok(worst)
         }
-        ChannelCommand::Etsy => {
-            EtsyParser.parse("").map_err(runtime)?;
-            Ok(ExitCode::SUCCESS)
+        ChannelCommand::Etsy {
+            db,
+            company,
+            files,
+            from,
+            to,
+            fallback_class,
+        } => {
+            let ledger = Ledger::open(&db).map_err(runtime)?;
+            let mut cfg = etsy::EtsyConfig::default();
+            if let Some(c) = fallback_class {
+                cfg.fallback_class = c;
+            }
+            let texts: Vec<String> = files.iter().map(|f| read(f)).collect::<Result<_, _>>()?;
+            let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
+            let summary =
+                etsy::import_statements(&ledger, &company, &refs, &cfg, from, to).map_err(runtime)?;
+            print_summary(&summary);
+            Ok(exit(&summary))
         }
         ChannelCommand::Sales {
             db,

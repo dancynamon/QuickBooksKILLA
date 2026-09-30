@@ -362,7 +362,8 @@ USAGE:
                    [--from D] [--to D] [--fallback-class CLASS]
     ledger import amazon-settlement-v2 --db PATH --company ID --file PATH
                    [--file PATH ...] [--from D] [--to D]
-    ledger import walmart-recon | etsy        (not built: no export format yet)
+    ledger import walmart-recon --db D --company C --file RECON.csv [--as-of DATE]
+    ledger import etsy          --db D --company C --file STATEMENT.csv [--file ...]  (all months in one call)
     ledger report channel-sales --db PATH --company ID --from D --to D
                    [--by family|sku] [--channel shopify|amazon|walmart|etsy]
                    [--format csv|json]
