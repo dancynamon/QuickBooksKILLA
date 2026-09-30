@@ -514,6 +514,12 @@ fn etsy_unknown_types_are_flagged_and_orphan_tax_is_quarantined() {
     let s = etsy::import_statements(&l, COMPANY, &[stmt], &EtsyConfig::default(), None, None).unwrap();
     assert_eq!(s.posted, 1, "{}", s.render_text());
     assert!(s.flagged.iter().any(|f| f.1.contains("no rule")));
+    let card = "Date,Type,Title,Info,Currency,Amount,\"Fees & Taxes\",Net,\"Tax Details\"\n\
+        \"May 9, 2026\",Deposit,\"$9.51 sent to your bank account\",,USD,--,--,--,--\n\
+        \"May 8, 2026\",Payment,\"Card Payment\",\"Visa ending in 0000\",USD,--,$9.51,$9.51,--\n";
+    let s = etsy::import_statements(&l, COMPANY, &[card], &EtsyConfig::default(), None, None).unwrap();
+    assert_eq!(s.posted, 1, "{}", s.render_text());
+    assert!(s.flagged.iter().any(|f| f.1.contains("card payments")));
     let orphan = "Date,Type,Title,Info,Currency,Amount,\"Fees & Taxes\",Net,\"Tax Details\"\n\
         \"June 5, 2026\",Deposit,\"$-3.00 sent to your bank account\",,USD,--,--,--,--\n\
         \"June 4, 2026\",Tax,\"Sales tax paid by buyer\",\"Order #77\",USD,--,-$3.00,-$3.00,--\n";

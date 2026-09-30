@@ -16,7 +16,8 @@
 //! - One posting per deposit (external id `etsy:<date>:<n>`). Activity since
 //!   the previous deposit is `Dr` clearing (1173) its net, `Cr` sales by
 //!   family, `Dr` returns, `Dr` Etsy fees (6614), advertising (6600),
-//!   shipping labels (6617), adjustments (6620, flagged) for unknown types.
+//!   shipping labels (6617), adjustments (6620, flagged) for unknown types and
+//!   for `Payment` rows (the owner's card topping up a negative balance).
 //!   The deposit is the transfer to the bank: clearing nets to zero.
 //! - Facilitator tax is excluded: revenue is the sale less the tax row of the
 //!   same order. Tax with no sale or refund beside it, or more tax than sale,
@@ -237,6 +238,18 @@ pub fn build_deposit(
             }
             "marketing" => adverts += -r.net,
             "shipping" => labels += -r.net,
+            "payment" => {
+                // "Card Payment": the owner's card topping up a negative balance.
+                // Not revenue and not a refund of fees; the card charge that funds it
+                // is expensed elsewhere, so this is held in adjustments for review.
+                if flagged_once.insert(kind.clone()) {
+                    flags.push(
+                        "card payments into the Etsy balance booked to adjustments (6620); the funding card charge belongs against it, not as a second fee"
+                            .to_string(),
+                    );
+                }
+                other += -r.net;
+            }
             _ => {
                 if flagged_once.insert(kind.clone()) {
                     flags.push(format!("{:?} rows have no rule: booked to adjustments", r.kind));
