@@ -153,6 +153,7 @@ pub fn ensure_setup(ledger: &Ledger, company: &str) -> Result<(), ChannelError> 
                 | chart::ETSY_CLEARING
                 | chart::SHOPIFY_RESERVE
                 | chart::AMAZON_RESERVE
+                | chart::WALMART_RESERVE
                 | chart::CHANNEL_UNALLOCATED
                 | chart::SHOPIFY_FEES
                 | chart::AMAZON_FEES

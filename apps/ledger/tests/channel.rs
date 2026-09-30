@@ -372,13 +372,16 @@ fn walmart_periods_post_one_per_settlement_and_clearing_nets_to_the_payout() {
     let mar = r.iter().find(|m| m.month == "2026-03").unwrap();
     assert_eq!(mar.gross_product_sales, 9198, "gross product sales");
     assert_eq!(mar.fees, 1380);
-    assert_eq!(mar.adjustments, 500);
+    assert_eq!(mar.adjustments, 0, "reserve releases no longer hit 6620");
     assert_eq!(mar.payouts, 7318);
     // April period: refund of the wristbands (-21.99, commission back 3.30) and a mat sale.
     let apr = r.iter().find(|m| m.month == "2026-04").unwrap();
     assert_eq!(apr.refunds, 2199);
     assert_eq!(apr.payouts, 8999 - 1350 - 2199 + 330);
     assert_eq!(tb_balance(&l, "1172"), 0, "Walmart clearing nets to zero");
+    assert_eq!(tb_balance(&l, "1177"), 500, "reserve release posts to 1177 Walmart Payments reserve");
+    assert_eq!(tb_balance(&l, "6620"), 0);
+    assert!(!s.flagged.iter().any(|f| f.1.contains("reserve")), "reserve rows are not flagged");
     assert_eq!(tb_balance(&l, "2200"), 0, "facilitator tax never reaches sales tax payable");
 }
 
@@ -407,12 +410,24 @@ fn walmart_pending_period_posts_once_paid() {
 }
 
 #[test]
+fn walmart_release_reserve_posts_to_1177_with_no_expense() {
+    let l = fresh();
+    wm(&l, ymd(2026, 4, 30));
+    let tb = ledger::report::trial_balance(&l, COMPANY, ymd(2026, 12, 31)).unwrap();
+    let row = tb.rows.iter().find(|r| r.number == "1177").expect("1177 seeded");
+    assert_eq!(row.name, "Walmart Payments reserve");
+    assert_eq!(tb_balance(&l, "1177"), 500);
+    assert_eq!(tb_balance(&l, "6620"), 0, "nothing lands in adjustments");
+    assert_eq!(tb_balance(&l, "1172"), 0, "clearing still nets to zero");
+}
+
+#[test]
 fn walmart_facts_families_and_flags() {
     let l = fresh();
     let s = wm(&l, ymd(2026, 4, 30));
     assert_eq!(s.unmapped_skus, 1, "ZZ-WIDGET-1 is the only unmapped SKU");
     let flagged: Vec<_> = s.flagged.iter().map(|f| f.1.as_str()).collect();
-    assert!(flagged.iter().any(|f| f.contains("reserve releases")), "{flagged:?}");
+    assert!(!flagged.iter().any(|f| f.contains("reserve")), "reserve is a balance sheet move, not a flag: {flagged:?}");
     let rows = ledger::channel::db::list_sku_map(&l, COMPANY, true).unwrap();
     assert!(rows.iter().any(|r| r.sku.eq_ignore_ascii_case("ZZ-WIDGET-1")));
     let sales = report::channel_sales(&l, COMPANY, ymd(2026, 3, 1), ymd(2026, 4, 30), By::Family, Some(Channel::Walmart)).unwrap();
@@ -531,7 +546,7 @@ fn etsy_unknown_types_are_flagged_and_orphan_tax_is_quarantined() {
 #[test]
 fn channel_accounts_are_in_the_seed_chart() {
     let l = fresh();
-    for n in ["1170", "1171", "1172", "1173", "1175", "1176", "4985", "6610", "6611", "6612", "6613", "6614", "6615", "6616", "6617", "6620", "6621"] {
+    for n in ["1170", "1171", "1172", "1173", "1175", "1176", "1177", "4985", "6610", "6611", "6612", "6613", "6614", "6615", "6616", "6617", "6620", "6621"] {
         let tb = ledger::report::trial_balance(&l, COMPANY, ymd(2026, 12, 31)).unwrap();
         assert!(tb.rows.iter().any(|r| r.number == n), "account {n} missing from the seed chart");
     }

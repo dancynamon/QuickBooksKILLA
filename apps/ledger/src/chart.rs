@@ -19,6 +19,7 @@ pub const WALMART_CLEARING: &str = "1172";
 pub const ETSY_CLEARING: &str = "1173";
 pub const SHOPIFY_RESERVE: &str = "1175";
 pub const AMAZON_RESERVE: &str = "1176";
+pub const WALMART_RESERVE: &str = "1177";
 pub const ACCOUNTS_RECEIVABLE: &str = "1200";
 pub const ALLOWANCE_DOUBTFUL: &str = "1250";
 pub const INVENTORY_RAW: &str = "1300";
@@ -168,6 +169,7 @@ pub fn seed_chart() -> Vec<AccountSeed> {
         seed(ETSY_CLEARING, "Etsy clearing", Asset, false),
         seed(SHOPIFY_RESERVE, "Shopify Payments reserve", Asset, false),
         seed(AMAZON_RESERVE, "Amazon reserve balance", Asset, false),
+        seed(WALMART_RESERVE, "Walmart Payments reserve", Asset, false),
         seed(ACCOUNTS_RECEIVABLE, "Accounts receivable", Asset, false),
         seed(
             ALLOWANCE_DOUBTFUL,

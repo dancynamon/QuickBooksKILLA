@@ -498,3 +498,4 @@ item 2, which only a sandbox can settle.
   importers read the real exports; same posting shape, per settlement period
   and per deposit respectively. Families added 2026-09-30: Pool Games &
   Basketball, Water Fitness, Dock Bumpers, Kneeling Pads.
+- Walmart Release Reserve rows post to 1177 "Walmart Payments reserve" (other current asset, mirrors 1175/1176), not to 6620; families added 30 Sep 2026: ADA & Accessibility, Competition & Training (drop), Yoga (Etsy, foam, Etsy channel only).

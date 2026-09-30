@@ -25,6 +25,9 @@ pub const POOL_GAMES: &str = "Pool Games & Basketball";
 pub const WATER_FITNESS: &str = "Water Fitness";
 pub const DOCK_BUMPERS: &str = "Dock Bumpers";
 pub const KNEELING_PADS: &str = "Kneeling Pads";
+pub const ADA: &str = "ADA & Accessibility";
+pub const COMPETITION: &str = "Competition & Training";
+pub const YOGA: &str = "Yoga (Etsy)";
 pub const OTHER: &str = "Custom / Other";
 
 /// (family, §3 class, display order). The class is what a family's revenue
@@ -46,7 +49,10 @@ pub const FAMILIES: &[(&str, &str, i64)] = &[
     (WATER_FITNESS, "foam", 14),
     (DOCK_BUMPERS, "foam", 15),
     (KNEELING_PADS, "foam", 16),
-    (OTHER, "foam", 17),
+    (ADA, "drop", 17),
+    (COMPETITION, "drop", 18),
+    (YOGA, "foam", 19),
+    (OTHER, "foam", 20),
 ];
 
 pub fn is_family(name: &str) -> bool {
@@ -173,6 +179,31 @@ fn by_sku(sku_upper: &str) -> Option<&'static str> {
     if s.starts_with("AKP") || s.starts_with("AMKP") {
         return Some(KNEELING_PADS);
     }
+    // ADA & Accessibility: EasyStair `4 EL`, pool wheelchair `4 WC`, Healthline `HM 7-`.
+    if s.starts_with("EL ")
+        || s.starts_with("EL-")
+        || s == "WC"
+        || s.starts_with("WC ")
+        || s.starts_with("WC-")
+        || s.starts_with("HM 7-")
+    {
+        return Some(ADA);
+    }
+    // Competition & Training: swim stations, pace clocks, start wedge.
+    if s.starts_with("TD 02") || s.starts_with("PC-") || s.starts_with("SA-1710083") {
+        return Some(COMPETITION);
+    }
+    // Pool games from drop-ship vendor SKUs.
+    if s.starts_with("LGB")
+        || s.starts_with("SB2")
+        || s.starts_with("SMB")
+        || s.starts_with("SA6000")
+        || s.starts_with("SC 201")
+        || s.starts_with("SV 600")
+        || s.starts_with("HDW B500")
+    {
+        return Some(POOL_GAMES);
+    }
     if s.starts_with("HR-WD") || s.starts_with("MR-WD") || s.contains("SB-") {
         return Some(WATER_FITNESS);
     }
@@ -216,6 +247,33 @@ fn by_title(title: &str) -> Option<&'static str> {
     // Stand-up paddleboard gear is not a pool game: Custom / Other, flagged.
     if has_word(&t, "sup") || t.contains("stand up paddle") || t.contains("stand-up paddle") {
         return None;
+    }
+    if t.contains("ada easy stair")
+        || t.contains("wheelchair")
+        || t.contains("gurney")
+        || t.contains("commode")
+        || t.contains("pool lift")
+    {
+        return Some(ADA);
+    }
+    if t.contains("swim station")
+        || t.contains("pace clock")
+        || t.contains("start wedge")
+        || t.contains("backstroke")
+        || t.contains("water tech precision")
+        || t.contains("lane line")
+        || t.contains("starting block")
+    {
+        return Some(COMPETITION);
+    }
+    if t.contains("hoop")
+        || t.contains("backboard")
+        || t.contains("volly")
+        || t.contains("volley")
+        || t.contains("slam")
+        || t.contains("poola")
+    {
+        return Some(POOL_GAMES);
     }
     if t.contains("dock bumper") || t.contains("boat bumper") {
         return Some(DOCK_BUMPERS);
@@ -304,6 +362,20 @@ fn by_title(title: &str) -> Option<&'static str> {
     None
 }
 
+/// Etsy listings are the yoga shop: on that channel only, titles with these
+/// words are `Yoga (Etsy)`.
+fn etsy_title(title: &str) -> bool {
+    let t = title.to_lowercase();
+    t.contains("yoga")
+        || t.contains("bolster")
+        || has_word(&t, "mat")
+        || has_word(&t, "mats")
+        || has_word(&t, "block")
+        || has_word(&t, "blocks")
+        || has_word(&t, "strap")
+        || has_word(&t, "straps")
+}
+
 /// The rule mapper. SKU rules first, then the title, else `Custom / Other`
 /// flagged.
 pub fn map_rule(sku: &str, title: &str) -> Mapped {
@@ -356,6 +428,12 @@ impl SkuMapper {
             return Mapped {
                 family,
                 basis: Basis::Sku,
+            };
+        }
+        if channel == "etsy" && by_sku(&sku.trim().to_uppercase()).is_none() && etsy_title(title) {
+            return Mapped {
+                family: YOGA,
+                basis: Basis::Title,
             };
         }
         map_rule(sku, title)
@@ -478,6 +556,75 @@ mod tests {
     }
 
     #[test]
+    fn ada_and_accessibility() {
+        for sku in ["4 EL 36", "EL 100-A", "4 WC 01", "HM 7-1000"] {
+            assert_eq!(fam(sku, ""), ADA, "{sku}");
+        }
+        for title in [
+            "ADA Easy Stair for Pools",
+            "Pool Wheelchair",
+            "Healthline Shower Wheelchair",
+            "Shower Gurney",
+            "Bedside Commode",
+            "Portable Pool Lift",
+        ] {
+            assert_eq!(fam("ZZ-9", title), ADA, "{title}");
+        }
+        assert_eq!(default_class(ADA), "drop");
+        // Negative: an ELECTRIC-style SKU and an unrelated title stay unmapped.
+        assert!(map_rule("ELX-1", "Some Unrecognised Gadget").is_flagged());
+        assert!(map_rule("WCA-1", "").is_flagged());
+    }
+
+    #[test]
+    fn competition_and_training() {
+        assert_eq!(fam("3 TD 02", ""), COMPETITION);
+        assert_eq!(fam("3 PC-1", ""), COMPETITION);
+        assert_eq!(fam("4 SA-1710083", ""), COMPETITION);
+        for title in [
+            "Portable Swim Station",
+            "Digital Pace Clock",
+            "Backstroke Start Wedge",
+            "Water Tech Precision Timing",
+            "Racing Lane Line 25 yd",
+            "Starting Block",
+        ] {
+            assert_eq!(fam("", title), COMPETITION, "{title}");
+        }
+        assert_eq!(default_class(COMPETITION), "drop");
+        assert!(map_rule("PCX-1", "Some Unrecognised Gadget").is_flagged());
+    }
+
+    #[test]
+    fn pool_games_vendor_skus_and_titles() {
+        for sku in ["LGB100", "SB2000", "SMB-1", "SA6000-A", "3 SC 201", "3 SV 600", "HDW B500"] {
+            assert_eq!(fam(sku, ""), POOL_GAMES, "{sku}");
+        }
+        for title in ["Floating Hoop", "Pool Backboard", "Pool Volly Set", "Volleyball Net", "Slam Dunk Set", "Poola Float"] {
+            assert_eq!(fam("ZZ", title), POOL_GAMES, "{title}");
+        }
+        // Negative: SB- stays water fitness, SC 2xx is not SC 201.
+        assert_eq!(fam("SB-24", ""), WATER_FITNESS);
+        assert!(map_rule("3 SC 301", "").is_flagged());
+    }
+
+    #[test]
+    fn yoga_only_on_etsy() {
+        let m = SkuMapper::new();
+        for title in ["Foam Yoga Block", "Yoga Bolster", "Cork Yoga Strap", "Exercise Mat", "Foam Block Pair"] {
+            let r = m.resolve("etsy", "", title);
+            assert_eq!(r.family, YOGA, "{title}");
+            assert!(!r.is_flagged());
+        }
+        assert_eq!(default_class(YOGA), "foam");
+        // Negative: the same titles off Etsy are not yoga.
+        assert!(m.resolve("shopify", "", "Foam Yoga Block").is_flagged());
+        assert_eq!(m.resolve("shopify", "", "Floating Mat").family, MAT);
+        // A known SKU on Etsy still wins.
+        assert_eq!(m.resolve("etsy", "XRT-50", "Yoga Strap").family, TUBE_50);
+    }
+
+    #[test]
     fn every_family_has_a_section_3_class() {
         for (family, class, _) in FAMILIES {
             assert!(
@@ -485,6 +632,7 @@ mod tests {
                 "{family}"
             );
         }
-        assert_eq!(FAMILIES.len(), 17);
+        assert_eq!(FAMILIES.len(), 20);
+        assert_eq!(FAMILIES.last().unwrap().0, OTHER, "Custom / Other stays last");
     }
 }

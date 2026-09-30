@@ -18,8 +18,8 @@
 //! - One posting per bi-weekly settlement period, external id
 //!   `walmart:<period end>`. Activity is `Dr` clearing (1172) the period's
 //!   net, `Cr` sales by product family, shipping, `Dr` returns, `Dr`
-//!   commission (6613), `Cr`/`Dr` adjustments (6620) for reserve releases and
-//!   anything without a rule (flagged), then the transfer to the bank on the
+//!   commission (6613), `Dr`/`Cr` Walmart reserve (1177) for Release Reserve
+//!   rows, adjustments (6620) for anything without a rule (flagged), then the transfer to the bank on the
 //!   payout date, so clearing nets to zero per posting.
 //! - Marketplace facilitator tax (`Product tax` collected, `... withheld`) is
 //!   excluded: it must net to zero across the period or the period is
@@ -240,6 +240,7 @@ pub fn build_period(
     let mut unmapped: Vec<(String, String)> = Vec::new();
     let mut ordinal: HashMap<(String, String, &'static str), i64> = HashMap::new();
     let (mut gross, mut refunds, mut fees, mut other_sum) = (0i64, 0i64, 0i64, 0i64);
+    let mut reserve = 0i64;
 
     for r in &p.rows {
         let ttype = r.txn_type.trim().to_lowercase();
@@ -249,17 +250,14 @@ pub fn build_period(
         if comp == Comp::Tax {
             continue;
         }
+        if ttype == "release reserve" {
+            // Money moving into or out of Walmart's reserve is a balance
+            // sheet movement (1177), not an expense, and needs no flag.
+            reserve += -r.amount;
+            continue;
+        }
         if !is_order_row || comp == Comp::Other {
-            if is_order_row && flagged_once.insert(format!("{}/{}", r.txn_type, r.amount_type)) {
-                flags.push(format!(
-                    "{:?} / {:?} has no rule: booked to adjustments",
-                    r.txn_type, r.amount_type
-                ));
-            } else if ttype == "release reserve" {
-                if flagged_once.insert("release reserve".to_string()) {
-                    flags.push("reserve releases booked to channel adjustments (no Walmart reserve account)".into());
-                }
-            } else if !is_order_row && flagged_once.insert(format!("{}/{}", r.txn_type, r.amount_type)) {
+            if flagged_once.insert(format!("{}/{}", r.txn_type, r.amount_type)) {
                 flags.push(format!(
                     "{:?} / {:?} has no rule: booked to adjustments",
                     r.txn_type, r.amount_type
@@ -323,6 +321,10 @@ pub fn build_period(
         }
     }
 
+    if reserve != 0 {
+        legs.signed_debit(chart::WALMART_RESERVE, None, reserve);
+        other_sum += reserve;
+    }
     legs.signed_debit(clearing, None, net);
     if legs.net_debit(clearing) != net {
         return Err(ChannelError::ClearingMismatch {

@@ -56,7 +56,7 @@ subtract the carry and list the open settlements before calling it a residual.
   blank, so periods are derived from the statement cycle (14 days, ending
   Saturdays, anchor 2026-09-19, payout the Tuesday 3 days after). That grid is
   an assumption to confirm against the statement pages. Release Reserve rows go
-  to 6620, flagged; Product tax and its withheld twin must net to zero.
+  to 1177 Walmart Payments reserve (balance sheet, not flagged); Product tax and its withheld twin must net to zero.
 - **Etsy**: Finances > Monthly statements > Download CSV (per month; the
   Download Data page's Orders / Deposits CSVs arrive by email and were not
   available). One posting per Deposit row; a deposit must equal the net since
