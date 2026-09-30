@@ -4,6 +4,8 @@
 //! `apps/qbo-local/src/main.rs`'s no-new-dependencies discipline and its
 //! usage-error/exit-code shape.
 
+mod channel_cli;
+
 use std::env;
 use std::fs;
 use std::path::PathBuf;
@@ -63,6 +65,7 @@ fn main() -> ExitCode {
 
 #[derive(Clone, Debug, PartialEq)]
 enum Command {
+    Channel(channel_cli::ChannelCommand),
     Init {
         db: PathBuf,
         company: String,
@@ -350,6 +353,24 @@ USAGE:
     ledger authnet import --db PATH --company ID --file PATH
                    [--clearing NUM] [--fees NUM] [--undeposited NUM]
                    [--refund-class CLASS] [--fee-class CLASS]
+    ledger import shopify-payouts --db PATH --company ID --payouts PATH
+                   --transactions PATH [--orders PATH --lines PATH [--refunds PATH]]
+                   [--from D] [--to D] [--fallback-class CLASS]
+    ledger import shopify-orders --db PATH --company ID --orders PATH
+                   --lines PATH [--refunds PATH] [--from D] [--to D]
+    ledger import amazon-unified --db PATH --company ID --file PATH
+                   [--from D] [--to D] [--fallback-class CLASS]
+    ledger import amazon-settlement-v2 --db PATH --company ID --file PATH
+                   [--file PATH ...] [--from D] [--to D]
+    ledger import walmart-recon | etsy        (not built: no export format yet)
+    ledger report channel-sales --db PATH --company ID --from D --to D
+                   [--by family|sku] [--channel shopify|amazon|walmart|etsy]
+                   [--format csv|json]
+    ledger report channel-recon --db PATH --company ID --from D --to D
+                   [--format csv|json]
+    ledger sku-map list|unmapped --db PATH --company ID
+    ledger sku-map set --db PATH --company ID --channel C --sku SKU --family NAME
+    ledger quarantine --db PATH --company ID
     ledger opening --db PATH --company ID --as-of YYYY-MM-DD --qbo-csv PATH
     ledger boundary --db PATH --company ID --replica PATH --realm ID
                    --snapshots DIR
@@ -652,7 +673,13 @@ fn parse(args: &[String]) -> Result<Command, UsageError> {
     match subcommand.as_str() {
         "--help" | "-h" => Err(UsageError::usage()),
         "init" => parse_init(args),
+        "import" if channel_cli::is_channel_import(args.clone().next()) => {
+            channel_cli::parse_import(args).map(Command::Channel)
+        }
         "import" => parse_import(args),
+        "report" => channel_cli::parse_report(args).map(Command::Channel),
+        "sku-map" => channel_cli::parse_sku_map(args).map(Command::Channel),
+        "quarantine" => channel_cli::parse_quarantine(args).map(Command::Channel),
         "tb" => parse_tb(args),
         "pnl" => parse_pnl(args),
         "bs" => parse_bs(args),
@@ -1724,6 +1751,7 @@ fn execute(command: Command) -> Result<ExitCode, CommandError> {
             &db, &company, &replica, &realm, &qbo_csv, &out, as_of, plist,
         ),
         Command::Mfg(cmd) => run_mfg(cmd),
+        Command::Channel(cmd) => channel_cli::run(cmd),
     }
 }
 

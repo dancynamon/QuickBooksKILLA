@@ -124,6 +124,33 @@ impl<'a> LedgerToolSet<'a> {
                     report::trial_balance(self.ledger, &self.company, as_of).map_err(ledger_err)?;
                 Ok(trial_balance_json(&tb))
             }
+            "channel_sales_report" => {
+                use crate::channel::report as chan;
+                let from = parse_date(&args, "from")?;
+                let to = parse_date(&args, "to")?;
+                let by = match args.get("by").and_then(Value::as_str).unwrap_or("family") {
+                    "family" => chan::By::Family,
+                    "sku" => chan::By::Sku,
+                    other => return Err(ToolError::new(format!("by must be family or sku, not {other:?}"))),
+                };
+                let channel = match args.get("channel").and_then(Value::as_str) {
+                    None => None,
+                    Some(c) => Some(crate::channel::Channel::parse(c).ok_or_else(|| {
+                        ToolError::new(format!("unknown channel {c:?}"))
+                    })?),
+                };
+                let rows = chan::channel_sales(self.ledger, &self.company, from, to, by, channel)
+                    .map_err(|e| ToolError::new(e.to_string()))?;
+                Ok(chan::sales_json(&rows, from, to, by))
+            }
+            "channel_recon" => {
+                use crate::channel::report as chan;
+                let from = parse_date(&args, "from")?;
+                let to = parse_date(&args, "to")?;
+                let rows = chan::channel_recon(self.ledger, &self.company, from, to)
+                    .map_err(|e| ToolError::new(e.to_string()))?;
+                Ok(chan::recon_json(&rows))
+            }
             "profit_and_loss" => {
                 let from = parse_date(&args, "from")?;
                 let to = parse_date(&args, "to")?;
@@ -503,6 +530,34 @@ pub fn tools() -> Vec<ToolSpec> {
             input_schema: tool_schema(
                 json!({ "as_of": date_prop("The date to balance as of, YYYY-MM-DD.") }),
                 &["as_of"],
+            ),
+        },
+        ToolSpec {
+            name: "channel_sales_report",
+            description: "Units, gross product sales and refunds by channel and month, by \
+                product family or SKU, from the imported Shopify and Amazon order facts. \
+                Read-only. D26, `docs/CHANNEL.md`.",
+            input_schema: tool_schema(
+                json!({
+                    "from": date_prop("Start date, YYYY-MM-DD, inclusive."),
+                    "to": date_prop("End date, YYYY-MM-DD, inclusive."),
+                    "by": { "type": "string", "enum": ["family", "sku"], "description": "Grouping, default family." },
+                    "channel": { "type": "string", "description": "shopify, amazon, walmart or etsy; default all." },
+                }),
+                &["from", "to"],
+            ),
+        },
+        ToolSpec {
+            name: "channel_recon",
+            description: "Per channel and month, straight from the journal: gross product \
+                sales, shipping, refunds, fees, net, payouts and the month-end clearing \
+                balance (should be zero once payouts land). Read-only.",
+            input_schema: tool_schema(
+                json!({
+                    "from": date_prop("Start date, YYYY-MM-DD, inclusive."),
+                    "to": date_prop("End date, YYYY-MM-DD, inclusive."),
+                }),
+                &["from", "to"],
             ),
         },
         ToolSpec {
@@ -1412,6 +1467,8 @@ mod tests {
         let listed = response["result"]["tools"].as_array().unwrap();
         let expected = [
             "trial_balance",
+            "channel_sales_report",
+            "channel_recon",
             "profit_and_loss",
             "balance_sheet",
             "sales_tax_lines",
