@@ -41,7 +41,7 @@ LINES = [
     ("#9001", "XRT-50", "Aquamentor 50\" ExoTube", 2, "131.96"),
     ("#9001", "KX 120200 BL", "Aquamentor Adult Competition Kickboard", 1, "28.99"),
     ("#9002", "PM-SC-BL-4824", "Swiss Cheese Foam Floating Mat, Made in USA", 1, "139.00"),
-    ("#9003", "ZZ-HOOP-1", "Splash Pool Basketball Hoop", 1, "200.00"),
+    ("#9003", "ZZ-WIDGET-1", "Splash Pool Widget", 1, "200.00"),
     ("#9004", "XRT-40", "Aquamentor 40\" ExoTube", 1, "65.98"),
     ("#9005", "AM-LGC-50", "Aquamentor 50\" Lifeguard Chair", 1, "300.00"),
     ("#9007", "XRT-50", "Aquamentor 50\" ExoTube", 1, "50.00"),
@@ -178,8 +178,8 @@ rows += [
 ]
 # Settlement 2 (Standard): one order (unmapped SKU) and the transfer that pays settlement 1.
 rows += [
-    arow("Mar 10, 2026 9:00:00 AM PDT", S2, "Order", "111-0000003-0000003", "ZZ-HOOP-1",
-         "Splash Pool Basketball Hoop", "1", product_sales="200.00", product_sales_tax="13.25",
+    arow("Mar 10, 2026 9:00:00 AM PDT", S2, "Order", "111-0000003-0000003", "ZZ-WIDGET-1",
+         "Splash Pool Widget", "1", product_sales="200.00", product_sales_tax="13.25",
          marketplace_withheld_tax="-13.25", selling_fees="-30.00"),
 ]
 # Settlement 3 (Invoiced): the one mirrored in V2 below.

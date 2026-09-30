@@ -21,6 +21,10 @@ pub const CHAIR: &str = "Lifeguard Chair";
 pub const GUARD_EQUIP: &str = "Lifeguard Equipment";
 pub const ROBOTIC: &str = "Robotic Pool Cleaner & Parts";
 pub const SIGNS: &str = "Signs";
+pub const POOL_GAMES: &str = "Pool Games & Basketball";
+pub const WATER_FITNESS: &str = "Water Fitness";
+pub const DOCK_BUMPERS: &str = "Dock Bumpers";
+pub const KNEELING_PADS: &str = "Kneeling Pads";
 pub const OTHER: &str = "Custom / Other";
 
 /// (family, §3 class, display order). The class is what a family's revenue
@@ -38,7 +42,11 @@ pub const FAMILIES: &[(&str, &str, i64)] = &[
     (GUARD_EQUIP, "drop", 10),
     (ROBOTIC, "drop", 11),
     (SIGNS, "sign", 12),
-    (OTHER, "foam", 13),
+    (POOL_GAMES, "drop", 13),
+    (WATER_FITNESS, "foam", 14),
+    (DOCK_BUMPERS, "foam", 15),
+    (KNEELING_PADS, "foam", 16),
+    (OTHER, "foam", 17),
 ];
 
 pub fn is_family(name: &str) -> bool {
@@ -115,6 +123,27 @@ fn is_color_code_wristband(s: &str) -> bool {
             >= 2
 }
 
+/// Backboards `BB*`, hoops `B6000*`/`B1000*`/`RIM*`, balls `B1nn`, pool
+/// stools `PS*`.
+fn is_pool_game_sku(s: &str) -> bool {
+    if s.starts_with("B6000") || s.starts_with("B1000") || s.starts_with("RIM") {
+        return true;
+    }
+    if s.starts_with("BB") {
+        return true;
+    }
+    // Balls: B1 followed by two more digits (B100, B125), not a hoop.
+    let b = s.as_bytes();
+    if b.len() >= 4 && s.starts_with("B1") && b[2].is_ascii_digit() && b[3].is_ascii_digit() {
+        return true;
+    }
+    // Pool stools: PS followed by a digit, dash or space.
+    if let Some(rest) = s.strip_prefix("PS") {
+        return rest.starts_with(|c: char| c.is_ascii_digit() || c == '-' || c == ' ');
+    }
+    false
+}
+
 fn by_sku(sku_upper: &str) -> Option<&'static str> {
     let s = strip_numeric_prefix(sku_upper);
     if s.starts_with("2ND-RT") {
@@ -138,6 +167,18 @@ fn by_sku(sku_upper: &str) -> Option<&'static str> {
     if s.starts_with("AM-LGC") || s.starts_with("LGC-") {
         return Some(CHAIR);
     }
+    if s.starts_with("DBB-") || s.starts_with("DBB ") {
+        return Some(DOCK_BUMPERS);
+    }
+    if s.starts_with("AKP") || s.starts_with("AMKP") {
+        return Some(KNEELING_PADS);
+    }
+    if s.starts_with("HR-WD") || s.starts_with("MR-WD") || s.contains("SB-") {
+        return Some(WATER_FITNESS);
+    }
+    if is_pool_game_sku(s) {
+        return Some(POOL_GAMES);
+    }
     if s.contains("WB") || s.starts_with("BT ") || s.starts_with("BT-") {
         return Some(WRISTBANDS);
     }
@@ -160,6 +201,37 @@ fn has_word(t: &str, word: &str) -> bool {
 
 fn by_title(title: &str) -> Option<&'static str> {
     let t = title.to_lowercase();
+    if t.contains("pool basketball")
+        || t.contains("basketball hoop")
+        || t.contains("pool volleyball")
+        || t.contains("pool game")
+        || t.contains("diving ring")
+        || t.contains("diving stick")
+        || t.contains("dive ring")
+        || t.contains("pool stool")
+        || t.contains("backboard")
+    {
+        return Some(POOL_GAMES);
+    }
+    // Stand-up paddleboard gear is not a pool game: Custom / Other, flagged.
+    if has_word(&t, "sup") || t.contains("stand up paddle") || t.contains("stand-up paddle") {
+        return None;
+    }
+    if t.contains("dock bumper") || t.contains("boat bumper") {
+        return Some(DOCK_BUMPERS);
+    }
+    if t.contains("kneeling pad") || t.contains("kneeler") {
+        return Some(KNEELING_PADS);
+    }
+    if t.contains("dumbbell")
+        || t.contains("barbell")
+        || t.contains("aqua fitness")
+        || t.contains("water fitness")
+        || t.contains("water aerobics")
+        || t.contains("resistance")
+    {
+        return Some(WATER_FITNESS);
+    }
     if t.contains("2nd quality") || t.contains("factory second") || t.contains("seconds") {
         return Some(TUBE_SECOND);
     }
@@ -351,7 +423,7 @@ mod tests {
 
     #[test]
     fn unknown_is_custom_other_and_flagged() {
-        let m = map_rule("B6000 C(B)", "Splash & Shoot Clear Pool Basketball Hoop");
+        let m = map_rule("ZZ-9", "Some Unrecognised Gadget");
         assert_eq!(m.family, OTHER);
         assert!(m.is_flagged());
         // A tube with no readable size is not guessed.
@@ -363,12 +435,46 @@ mod tests {
     #[test]
     fn manual_override_beats_rules() {
         let mut m = SkuMapper::new();
-        m.set_manual("shopify", "b6000 c(b)", GUARD_EQUIP);
-        assert_eq!(m.resolve("shopify", "B6000 C(B)", "").family, GUARD_EQUIP);
-        assert_eq!(m.resolve("amazon", "B6000 C(B)", "").family, OTHER);
+        m.set_manual("shopify", "zz-9", GUARD_EQUIP);
+        assert_eq!(m.resolve("shopify", "ZZ-9", "").family, GUARD_EQUIP);
+        assert_eq!(m.resolve("amazon", "ZZ-9", "").family, OTHER);
         // Unknown family names are refused, not invented.
         m.set_manual("shopify", "X", "Not A Family");
         assert!(m.resolve("shopify", "X", "").is_flagged());
+    }
+
+    #[test]
+    fn pool_games_by_sku_and_title() {
+        for sku in ["BB2000", "B6000 C(B)", "B6000-XL", "B1000-A", "RIM-18", "B125", "B101-R", "PS-12", "PS300"] {
+            assert_eq!(fam(sku, ""), POOL_GAMES, "{sku}");
+        }
+        assert_eq!(fam("ZZ", "Splash & Shoot Clear Pool Basketball Hoop"), POOL_GAMES);
+        assert_eq!(fam("ZZ", "Diving Rings Set of 6"), POOL_GAMES);
+        // B1000 is a hoop, not a ball, and PSA-style SKUs are not stools.
+        assert_eq!(fam("B1000", ""), POOL_GAMES);
+        assert!(map_rule("PSA-1", "").is_flagged());
+    }
+
+    #[test]
+    fn sup_gear_is_other_unless_titled_pool_game() {
+        assert!(map_rule("SUP-FIN-1", "SUP Fin 9 inch").is_flagged());
+        assert!(map_rule("SUP-PUMP", "Stand Up Paddle Board Hand Pump").is_flagged());
+        assert_eq!(fam("SUP-X", "Pool game floating SUP basketball hoop"), POOL_GAMES);
+    }
+
+    #[test]
+    fn water_fitness_dock_bumpers_kneeling_pads() {
+        for sku in ["HR-WD-10", "MR-WD-8", "AM-SB-12", "SB-24"] {
+            assert_eq!(fam(sku, ""), WATER_FITNESS, "{sku}");
+        }
+        assert_eq!(fam("ZZ", "Foam Aqua Fitness Dumbbells"), WATER_FITNESS);
+        assert_eq!(fam("DBB-12", ""), DOCK_BUMPERS);
+        assert_eq!(fam("ZZ", "Foam Dock Bumper 12 ft"), DOCK_BUMPERS);
+        assert_eq!(fam("AKP-1", ""), KNEELING_PADS);
+        assert_eq!(fam("AMKP-2", ""), KNEELING_PADS);
+        assert_eq!(fam("ZZ", "Garden Kneeling Pad"), KNEELING_PADS);
+        // Kickboards keep priority over the SB- rule.
+        assert_eq!(fam("SA-KX-120200-BL", ""), KICKBOARD);
     }
 
     #[test]
@@ -379,6 +485,6 @@ mod tests {
                 "{family}"
             );
         }
-        assert_eq!(FAMILIES.len(), 13);
+        assert_eq!(FAMILIES.len(), 17);
     }
 }

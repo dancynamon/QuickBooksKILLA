@@ -306,7 +306,7 @@ fn amazon_classifies_non_order_rows() {
 fn sku_mapper_covers_the_tube_families() {
     assert_eq!(map_rule("XRT-50", "Aquamentor 50\" ExoTube").family, "Rescue Tube 50\"");
     assert_eq!(map_rule("XRT-40RD", "").family, "Rescue Tube 40\"");
-    let hoop = map_rule("ZZ-HOOP-1", "Splash Pool Basketball Hoop");
+    let hoop = map_rule("ZZ-WIDGET-1", "Splash Pool Widget");
     assert!(hoop.is_flagged(), "unknown goods are Custom / Other and flagged");
 }
 
@@ -316,7 +316,7 @@ fn unmapped_skus_are_counted_and_listed() {
     let s = amz(&l, &fixture("amazon_unified.csv"));
     assert_eq!(s.unmapped_skus, 1);
     let rows = ledger::channel::db::list_sku_map(&l, COMPANY, true).unwrap();
-    assert!(rows.iter().any(|r| r.sku.eq_ignore_ascii_case("ZZ-HOOP-1")));
+    assert!(rows.iter().any(|r| r.sku.eq_ignore_ascii_case("ZZ-WIDGET-1")));
 }
 
 #[test]

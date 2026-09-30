@@ -2,7 +2,7 @@ order_name,sku,variant_id,product_title,variant_title,quantity,unit_price,discou
 #9001,XRT-50,gid://shopify/ProductVariant/1,"Aquamentor 50"" ExoTube",,2,65.98,131.96,Aquamentor,True,False
 #9001,KX 120200 BL,gid://shopify/ProductVariant/1,Aquamentor Adult Competition Kickboard,,1,28.99,28.99,Aquamentor,True,False
 #9002,PM-SC-BL-4824,gid://shopify/ProductVariant/1,"Swiss Cheese Foam Floating Mat, Made in USA",,1,139.00,139.00,Aquamentor,True,False
-#9003,ZZ-HOOP-1,gid://shopify/ProductVariant/1,Splash Pool Basketball Hoop,,1,200.00,200.00,Aquamentor,True,False
+#9003,ZZ-WIDGET-1,gid://shopify/ProductVariant/1,Splash Pool Widget,,1,200.00,200.00,Aquamentor,True,False
 #9004,XRT-40,gid://shopify/ProductVariant/1,"Aquamentor 40"" ExoTube",,1,65.98,65.98,Aquamentor,True,False
 #9005,AM-LGC-50,gid://shopify/ProductVariant/1,"Aquamentor 50"" Lifeguard Chair",,1,300.00,300.00,Aquamentor,True,False
 #9007,XRT-50,gid://shopify/ProductVariant/1,"Aquamentor 50"" ExoTube",,1,50.00,50.00,Aquamentor,True,False
