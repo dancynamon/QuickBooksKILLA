@@ -501,6 +501,91 @@ CREATE TABLE build_consumptions (
 ) STRICT;
 "#,
     },
+    Migration {
+        version: 6,
+        name: "sales-channel ingest: channel_postings, sku_map, order_lines (D26)",
+        sql: r#"
+-- D26: one posting unit per payout / settlement / bank transfer. The external
+-- id (`shopify:<payout id>`, `amazon:<settlement id>`, ...) is unique per
+-- company, so re-importing the same export can never post twice.
+-- document_versions.source_ref is deliberately NOT made unique instead: it
+-- carries QBO ids, and QBO ids repeat across entity types.
+CREATE TABLE channel_postings (
+    company_id    TEXT NOT NULL,
+    external_id   TEXT NOT NULL,
+    channel       TEXT NOT NULL CHECK (channel IN ('shopify','amazon','walmart','etsy')),
+    kind          TEXT NOT NULL CHECK (kind IN ('payout','settlement','transfer')),
+    document_id   TEXT NOT NULL,
+    entry_date    TEXT NOT NULL,
+    gross_minor   INTEGER NOT NULL,
+    refunds_minor INTEGER NOT NULL,
+    fees_minor    INTEGER NOT NULL,
+    other_minor   INTEGER NOT NULL,
+    net_minor     INTEGER NOT NULL,
+    payout_minor  INTEGER NOT NULL,
+    flags         TEXT NOT NULL DEFAULT '',
+    posted_at     TEXT NOT NULL,
+    PRIMARY KEY (company_id, external_id)
+) STRICT;
+
+CREATE INDEX idx_channel_postings_date ON channel_postings(company_id, channel, entry_date);
+
+-- A payout or settlement whose own arithmetic failed (clearing does not net
+-- to the payout, facilitator tax does not net to zero, unsupported status).
+-- Never posted, never plugged; listed here until someone looks.
+CREATE TABLE channel_quarantine (
+    company_id  TEXT NOT NULL,
+    external_id TEXT NOT NULL,
+    channel     TEXT NOT NULL,
+    reason      TEXT NOT NULL,
+    detail      TEXT NOT NULL,
+    flagged_at  TEXT NOT NULL,
+    PRIMARY KEY (company_id, external_id, reason)
+) STRICT;
+
+CREATE TABLE product_families (
+    company_id TEXT NOT NULL,
+    family     TEXT NOT NULL,
+    class_id   TEXT NOT NULL,
+    sort_order INTEGER NOT NULL,
+    PRIMARY KEY (company_id, family)
+) STRICT;
+
+-- (channel, sku) -> family. `source = 'manual'` rows override the rule
+-- mapper; `rule` and `unmapped` rows are what the mapper last decided, kept
+-- so an operator can see and correct them.
+CREATE TABLE sku_map (
+    company_id TEXT NOT NULL,
+    channel    TEXT NOT NULL,
+    sku        TEXT NOT NULL,
+    family     TEXT NOT NULL,
+    source     TEXT NOT NULL CHECK (source IN ('rule','manual','unmapped')),
+    title      TEXT,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (company_id, channel, sku)
+) STRICT;
+
+-- The line-level fact table behind `report channel-sales`. `kind` is `sale`
+-- (qty and amount positive) or `refund` (amount negative). `line_key` makes
+-- a re-import an INSERT OR IGNORE no-op.
+CREATE TABLE order_lines (
+    company_id   TEXT NOT NULL,
+    channel      TEXT NOT NULL,
+    order_id     TEXT NOT NULL,
+    kind         TEXT NOT NULL CHECK (kind IN ('sale','refund')),
+    line_key     TEXT NOT NULL,
+    order_date   TEXT NOT NULL,
+    sku          TEXT NOT NULL,
+    title        TEXT NOT NULL,
+    family       TEXT NOT NULL,
+    qty          INTEGER NOT NULL,
+    amount_minor INTEGER NOT NULL,
+    PRIMARY KEY (company_id, channel, order_id, kind, line_key)
+) STRICT;
+
+CREATE INDEX idx_order_lines_report ON order_lines(company_id, channel, order_date);
+"#,
+    },
 ];
 
 pub fn latest_version() -> i64 {

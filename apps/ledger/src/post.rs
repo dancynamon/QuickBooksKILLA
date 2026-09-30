@@ -1093,7 +1093,7 @@ pub fn post(
     }
 
     let is_journal = doc.kind == DocKind::JournalEntry;
-    let legs = if is_journal {
+    let legs = if is_journal || doc.kind == DocKind::ChannelPosting {
         post_journal_entry(doc)?
     } else {
         match doc.kind {
@@ -1115,7 +1115,7 @@ pub fn post(
             DocKind::Estimate | DocKind::PurchaseOrder => {
                 unreachable!("DocKind::posts() filtered these out above")
             }
-            DocKind::JournalEntry => {
+            DocKind::JournalEntry | DocKind::ChannelPosting => {
                 unreachable!("handled above")
             }
         }
@@ -1123,7 +1123,7 @@ pub fn post(
 
     let entry = finalize(doc, version, legs, is_journal)?;
 
-    if is_journal && !entry.is_balanced() {
+    if (is_journal || doc.kind == DocKind::ChannelPosting) && !entry.is_balanced() {
         return Err(PostError::UnbalancedJournal);
     }
     debug_assert!(

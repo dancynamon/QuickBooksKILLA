@@ -10,6 +10,15 @@ use serde::{Deserialize, Serialize};
 pub const CHECKING: &str = "1100";
 pub const UNDEPOSITED_FUNDS: &str = "1150";
 pub const AUTHNET_CLEARING: &str = "1160";
+/// D26 channel clearing accounts. Each nets to zero per payout (Amazon: per
+/// settlement group); a balance here is money the channel owes and has not
+/// yet paid, or a flagged mismatch.
+pub const SHOPIFY_CLEARING: &str = "1170";
+pub const AMAZON_CLEARING: &str = "1171";
+pub const WALMART_CLEARING: &str = "1172";
+pub const ETSY_CLEARING: &str = "1173";
+pub const SHOPIFY_RESERVE: &str = "1175";
+pub const AMAZON_RESERVE: &str = "1176";
 pub const ACCOUNTS_RECEIVABLE: &str = "1200";
 pub const ALLOWANCE_DOUBTFUL: &str = "1250";
 pub const INVENTORY_RAW: &str = "1300";
@@ -34,6 +43,10 @@ pub const SHIPPING_INCOME: &str = "4300";
 pub const DISCOUNTS_GIVEN: &str = "4900";
 pub const RETURNS_ALLOWANCES: &str = "4950";
 pub const OTHER_INCOME: &str = "4990";
+/// D26: channel receipts that could not be split by product family (order
+/// not in the export, or its lines do not add up to the charge). Visible and
+/// counted; never a silent plug.
+pub const CHANNEL_UNALLOCATED: &str = "4985";
 pub const COGS: &str = "5000";
 pub const FREIGHT_IN: &str = "5050";
 pub const MANUFACTURING_VARIANCE: &str = "5100";
@@ -46,6 +59,16 @@ pub const RENT_UTILITIES: &str = "6300";
 pub const INSURANCE: &str = "6400";
 pub const PROFESSIONAL_FEES: &str = "6500";
 pub const ADVERTISING_CHANNEL_FEES: &str = "6600";
+pub const SHOPIFY_FEES: &str = "6610";
+pub const AMAZON_FEES: &str = "6611";
+pub const AMAZON_FBA_FEES: &str = "6612";
+pub const WALMART_FEES: &str = "6613";
+pub const ETSY_FEES: &str = "6614";
+pub const AMAZON_ADVERTISING: &str = "6615";
+pub const AMAZON_SUBSCRIPTION: &str = "6616";
+pub const CHANNEL_SHIPPING_LABELS: &str = "6617";
+pub const CHANNEL_ADJUSTMENTS: &str = "6620";
+pub const AMAZON_ADJUSTMENTS: &str = "6621";
 pub const MERCHANT_FEES: &str = "6700";
 pub const BAD_DEBT: &str = "6800";
 pub const OTHER_OPERATING: &str = "6900";
@@ -139,6 +162,12 @@ pub fn seed_chart() -> Vec<AccountSeed> {
         seed(CHECKING, "Checking", Asset, false),
         seed(UNDEPOSITED_FUNDS, "Undeposited funds", Asset, false),
         seed(AUTHNET_CLEARING, "Authorize.net clearing", Asset, false),
+        seed(SHOPIFY_CLEARING, "Shopify Payments clearing", Asset, false),
+        seed(AMAZON_CLEARING, "Amazon clearing", Asset, false),
+        seed(WALMART_CLEARING, "Walmart clearing", Asset, false),
+        seed(ETSY_CLEARING, "Etsy clearing", Asset, false),
+        seed(SHOPIFY_RESERVE, "Shopify Payments reserve", Asset, false),
+        seed(AMAZON_RESERVE, "Amazon reserve balance", Asset, false),
         seed(ACCOUNTS_RECEIVABLE, "Accounts receivable", Asset, false),
         seed(
             ALLOWANCE_DOUBTFUL,
@@ -188,6 +217,12 @@ pub fn seed_chart() -> Vec<AccountSeed> {
         seed(DISCOUNTS_GIVEN, "Discounts given", Income, true),
         seed(RETURNS_ALLOWANCES, "Returns and allowances", Income, true),
         seed(OTHER_INCOME, "Other income", Income, false),
+        seed(
+            CHANNEL_UNALLOCATED,
+            "Channel sales, unallocated (review)",
+            Income,
+            false,
+        ),
         seed(COGS, "Cost of goods sold", Cogs, false),
         seed(FREIGHT_IN, "Freight in", Cogs, false),
         seed(
@@ -215,6 +250,26 @@ pub fn seed_chart() -> Vec<AccountSeed> {
             Expense,
             false,
         ),
+        seed(SHOPIFY_FEES, "Shopify processing fees", Expense, false),
+        seed(AMAZON_FEES, "Amazon selling fees", Expense, false),
+        seed(AMAZON_FBA_FEES, "Amazon FBA and fulfillment fees", Expense, false),
+        seed(WALMART_FEES, "Walmart fees", Expense, false),
+        seed(ETSY_FEES, "Etsy fees", Expense, false),
+        seed(AMAZON_ADVERTISING, "Amazon advertising", Expense, false),
+        seed(AMAZON_SUBSCRIPTION, "Amazon subscription fees", Expense, false),
+        seed(
+            CHANNEL_SHIPPING_LABELS,
+            "Channel shipping labels and postage",
+            Expense,
+            false,
+        ),
+        seed(
+            CHANNEL_ADJUSTMENTS,
+            "Channel adjustments and chargebacks",
+            Expense,
+            false,
+        ),
+        seed(AMAZON_ADJUSTMENTS, "Amazon adjustments", Expense, false),
         seed(MERCHANT_FEES, "Merchant and bank fees", Expense, false),
         seed(BAD_DEBT, "Bad debt", Expense, false),
         seed(OTHER_OPERATING, "Other operating expense", Expense, false),

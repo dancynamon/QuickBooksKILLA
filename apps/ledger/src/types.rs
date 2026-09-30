@@ -59,6 +59,10 @@ pub enum DocKind {
     InventoryAdjustment,
     BankLine,
     Settlement,
+    /// D26: one sales-channel payout, settlement or bank transfer, posted as
+    /// a balanced set of named-account legs (same shape as a journal entry,
+    /// but not flagged: it is derived from a channel export, not typed in).
+    ChannelPosting,
 }
 
 impl DocKind {
@@ -81,6 +85,7 @@ impl DocKind {
         DocKind::InventoryAdjustment,
         DocKind::BankLine,
         DocKind::Settlement,
+        DocKind::ChannelPosting,
     ];
 
     /// Estimates and purchase orders are contracts, not transactions (§1).
@@ -108,6 +113,7 @@ impl DocKind {
             DocKind::InventoryAdjustment => "inventory_adjustment",
             DocKind::BankLine => "bank_line",
             DocKind::Settlement => "settlement",
+            DocKind::ChannelPosting => "channel_posting",
         }
     }
 
