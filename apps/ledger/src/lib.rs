@@ -22,6 +22,8 @@
 //!   per-statement close
 //! - [`authnet`]  — D15, §1, §10: the Authorize.net settlement import and
 //!   the fee-aware settlement match it feeds in [`bank`]
+//! - [`channel`]  — D26: sales-channel ingest (Shopify, Amazon), one posting per
+//!   payout or settlement, the SKU-to-family map, and the channel-sales report
 //! - [`mfg`]      — §11: manufacturing costing, built after cutover. Landed
 //!   cost by board foot, build sheets with yield as a divisor, builds with
 //!   priced variance, sensitivity, and the three §1 posting rows this
@@ -38,6 +40,7 @@
 pub mod accountant;
 pub mod authnet;
 pub mod bank;
+pub mod channel;
 pub mod chart;
 pub mod import;
 pub mod mcp;
