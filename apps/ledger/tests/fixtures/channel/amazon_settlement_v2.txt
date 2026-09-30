@@ -1,0 +1,17 @@
+settlement-id	settlement-start-date	settlement-end-date	deposit-date	total-amount	currency	transaction-type	order-id	merchant-order-id	adjustment-id	shipment-id	marketplace-name	amount-type	amount-description	amount	fulfillment-id	posted-date	posted-date-time	order-item-code	merchant-order-item-id	merchant-adjustment-item-id	sku	quantity-purchased	promotion-id
+30000000003	2026-03-03 07:00:00 UTC	2026-03-10 07:00:00 UTC	2026-03-12 10:00:00 UTC	775.80	USD																		
+30000000003						Order	114-0000001-0000001				Amazon.com	ItemPrice	Principal	39.98	MFN	2026-03-03	2026-03-03 20:00:00 UTC	900000000001			BL50	2	
+30000000003						Order	114-0000001-0000001				Amazon.com	ItemPrice	Tax	2.60	MFN	2026-03-03	2026-03-03 20:00:00 UTC	900000000001			BL50	2	
+30000000003						Order	114-0000001-0000001				Amazon.com	ItemPrice	Shipping	7.50	MFN	2026-03-03	2026-03-03 20:00:00 UTC	900000000001			BL50	2	
+30000000003						Order	114-0000001-0000001				Amazon.com	ItemWithheldTax	MarketplaceFacilitatorTax-Principal	-2.60	MFN	2026-03-03	2026-03-03 20:00:00 UTC	900000000001			BL50	2	
+30000000003						Order	114-0000001-0000001				Amazon.com	ItemFees	Commission	-6.00	MFN	2026-03-03	2026-03-03 20:00:00 UTC	900000000001			BL50	2	
+30000000003						Order	114-0000001-0000001				Amazon.com	ItemFees	GetPaidFasterFee	-0.82	MFN	2026-03-03	2026-03-03 20:00:00 UTC	900000000001			BL50	2	
+30000000003						Order	114-0000002-0000002				Amazon.com	ItemPrice	Principal	799.00	MFN	2026-03-04	2026-03-04 21:00:00 UTC	900000000002			LGC-50-25	1	
+30000000003						Order	114-0000002-0000002				Amazon.com	ItemPrice	Tax	52.94	MFN	2026-03-04	2026-03-04 21:00:00 UTC	900000000002			LGC-50-25	1	
+30000000003						Order	114-0000002-0000002				Amazon.com	ItemWithheldTax	MarketplaceFacilitatorTax-Principal	-52.94	MFN	2026-03-04	2026-03-04 21:00:00 UTC	900000000002			LGC-50-25	1	
+30000000003						Order	114-0000002-0000002				Amazon.com	ItemFees	Commission	-119.85	MFN	2026-03-04	2026-03-04 21:00:00 UTC	900000000002			LGC-50-25	1	
+30000000003						Order	114-0000003-0000003				Amazon.com	ItemPrice	Principal	59.99	MFN	2026-03-10	2026-03-10 04:30:00 UTC	900000000003			RT-40-A	1	
+30000000003						Order	114-0000003-0000003				Amazon.com	ItemPrice	Tax	3.97	MFN	2026-03-10	2026-03-10 04:30:00 UTC	900000000003			RT-40-A	1	
+30000000003						Order	114-0000003-0000003				Amazon.com	ItemPrice	Shipping	5.00	MFN	2026-03-10	2026-03-10 04:30:00 UTC	900000000003			RT-40-A	1	
+30000000003						Order	114-0000003-0000003				Amazon.com	ItemWithheldTax	MarketplaceFacilitatorTax-Principal	-3.97	MFN	2026-03-10	2026-03-10 04:30:00 UTC	900000000003			RT-40-A	1	
+30000000003						Order	114-0000003-0000003				Amazon.com	ItemFees	Commission	-9.00	MFN	2026-03-10	2026-03-10 04:30:00 UTC	900000000003			RT-40-A	1	

@@ -1,0 +1,7 @@
+order_id,name,created_at,processed_at,financial_status,fulfillment_status,cancelled_at,gateways,source_name,email,company,ship_province,ship_country,subtotal_current,discounts,shipping,tax,total,refunded,tags
+gid://shopify/Order/1000,#9001,2026-03-09T15:00:00Z,2026-03-09T15:00:00Z,PARTIALLY_REFUNDED,FULFILLED,,shopify_payments,web,,,NJ,US,0.0,0.0,14.00,11.62,186.57,0.0,
+gid://shopify/Order/1001,#9002,2026-03-09T16:00:00Z,2026-03-09T16:00:00Z,REFUNDED,FULFILLED,,shopify_payments,web,,,NJ,US,0.0,0.0,0.00,0.00,125.10,0.0,
+gid://shopify/Order/1002,#9003,2026-03-12T16:00:00Z,2026-03-12T16:00:00Z,PAID,FULFILLED,,shopify_payments,web,,,NJ,US,0.0,0.0,0.00,0.00,200.00,0.0,
+gid://shopify/Order/1003,#9004,2026-03-10T16:00:00Z,2026-03-10T16:00:00Z,PAID,FULFILLED,,amazon,web,,,NJ,US,0.0,0.0,0.00,0.00,65.98,0.0,
+gid://shopify/Order/1004,#9005,2026-03-11T16:00:00Z,2026-03-11T16:00:00Z,PAID,FULFILLED,,shopify_payments,web,,,NJ,US,0.0,0.0,0.00,0.00,300.00,0.0,
+gid://shopify/Order/1005,#9007,2026-03-11T17:00:00Z,2026-03-11T17:00:00Z,VOIDED,FULFILLED,,shopify_payments,web,,,NJ,US,0.0,0.0,0.00,0.00,50.00,0.0,
