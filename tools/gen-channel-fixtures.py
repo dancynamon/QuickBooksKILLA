@@ -271,5 +271,112 @@ with open(OUT / "amazon_settlement_v2.txt", "w", newline="") as f:
     w.writerow(head)
     w.writerows(v2rows)
 
+# --------------------------------------------------------------------------
+# Walmart: Payments Reconciliation report (synthetic; real column names)
+# --------------------------------------------------------------------------
+WM_COLS = ["Period Start Date", "Period End Date", "Transaction Key", "Transaction Posted Timestamp",
+           "Transaction Type", "Transaction Description", "Customer Order #", "Customer Order line #",
+           "Purchase Order #", "Purchase Order line #", "Amount", "Amount Type", "Ship Qty",
+           "Commission Rate", "Base Commission Rate", "Transaction Reason Description",
+           "Partner Item Id", "Partner GTIN", "Partner Item Name", "Product Tax Code", "Ship to State",
+           "Ship to City", "Ship to Zipcode", "Contract Category", "Product Type", "Commission Rule",
+           "Shipping Method", "Fulfillment Type", "Fulfillment Details", "Original Commission",
+           "Commission Incentive Program", "Commission Saving", "Customer Promo Type",
+           "Total Walmart Funded Savings Program", "Campaign Id", "Item Condition", "Original charge",
+           "Charge Savings", "Incentive Program Name", "Ship to country", "Store Id"]
+
+
+def wm_row(**kw):
+    r = [""] * len(WM_COLS)
+    for k, v in kw.items():
+        r[WM_COLS.index(k.replace("_", " "))] = v
+    return r
+
+
+def wm_order(key, when, txn, order, sku, title, price, comm, tax):
+    rows = []
+    for amt_type, amt in (("Product Price", price), ("Commission on Product", comm),
+                          ("Product tax", tax), ("Product tax withheld", "-" + tax.lstrip("-") if not tax.startswith("-") else tax.lstrip("-"))):
+        rows.append(wm_row(Transaction_Key=key, Transaction_Posted_Timestamp=when, Transaction_Type=txn,
+                           Transaction_Description="Purchase" if txn == "Sale" else "Refund",
+                           **{"Customer_Order_#": order, "Customer_Order_line_#": "1",
+                              "Purchase_Order_#": "1291" + order[-6:], "Purchase_Order_line_#": "1"},
+                           Amount=amt, Amount_Type=amt_type, Ship_Qty="1", Partner_Item_Id=sku,
+                           Partner_Item_Name=title, Ship_to_State="NJ", Ship_to_country="USA",
+                           Fulfillment_Type="Seller Fulfilled"))
+    return rows
+
+
+wm = []
+# Period ending Sat 2026-03-21, paid Tue 2026-03-24.
+wm += wm_order("2026_03_10_000001", "03/10/2026", "Sale", "200000000000001", "BL100",
+               "Synthetic Vinyl Wristbands 100 ct", "21.99", "-3.30", "1.94")
+wm += wm_order("2026_03_12_000002", "03/12/2026", "Sale", "200000000000002", "XRT-50",
+               "Synthetic 50\" Rescue Tube", "59.99", "-9.00", "4.20")
+wm += wm_order("2026_03_14_000003", "03/14/2026", "Sale", "200000000000003", "ZZ-WIDGET-1",
+               "Splash Pool Widget", "10.00", "-1.50", "0.70")
+wm.append(wm_row(Transaction_Posted_Timestamp="03/15/2026", Transaction_Type="Release Reserve",
+                 Transaction_Description="Reserve credited back", Amount="-5.00", Amount_Type="Fee/Reimbursement"))
+# Period ending Sat 2026-04-04, paid Tue 2026-04-07: a refund of the first order and a new sale.
+wm += wm_order("2026_03_30_000004", "03/30/2026", "Refund", "200000000000001", "BL100",
+               "Synthetic Vinyl Wristbands 100 ct", "-21.99", "3.30", "-1.94")
+wm += wm_order("2026_04_02_000005", "04/02/2026", "Sale", "200000000000005", "PM-SC-YL-4824",
+               "Synthetic Floating Mat", "89.99", "-13.50", "6.30")
+# Period ending Sat 2026-04-18: facilitator tax that does not net (collected 2.00, withheld 1.00).
+bad = wm_order("2026_04_10_000006", "04/10/2026", "Sale", "200000000000006", "KX 120200 BL",
+               "Synthetic Kickboard", "12.00", "-1.80", "2.00")
+bad[3][WM_COLS.index("Amount")] = "-1.00"
+wm += bad
+# Period ending Sat 2026-09-19, paid Tue 2026-09-22: pending when as_of is earlier.
+wm += wm_order("2026_09_10_000007", "09/10/2026", "Sale", "200000000000007", "XRT-40",
+               "Synthetic 40\" Rescue Tube", "49.99", "-7.50", "3.50")
+with open(OUT / "walmart_recon.csv", "w", newline="") as f:
+    w = csv.writer(f, lineterminator="\n")
+    w.writerow(WM_COLS)
+    w.writerows(wm)
+
+# --------------------------------------------------------------------------
+# Etsy: Payment account monthly statement (synthetic; real column names, newest first)
+# --------------------------------------------------------------------------
+ET_COLS = ["Date", "Type", "Title", "Info", "Currency", "Amount", "Fees & Taxes", "Net", "Tax Details"]
+
+
+def et(date, typ, title, info="", amount="--", fees="--", net="--"):
+    return [date, typ, title, info, "USD", amount, fees, net, "--"]
+
+
+mar = [  # oldest first here; written newest first below
+    et("March 2, 2026", "Fee", "Listing fee", "Listing #900000001", "--", "-$0.20", "-$0.20"),
+    et("March 2, 2026", "Sale", "Payment for Order #1001", "", "$67.35", "--", "$67.35"),
+    et("March 2, 2026", "Fee", "Processing fee", "Order #1001", "--", "-$2.27", "-$2.27"),
+    et("March 2, 2026", "Tax", "Sales tax paid by buyer", "Order #1001", "--", "-$5.35", "-$5.35"),
+    et("March 2, 2026", "Fee", "Transaction fee: Synthetic Cork Yoga Mat", "Order #1001", "--", "-$4.03", "-$4.03"),
+    et("March 3, 2026", "Marketing", "Etsy Ads", "Bill for click-throughs to your shop on Mar 2, 2026", "--", "-$0.55", "-$0.55"),
+    et("March 3, 2026", "Shipping", "USPS shipping label", "Label #900000002", "--", "-$6.37", "-$6.37"),
+    et("March 5, 2026", "Deposit", "$48.58 sent to your bank account"),
+    et("March 10, 2026", "Sale", "Payment for Order #1002", "", "$30.00", "--", "$30.00"),
+    et("March 10, 2026", "Fee", "Processing fee", "Order #1002", "--", "-$1.05", "-$1.05"),
+    et("March 10, 2026", "Tax", "Sales tax paid by buyer", "Order #1002", "--", "-$2.00", "-$2.00"),
+    et("March 10, 2026", "Fee", "Transaction fee: Synthetic Cork Yoga Mat", "Order #1002", "--", "-$1.95", "-$1.95"),
+    et("March 15, 2026", "Marketing", "Etsy Ads", "Bill for click-throughs to your shop on Mar 14, 2026", "--", "-$0.40", "-$0.40"),
+    et("March 16, 2026", "Deposit", "$24.60 sent to your bank account"),
+    et("March 20, 2026", "Sale", "Payment for Order #1003", "", "$20.00", "--", "$20.00"),
+    et("March 20, 2026", "Fee", "Transaction fee: Synthetic Cork Yoga Mat", "Order #1003", "--", "-$1.30", "-$1.30"),
+    et("March 22, 2026", "Deposit", "$99.99 sent to your bank account"),
+    et("March 30, 2026", "Marketing", "Etsy Ads", "Bill for click-throughs to your shop on Mar 29, 2026", "--", "-$0.10", "-$0.10"),
+]
+apr = [
+    et("April 2, 2026", "Sale", "Payment for Order #1004", "", "$15.00", "--", "$15.00"),
+    et("April 2, 2026", "Fee", "Transaction fee: Synthetic Cork Yoga Mat", "Order #1004", "--", "-$1.00", "-$1.00"),
+    et("April 2, 2026", "Marketing", "Etsy Ads", "Bill for click-throughs to your shop on Apr 1, 2026", "--", "-$0.15", "-$0.15"),
+    et("April 3, 2026", "Deposit", "$13.75 sent to your bank account"),
+    et("April 20, 2026", "Marketing", "Etsy Ads", "Bill for click-throughs to your shop on Apr 19, 2026", "--", "-$0.30", "-$0.30"),
+]
+for name, rows in (("etsy_statement_2026_3.csv", mar), ("etsy_statement_2026_4.csv", apr)):
+    with open(OUT / name, "w", newline="", encoding="utf-8-sig") as f:
+        w = csv.writer(f, lineterminator="\n")
+        w.writerow(ET_COLS)
+        w.writerows(reversed(rows))
+
 print("fixtures written to", OUT)
 print("settlement 3 net", money(net(S3)), "v2 total", money(total))

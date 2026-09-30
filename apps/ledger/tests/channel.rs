@@ -11,7 +11,8 @@ use ledger::channel::amazon::{self, AmazonConfig};
 use ledger::channel::report::{self, By};
 use ledger::channel::shopify::{self, OrderBook, ShopifyConfig};
 use ledger::channel::sku::map_rule;
-use ledger::channel::stubs::{ChannelParser, EtsyParser, WalmartReconParser};
+use ledger::channel::etsy::{self, EtsyConfig};
+use ledger::channel::walmart::{self, WalmartConfig};
 use ledger::channel::{Channel, ImportSummary};
 use ledger::store::Ledger;
 
@@ -342,10 +343,183 @@ fn report_totals_tie_to_the_postings_and_render() {
     assert!(report::channel_sales(&l, COMPANY, ymd(2027, 1, 1), ymd(2027, 1, 31), By::Family, None).unwrap().is_empty());
 }
 
+// ---------------------------------------------------------------- walmart
+
+fn wm_cfg(as_of: NaiveDate) -> WalmartConfig {
+    WalmartConfig { as_of, ..WalmartConfig::default() }
+}
+
+fn wm(l: &Ledger, as_of: NaiveDate) -> ImportSummary {
+    walmart::import_recon(l, COMPANY, &fixture("walmart_recon.csv"), &wm_cfg(as_of), None, None).unwrap()
+}
+
 #[test]
-fn walmart_and_etsy_are_honest_stubs() {
-    assert!(matches!(WalmartReconParser.parse("x"), Err(ledger::channel::ChannelError::NotImplemented(_))));
-    assert!(matches!(EtsyParser.parse("x"), Err(ledger::channel::ChannelError::NotImplemented(_))));
+fn walmart_periods_post_one_per_settlement_and_clearing_nets_to_the_payout() {
+    let l = fresh();
+    let s = wm(&l, ymd(2026, 4, 30));
+    // Periods ending 21 Mar and 4 Apr post; 18 Apr has bad tax; 19 Sep is not paid by 30 Apr.
+    assert_eq!(s.posted, 2, "{}", s.render_text());
+    assert_eq!(s.pending, vec!["walmart:2026-09-19".to_string()]);
+    assert_eq!(s.quarantined.len(), 1);
+    assert!(s.quarantined[0].0 == "walmart:2026-04-18" && s.quarantined[0].1.contains("tax_not_netted"));
+    let r = recon(&l, "walmart");
+    assert_eq!(r.len(), 2, "one row for March, one for April");
+    for m in &r {
+        assert_eq!(m.net, m.payouts, "{}: every settlement nets to its bank transfer", m.month);
+    }
+    // March period: 21.99 + 59.99 + 10.00 sales, 13.80 commission, -5.00 reserve release,
+    // payout 91.98 - 13.80 - 5.00 = 73.18 (tax nets to zero and is nowhere).
+    let mar = r.iter().find(|m| m.month == "2026-03").unwrap();
+    assert_eq!(mar.gross_product_sales, 9198, "gross product sales");
+    assert_eq!(mar.fees, 1380);
+    assert_eq!(mar.adjustments, 500);
+    assert_eq!(mar.payouts, 7318);
+    // April period: refund of the wristbands (-21.99, commission back 3.30) and a mat sale.
+    let apr = r.iter().find(|m| m.month == "2026-04").unwrap();
+    assert_eq!(apr.refunds, 2199);
+    assert_eq!(apr.payouts, 8999 - 1350 - 2199 + 330);
+    assert_eq!(tb_balance(&l, "1172"), 0, "Walmart clearing nets to zero");
+    assert_eq!(tb_balance(&l, "2200"), 0, "facilitator tax never reaches sales tax payable");
+}
+
+#[test]
+fn walmart_reimport_is_idempotent() {
+    let l = fresh();
+    let first = wm(&l, ymd(2026, 4, 30));
+    let second = wm(&l, ymd(2026, 4, 30));
+    assert_eq!(first.posted, 2);
+    assert_eq!(second.posted, 0);
+    assert_eq!(second.skipped, 2);
+    assert_eq!(second.facts_inserted, 0);
+    assert!(second.facts_existing > 0);
+    assert_eq!(recon(&l, "walmart").len(), 2);
+}
+
+#[test]
+fn walmart_pending_period_posts_once_paid() {
+    let l = fresh();
+    let early = wm(&l, ymd(2026, 4, 30));
+    assert_eq!(early.pending.len(), 1);
+    let later = wm(&l, ymd(2026, 10, 1));
+    assert!(later.pending.is_empty());
+    assert_eq!(later.posted, 1, "only the newly paid period posts: {}", later.render_text());
+    assert_eq!(recon(&l, "walmart").iter().map(|m| m.payouts).sum::<i64>(), 7318 + 8999 - 1350 - 2199 + 330 + 4999 - 750);
+}
+
+#[test]
+fn walmart_facts_families_and_flags() {
+    let l = fresh();
+    let s = wm(&l, ymd(2026, 4, 30));
+    assert_eq!(s.unmapped_skus, 1, "ZZ-WIDGET-1 is the only unmapped SKU");
+    let flagged: Vec<_> = s.flagged.iter().map(|f| f.1.as_str()).collect();
+    assert!(flagged.iter().any(|f| f.contains("reserve releases")), "{flagged:?}");
+    let rows = ledger::channel::db::list_sku_map(&l, COMPANY, true).unwrap();
+    assert!(rows.iter().any(|r| r.sku.eq_ignore_ascii_case("ZZ-WIDGET-1")));
+    let sales = report::channel_sales(&l, COMPANY, ymd(2026, 3, 1), ymd(2026, 4, 30), By::Family, Some(Channel::Walmart)).unwrap();
+    assert!(sales.iter().any(|r| r.family == "Wristbands & Tags"));
+    assert!(sales.iter().any(|r| r.family == "Rescue Tube 50\""));
+    assert!(sales.iter().any(|r| r.family == "Floating Mat"));
+}
+
+#[test]
+fn walmart_quarantine_is_not_plugged_and_can_be_listed() {
+    let l = fresh();
+    wm(&l, ymd(2026, 4, 30));
+    let q = ledger::channel::db::list_quarantine(&l, COMPANY).unwrap();
+    assert!(q.iter().any(|r| r.external_id == "walmart:2026-04-18"));
+}
+
+#[test]
+fn walmart_period_columns_win_when_the_file_has_them() {
+    // The real export leaves Period Start/End blank; when they are filled,
+    // rows are grouped by them and the derived cycle is not used.
+    let text = fixture("walmart_recon.csv");
+    let mut out = String::new();
+    for (i, line) in text.lines().enumerate() {
+        if i == 0 {
+            out.push_str(&format!("{line}\n"));
+        } else if line.contains(",03/") {
+            // The first two columns are the period; blank them and refill.
+            let rest = line.splitn(3, ',').nth(2).unwrap();
+            out.push_str(&format!("2026-03-01,2026-03-31,{rest}\n"));
+        }
+    }
+    let periods = walmart::parse(&out).unwrap();
+    assert_eq!(periods.len(), 1);
+    assert!(periods[0].from_file && periods[0].end == ymd(2026, 3, 31) && periods[0].start == ymd(2026, 3, 1));
+    assert_eq!(periods[0].payout, ymd(2026, 4, 3));
+}
+
+// ------------------------------------------------------------------- etsy
+
+fn et(l: &Ledger, files: &[&str]) -> ImportSummary {
+    let texts: Vec<String> = files.iter().map(|f| fixture(f)).collect();
+    let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
+    etsy::import_statements(l, COMPANY, &refs, &EtsyConfig::default(), None, None).unwrap()
+}
+
+#[test]
+fn etsy_deposits_post_and_tax_is_excluded() {
+    let l = fresh();
+    let s = et(&l, &["etsy_statement_2026_3.csv", "etsy_statement_2026_4.csv"]);
+    // 5 Mar, 16 Mar and 3 Apr post; the 22 Mar deposit is stated as 99.99 and does not tie.
+    assert_eq!(s.posted, 3, "{}", s.render_text());
+    assert_eq!(s.quarantined.len(), 1);
+    assert!(s.quarantined[0].0 == "etsy:2026-03-22:1" && s.quarantined[0].1.contains("clearing_mismatch"));
+    assert_eq!(s.pending.len(), 1, "20 April ads wait for the next deposit");
+    let r = recon(&l, "etsy");
+    for m in &r {
+        assert_eq!(m.net, m.payouts, "{}", m.month);
+    }
+    let mar = r.iter().find(|m| m.month == "2026-03").unwrap();
+    // Orders 1001 and 1002: 62.00 + 28.00 sales (tax rows removed), returns none.
+    assert_eq!(mar.gross_product_sales, 6200 + 2800);
+    assert_eq!(mar.payouts, 4858 + 2460);
+    assert_eq!(tb_balance(&l, "1173"), 0);
+    assert_eq!(tb_balance(&l, "2200"), 0);
+    // Fees: 4.03 + 2.27 + 0.20 + 6.37 + 0.55 (batch 1) and 1.95 + 1.05 + 0.40 (batch 2), advertising included.
+    assert_eq!(mar.fees, 403 + 227 + 20 + 637 + 55 + 195 + 105 + 40);
+}
+
+#[test]
+fn etsy_carry_across_files_resolves_when_all_months_are_one_run() {
+    let l = fresh();
+    let s = et(&l, &["etsy_statement_2026_4.csv", "etsy_statement_2026_3.csv"]);
+    // File order does not matter: files are ordered by their first row.
+    assert_eq!(s.posted, 3, "{}", s.render_text());
+    // Alone, April's deposit has 15.00 - 1.00 - 0.15 = 13.85 in it but states 13.75:
+    // the missing 0.10 is March's carry, so it cannot tie without March.
+    let alone = et(&fresh(), &["etsy_statement_2026_4.csv"]);
+    assert_eq!(alone.posted, 0);
+    assert_eq!(alone.quarantined.len(), 1);
+}
+
+#[test]
+fn etsy_reimport_is_idempotent() {
+    let l = fresh();
+    let first = et(&l, &["etsy_statement_2026_3.csv", "etsy_statement_2026_4.csv"]);
+    let second = et(&l, &["etsy_statement_2026_3.csv", "etsy_statement_2026_4.csv"]);
+    assert_eq!(first.posted, 3);
+    assert_eq!(second.posted, 0);
+    assert_eq!(second.skipped, 3);
+    assert!(second.facts_existing > 0 && second.facts_inserted == 0);
+}
+
+#[test]
+fn etsy_unknown_types_are_flagged_and_orphan_tax_is_quarantined() {
+    let l = fresh();
+    let stmt = "Date,Type,Title,Info,Currency,Amount,\"Fees & Taxes\",Net,\"Tax Details\"\n\
+        \"May 5, 2026\",Deposit,\"$10.00 sent to your bank account\",,USD,--,--,--,--\n\
+        \"May 4, 2026\",Adjustment,\"Something odd\",,USD,$10.00,--,$10.00,--\n";
+    let s = etsy::import_statements(&l, COMPANY, &[stmt], &EtsyConfig::default(), None, None).unwrap();
+    assert_eq!(s.posted, 1, "{}", s.render_text());
+    assert!(s.flagged.iter().any(|f| f.1.contains("no rule")));
+    let orphan = "Date,Type,Title,Info,Currency,Amount,\"Fees & Taxes\",Net,\"Tax Details\"\n\
+        \"June 5, 2026\",Deposit,\"$-3.00 sent to your bank account\",,USD,--,--,--,--\n\
+        \"June 4, 2026\",Tax,\"Sales tax paid by buyer\",\"Order #77\",USD,--,-$3.00,-$3.00,--\n";
+    let s = etsy::import_statements(&l, COMPANY, &[orphan], &EtsyConfig::default(), None, None).unwrap();
+    assert_eq!(s.posted, 0);
+    assert_eq!(s.quarantined.len(), 1, "{}", s.render_text());
 }
 
 #[test]
@@ -406,7 +580,15 @@ fn cli_imports_reports_and_reimports_idempotently() {
     assert!(csv.status.success());
     assert!(String::from_utf8_lossy(&csv.stdout).starts_with("channel,month"));
 
-    // Stubs refuse loudly.
+    // The Walmart importer refuses a file that is not a reconciliation report.
     let w = cli(&["import", "walmart-recon", "--db", db, "--company", COMPANY, "--file", &a]);
     assert!(!w.status.success());
+    let wf = f("walmart_recon.csv");
+    let w = cli(&["import", "walmart-recon", "--db", db, "--company", COMPANY, "--file", &wf, "--as-of", "2026-04-30"]);
+    // One period is quarantined on purpose, so the exit is non-zero, but the rest posted.
+    assert!(String::from_utf8_lossy(&w.stdout).contains("postings posted    : 2"), "{}", String::from_utf8_lossy(&w.stdout));
+    let e3 = f("etsy_statement_2026_3.csv");
+    let e4 = f("etsy_statement_2026_4.csv");
+    let e = cli(&["import", "etsy", "--db", db, "--company", COMPANY, "--file", &e3, "--file", &e4]);
+    assert!(String::from_utf8_lossy(&e.stdout).contains("postings posted    : 3"), "{}", String::from_utf8_lossy(&e.stdout));
 }

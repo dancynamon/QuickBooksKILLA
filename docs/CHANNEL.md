@@ -12,7 +12,8 @@ ledger import shopify-payouts --db D --company C --payouts P.csv --transactions 
 ledger import shopify-orders  --db D --company C --orders O.csv --lines L.csv [--refunds R.csv]
 ledger import amazon-unified  --db D --company C --file F.csv
 ledger import amazon-settlement-v2 --db D --company C --file F.txt
-ledger import walmart-recon | etsy      # stubs: exit non-zero, NotImplemented
+ledger import walmart-recon --db D --company C --file RECON.csv [--as-of DATE]
+ledger import etsy --db D --company C --file STATEMENT.csv [--file ...]   # all months in ONE call
 ledger report channel-sales --from --to [--by family|sku] [--channel c] [--format csv|json|text]
 ledger report channel-recon --from --to [--format csv|json|text]
 ledger sku-map list|unmapped|set --db D --company C [--channel c --sku s --family f]
@@ -48,8 +49,22 @@ so clearing legitimately holds settlements not yet paid and any pre-window
 carry when the import starts mid-history. `channel-recon` shows the balance;
 subtract the carry and list the open settlements before calling it a residual.
 
+## Walmart and Etsy (real formats, verified 2026-09-30)
+
+- **Walmart**: Seller Center > Reports > Payments > Payments Reconciliation
+  (download is a zip holding one CSV). Period Start/End columns come back
+  blank, so periods are derived from the statement cycle (14 days, ending
+  Saturdays, anchor 2026-09-19, payout the Tuesday 3 days after). That grid is
+  an assumption to confirm against the statement pages. Release Reserve rows go
+  to 6620, flagged; Product tax and its withheld twin must net to zero.
+- **Etsy**: Finances > Monthly statements > Download CSV (per month; the
+  Download Data page's Orders / Deposits CSVs arrive by email and were not
+  available). One posting per Deposit row; a deposit must equal the net since
+  the previous one, so import every month in one run or the first deposit of a
+  gap will be quarantined as opening carry.
+
 ## Not done
 
-Walmart and Etsy parsers (stubs). V2 refund and non-order rows are tested only
+V2 refund and non-order rows are tested only
 through the unified path. Class per family is a Dan/Joel policy choice
 (`product_families.class_id`).

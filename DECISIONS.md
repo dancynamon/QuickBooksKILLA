@@ -493,5 +493,8 @@ item 2, which only a sandbox can settle.
   what clearing must tie to.
 - *Rejected: guess family for unknown SKUs.* They land in Custom / Other,
   flagged.
-- Restatement of history stays gated per month (posting map); Walmart and Etsy
-  are stubs until real exports exist.
+- Restatement of history stays gated per month (posting map).
+- Walmart (payments reconciliation CSV) and Etsy (monthly statement CSV)
+  importers read the real exports; same posting shape, per settlement period
+  and per deposit respectively. Families added 2026-09-30: Pool Games &
+  Basketball, Water Fitness, Dock Bumpers, Kneeling Pads.
