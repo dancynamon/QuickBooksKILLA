@@ -16,7 +16,8 @@
 //! ## Mapping HTTP onto [`QboClient`]
 //!
 //! - `query` builds `SELECT * FROM <Entity>` with an optional
-//!   `WHERE MetaData.LastUpdatedTime >= x AND < y` clause, followed by
+//!   `WHERE MetaData.LastUpdatedTime >= x AND < y` clause (name lists also
+//!   get `Active IN (true, false)`, see `active_filter`), followed by
 //!   `ORDERBY Id STARTPOSITION n MAXRESULTS m` ([`PAGE_ORDER`]), against
 //!   `GET /v3/company/<realm>/query`. QBO's `STARTPOSITION` is 1-based; the
 //!   trait's `start_position` is 0-based (`crate::client::QboClient::query`
@@ -685,17 +686,41 @@ impl QboClient for HttpQboClient {
 /// sync's start time, never to the last row read.
 const PAGE_ORDER: &str = "ORDERBY Id";
 
-/// `SELECT Id, MetaData FROM <Entity> ORDERBY Id STARTPOSITION n MAXRESULTS m`.
-fn build_index_query(entity_type: EntityType, start_position: usize, max_results: usize) -> String {
-    format!(
-        "SELECT Id, MetaData FROM {} {PAGE_ORDER} STARTPOSITION {} MAXRESULTS {max_results}",
-        entity_type.as_str(),
-        start_position + 1,
-    )
+/// Name-list entities QBO filters to `Active = true` unless the query says
+/// otherwise. A deactivated customer, vendor or item is still referenced by
+/// every document that used it, so the mirror needs it; without the clause
+/// the initial pull never sees it and the reconcile index reports it as
+/// "extra" the moment CDC (which does return it) mirrors the deactivation
+/// (M0, 14 Oct 2026: 41 Items deactivated that morning, quarantined).
+fn active_filter(entity_type: EntityType) -> Option<&'static str> {
+    match entity_type {
+        EntityType::Account
+        | EntityType::Class
+        | EntityType::Customer
+        | EntityType::Vendor
+        | EntityType::Item
+        | EntityType::Term
+        | EntityType::Department => Some("Active IN (true, false)"),
+        _ => None,
+    }
 }
 
-/// `SELECT * FROM <Entity> [WHERE MetaData.LastUpdatedTime >= x AND < y]
+/// `SELECT Id, MetaData FROM <Entity> [WHERE Active IN (true, false)]
 /// ORDERBY Id STARTPOSITION n MAXRESULTS m`.
+fn build_index_query(entity_type: EntityType, start_position: usize, max_results: usize) -> String {
+    let mut query = format!("SELECT Id, MetaData FROM {}", entity_type.as_str());
+    if let Some(active) = active_filter(entity_type) {
+        query.push_str(&format!(" WHERE {active}"));
+    }
+    query.push_str(&format!(
+        " {PAGE_ORDER} STARTPOSITION {} MAXRESULTS {max_results}",
+        start_position + 1,
+    ));
+    query
+}
+
+/// `SELECT * FROM <Entity> [WHERE [Active IN (true, false) AND]
+/// MetaData.LastUpdatedTime >= x AND < y] ORDERBY Id STARTPOSITION n MAXRESULTS m`.
 ///
 /// `start_position` is the trait's 0-based page offset; QBO's `STARTPOSITION`
 /// counts from 1, so it goes on the wire as `start_position + 1`.
@@ -705,13 +730,20 @@ fn build_select(
     start_position: usize,
     max_results: usize,
 ) -> String {
-    let mut query = format!("SELECT * FROM {}", entity_type.as_str());
+    let mut filters: Vec<String> = active_filter(entity_type)
+        .map(str::to_string)
+        .into_iter()
+        .collect();
     if let Some(range) = updated {
-        query.push_str(&format!(
-            " WHERE MetaData.LastUpdatedTime >= '{}' AND MetaData.LastUpdatedTime < '{}'",
+        filters.push(format!(
+            "MetaData.LastUpdatedTime >= '{}' AND MetaData.LastUpdatedTime < '{}'",
             range.from.to_rfc3339(),
             range.to.to_rfc3339(),
         ));
+    }
+    let mut query = format!("SELECT * FROM {}", entity_type.as_str());
+    if !filters.is_empty() {
+        query.push_str(&format!(" WHERE {}", filters.join(" AND ")));
     }
     query.push_str(&format!(
         " {PAGE_ORDER} STARTPOSITION {} MAXRESULTS {max_results}",
@@ -893,6 +925,7 @@ mod tests {
             build_select(EntityType::Item, None, 1000, 1000),
             build_select(EntityType::Item, Some(window), 0, 1000),
             build_index_query(EntityType::Item, 1000, 1000),
+            build_index_query(EntityType::Invoice, 1000, 1000),
         ] {
             assert!(
                 query.contains(" ORDERBY Id STARTPOSITION "),
@@ -902,8 +935,52 @@ mod tests {
         }
         assert_eq!(
             build_index_query(EntityType::Item, 1000, 1000),
-            "SELECT Id, MetaData FROM Item ORDERBY Id STARTPOSITION 1001 MAXRESULTS 1000"
+            "SELECT Id, MetaData FROM Item WHERE Active IN (true, false) ORDERBY Id STARTPOSITION 1001 MAXRESULTS 1000"
         );
+    }
+
+    #[test]
+    fn name_lists_ask_for_inactive_records_and_documents_do_not() {
+        // QBO returns only active name-list rows unless asked; documents have
+        // no Active field and would reject the filter.
+        let window = UpdatedRange {
+            from: DateTime::parse_from_rfc3339("2026-10-01T00:00:00Z")
+                .unwrap()
+                .with_timezone(&Utc),
+            to: DateTime::parse_from_rfc3339("2026-10-14T00:00:00Z")
+                .unwrap()
+                .with_timezone(&Utc),
+        };
+        for entity_type in [
+            EntityType::Account,
+            EntityType::Class,
+            EntityType::Customer,
+            EntityType::Vendor,
+            EntityType::Item,
+            EntityType::Term,
+            EntityType::Department,
+        ] {
+            for query in [
+                build_select(entity_type, None, 0, 1000),
+                build_index_query(entity_type, 0, 1000),
+            ] {
+                assert!(
+                    query.contains(" WHERE Active IN (true, false) ORDERBY Id"),
+                    "query was: {query}"
+                );
+            }
+            let windowed = build_select(entity_type, Some(window), 0, 1000);
+            assert!(
+                windowed.contains(
+                    " WHERE Active IN (true, false) AND MetaData.LastUpdatedTime >= '2026-10-01T00:00:00+00:00' AND MetaData.LastUpdatedTime < '2026-10-14T00:00:00+00:00' ORDERBY Id"
+                ),
+                "query was: {windowed}"
+            );
+        }
+        for entity_type in [EntityType::Invoice, EntityType::Bill, EntityType::TaxCode] {
+            assert!(!build_select(entity_type, None, 0, 10).contains("Active"));
+            assert!(!build_index_query(entity_type, 0, 10).contains("Active"));
+        }
     }
 
     #[test]
