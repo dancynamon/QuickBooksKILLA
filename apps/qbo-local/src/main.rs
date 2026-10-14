@@ -1672,30 +1672,48 @@ fn print_sync_report_table(report: &SyncReport) {
     }
 }
 
-/// Watches stdin for EOF or a line reading "stop" and sets `stop` when either
-/// happens. Ctrl-C on the foreground process is the other, simpler way out —
-/// safe because every write this daemon makes is transactional, so the worst
-/// a kill loses is the in-flight tick, never a half-written one.
+/// Watches stdin for a line reading "stop" and sets `stop` when one arrives.
+/// Ctrl-C on the foreground process is the other, simpler way out — safe
+/// because every write this daemon makes is transactional, so the worst a
+/// kill loses is the in-flight tick, never a half-written one.
 fn spawn_stdin_stop_watcher(stop: Arc<AtomicBool>) {
     std::thread::spawn(move || {
-        let stdin = std::io::stdin();
-        let mut line = String::new();
-        loop {
-            line.clear();
-            match stdin.lock().read_line(&mut line) {
-                Ok(0) => break, // EOF
-                Ok(_) if line.trim() == "stop" => break,
-                Ok(_) => continue,
-                Err(_) => break,
-            }
+        if stdin_asks_to_stop(std::io::stdin().lock()) {
+            stop.store(true, Ordering::Relaxed);
         }
-        stop.store(true, Ordering::Relaxed);
     });
+}
+
+/// True once a line reading "stop" arrives; false when the input ends or
+/// errors first. EOF is not a stop request: a daemon started in the
+/// background (`nohup`, launchd, a non-interactive shell) has stdin on
+/// /dev/null and would otherwise exit after its first tick (M0, 14 Oct 2026).
+fn stdin_asks_to_stop(mut input: impl std::io::BufRead) -> bool {
+    let mut line = String::new();
+    loop {
+        line.clear();
+        match input.read_line(&mut line) {
+            Ok(0) | Err(_) => return false,
+            Ok(_) if line.trim() == "stop" => return true,
+            Ok(_) => continue,
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stdin_at_eof_does_not_stop_the_daemon() {
+        assert!(!stdin_asks_to_stop(std::io::empty()));
+        assert!(!stdin_asks_to_stop("status\n".as_bytes()));
+    }
+
+    #[test]
+    fn a_stop_line_stops_the_daemon() {
+        assert!(stdin_asks_to_stop("\nhello\n  stop  \n".as_bytes()));
+    }
 
     fn args(raw: &[&str]) -> Vec<String> {
         raw.iter().map(|s| s.to_string()).collect()
