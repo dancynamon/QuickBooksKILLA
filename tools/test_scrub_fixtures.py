@@ -169,6 +169,17 @@ class ReferentialConsistencyTests(unittest.TestCase):
 
 
 class LeakDetectorTests(unittest.TestCase):
+    def test_more_names_than_the_word_list_still_get_distinct_fakes(self):
+        mapper = scrub_fixtures.NameMapper()
+        span = len(scrub_fixtures.FIRST_WORDS) * len(scrub_fixtures.LAST_WORDS)
+        originals = [f"Invented Customer {n}" for n in range(span * 3 + 7)]
+        fakes = [mapper.fake_for(name) for name in originals]
+        self.assertEqual(len(set(fakes)), len(originals))
+        self.assertEqual(mapper.fake_for(originals[0]), fakes[0])
+        again = scrub_fixtures.NameMapper()
+        self.assertEqual([again.fake_for(name) for name in originals], fakes)
+        self.assertTrue(any(fake.endswith(" 4") for fake in fakes))
+
     def test_a_name_hidden_in_an_unhandled_field_fails_the_run(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = pathlib.Path(tmp)

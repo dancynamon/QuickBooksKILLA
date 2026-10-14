@@ -92,8 +92,8 @@ TEXT_FIELD_KEYS = ("PrivateNote", "Description")  # CustomerMemo.value handled s
 REALM_PATH_RE = re.compile(r"^\d{10,}$")
 
 # Deliberately plain, deliberately fictional. Two independent lists combine
-# into FIRST_WORDS x LAST_WORDS candidates, which is plenty of headroom for a
-# fixture set with a handful of names in it, and open addressing (see
+# into FIRST_WORDS x LAST_WORDS candidates, then the same again with a numeric
+# suffix for as many rounds as a whole book needs; open addressing (see
 # NameMapper) guarantees no two different originals ever collide regardless.
 FIRST_WORDS = [
     "Harbor", "Meadow", "Cobalt", "Marigold", "Amber", "Cedar", "Willow",
@@ -141,19 +141,36 @@ class NameMapper:
     def __init__(self) -> None:
         self.map: dict[str, str] = {}
         self._taken: set[str] = set()
+        # Fakes handed out per round; round 0 is the bare "First Last" names,
+        # round r > 0 suffixes them " r+1". Lets a full round be skipped
+        # rather than probed slot by slot.
+        self._round_fill: list[int] = []
 
     def fake_for(self, original: str) -> str:
         if original in self.map:
             return self.map[original]
         span = len(FIRST_WORDS) * len(LAST_WORDS)
         index = _stable_int(original) % span
+        # A whole real book has thousands of customers and vendors (M0, 14 Oct
+        # 2026: ~11,400 against 576 bare names), so once every bare name is
+        # taken the next round reuses the list with a numeric suffix. Still
+        # deterministic for the same input, still never two originals on one
+        # fake.
+        round_no = 0
+        while round_no < len(self._round_fill) and self._round_fill[round_no] >= span:
+            round_no += 1
+        if round_no == len(self._round_fill):
+            self._round_fill.append(0)
+        suffix = "" if round_no == 0 else f" {round_no + 1}"
         for _ in range(span):
-            candidate = f"{FIRST_WORDS[index // len(LAST_WORDS)]} {LAST_WORDS[index % len(LAST_WORDS)]}"
+            base = f"{FIRST_WORDS[index // len(LAST_WORDS)]} {LAST_WORDS[index % len(LAST_WORDS)]}"
+            candidate = base + suffix
             if candidate not in self._taken:
                 break
             index = (index + 1) % span
-        else:  # pragma: no cover — would need more distinct names than the word list can hold
-            raise ScrubError("name word list exhausted — add more words to FIRST_WORDS/LAST_WORDS")
+        else:  # pragma: no cover — the round was checked to have a free slot
+            raise ScrubError("name mapper round unexpectedly full")
+        self._round_fill[round_no] += 1
         self._taken.add(candidate)
         self.map[original] = candidate
         return candidate
