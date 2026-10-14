@@ -294,13 +294,13 @@ Record findings in `DECISIONS.md` and update `DESIGN.md` §0's confidence column
 From the kickoff brief's M0 acceptance, adjusted — WaterLine is out of scope
 per Dan, so Aquamentor alone:
 
-- [ ] Aquamentor fully mirrored, complete history, actual row counts reported
-- [ ] Initial sync wall-clock time reported (target < 10 min, measured not claimed)
-- [ ] CDC poll keeps the replica current
-- [ ] Token survives an app restart
+- [x] Aquamentor fully mirrored, complete history, actual row counts reported — 14 Oct 2026, D26
+- [x] Initial sync wall-clock time reported (target < 10 min, measured not claimed) — 14 Oct 2026, D26
+- [x] CDC poll keeps the replica current — 14 Oct 2026, D26
+- [x] Token survives an app restart — 14 Oct 2026, D26
 - [ ] Token survives a 24-hour idle, including a rotation
-- [ ] `cargo test` still fully offline and green
-- [ ] Writes still disabled for every realm
+- [x] `cargo test` still fully offline and green — 14 Oct 2026, D26
+- [x] Writes still disabled for every realm — 14 Oct 2026, D26
 
 WaterLine runs the same code path with its own realm-scoped budget whenever Dan
 wants it turned on — no design accommodation needed.

@@ -475,3 +475,195 @@ help.developer.intuit.com/s/article/What-is-RequestId-and-its-usage.
 
 DESIGN §0 and §4.4 updated. Phase C's gate (verified facts) is now met except
 item 2, which only a sandbox can settle.
+
+## D26 — M0 first live sync: five fixes, and what the numbers are
+
+13–14 Oct 2026, local Claude Code session on Dan's Mac, read-only against
+production. The Rust side's first HTTP calls to Intuit.
+
+**Measured.** A clean initial pull into an empty replica, both query fixes in
+(`.local/m0-run/initial-pull-timing.log`): **225 s wall clock, 81 requests,
+67,747 rows, rc=0**, target < 600 s. Per entity: CompanyInfo 1, Account 346,
+Class 3, Customer 10,127, Vendor 1,280, Item 3,473, TaxCode 539, TaxRate 715,
+Term 30, Estimate 2,520, Invoice 8,418, SalesReceipt 1,191, CreditMemo 230,
+RefundReceipt 71, Payment 6,924, PurchaseOrder 3,969, Bill 3,900,
+BillPayment 3,249, VendorCredit 135, Purchase 16,298, Deposit 3,432,
+JournalEntry 896. The reconcile sweep over the main replica then reported
+every type remote = local with 0 missing, 0 stale, 0 extra, `clean: true`,
+quarantine 0 (229 s). The first pull, before the fixes, took 334 s.
+
+**The two-week read-only window (DESIGN §8) starts 14 Oct 2026**, the day the
+sweep came back clean. Earliest write go: 28 Oct 2026, on Dan's word only.
+
+Five things the fake Intuit server could not have shown:
+
+1. **Projection drops MetaData** (`862fc9a`). `SELECT Id, MetaData FROM
+   CompanyInfo` came back with `DefaultTimeZone, Id, SyncToken, sparse` and no
+   `MetaData.LastUpdatedTime`. `HttpQboClient::index` now checks every row of
+   a projected page and, when any lacks the timestamp, falls back to the full
+   `SELECT *` page for the rest of the run, saying so once on stderr.
+   *Rejected: special-casing CompanyInfo.* Nothing documents which entities
+   honour the projection; checking the answer covers the next one too.
+2. **Sync ordering** (`0cb72b8`). On an empty replica the reconcile sweep
+   finds every id missing and heals each with its own GET — 226 s and then
+   "rate budget exhausted". `m0-live.sh sync` now runs `daemon --once` first
+   (the driver's full sweep pages `SELECT *` at 1,000 a page, ~80 requests for
+   the whole book) and the reconcile sweep after it, as verification only.
+3. **Paging on a tied key** (`889188d`). Every paged query sorted on
+   `MetaData.LastUpdatedTime`, which has ties wherever records were
+   bulk-imported. Offset paging over ties lets QBO order the tied rows
+   differently on each request: the first pull read 15 Customers twice and
+   never saw 15 others; the index missed 41 Items. Both now sort on `Id`. No
+   caller depends on the order: the cursor advances to the sync's start time.
+4. **Inactive name-list records** (`857b866`). QBO filters Account, Class,
+   Customer, Vendor, Item, Term and Department queries to `Active = true`
+   unless asked. The first pull never mirrored 224 inactive Items, 32
+   Customers, 22 Vendors or 5 Accounts, all still referenced by old
+   documents; the gap only showed when 41 Items were deactivated in QBO on
+   14 Oct, CDC (which returns inactive rows) mirrored the change, and the
+   index flagged them as extra. Queries now carry `WHERE Active IN (true,
+   false)`, ANDed with the backfill window. The six cursors were cleared once
+   to force a full re-pull; the sweep after it was clean.
+
+5. **EOF on stdin stopped the daemon** (`b2aaea4`). The stop watcher treated
+   end of stdin as "stop", so a daemon started in the background (`nohup`,
+   launchd, a non-interactive shell) ran one tick and exited cleanly. Only a
+   line reading `stop` ends it now. This would have hit the launchd job too.
+
+**Daemon, measured** (`status-t0-step5.log`, `status-t10-step5.log`): over ten
+minutes the CDC cursor advanced 16:28:50 → 16:41:35 UTC on every entity type,
+one new Bill arrived (3,900 → 3,901), quarantine stayed 0. **Restart:** the
+daemon was killed and restarted with `m0-live.sh daemon`; it ticked within
+seconds with no token prompt. **Rotation:** the access token was refreshed
+and rotated at 16:33:39 UTC while the daemon ran; the restarted daemon and
+`status` read the rotated keychain item without a prompt. The 24-hour idle
+check is still to do.
+
+**Fixtures: recorded, not committed.** `record` ran (rc=0, 81 pages, 172 MB
+under `.local/fixtures/raw`), then `scrub` hit two things. The fake-name list
+held 576 names against ~11,400 customers and vendors (fixed, `ca04d5e`). After
+that the leak detector refused the run with 933,320 hits, because 806 real
+name parts are one to three characters long and the detector matches
+substrings, so it fires on `USD` and `QBO`. It worked as designed: nothing was
+written. Even a clean run would not be committable as it stands, because the
+scrubber keeps amounts by design (`Balance`, `CurrentBalance`, every total),
+and HANDOFF §2.6 forbids real balances. What it needs, for Dan to decide:
+record a small slice rather than the whole book, scrub balances and amounts,
+and have the detector match whole words (or whole fields) for short names
+instead of being loosened.
+
+Operational, not code: the token store is the login keychain, and every
+release build is ad-hoc signed, so **each rebuild of `qbo-local` triggers one
+macOS "allow access" dialog** that only a person can answer ("Always Allow").
+Unanswered, the call blocks; after ~8 h macOS refused it (`OSStatus -60008`,
+`sweep-attempt3-keychain-timeout.log`). Signing with a stable identity would
+end the per-build prompt; deferred to M1.
+
+Not hit, still open: `Reconciler::spend` and `SyncDriver::spend` pass the
+run's start time to `try_acquire`, so the bucket never refills within one run
+and a single sweep or tick is capped at ~500 requests. The whole book is 81
+requests, so only a sweep with many hundreds of heals would reach it.
+
+## D27 — M0 tbdiff baseline
+
+14 Oct 2026, first `ledger import` against the live replica, then `ledger tb`
+and `ledger tbdiff` against QBO's own trial balance as of the same date
+(`qbo-local report --name trial-balance --live`, 192 rows). This is the
+baseline the parallel run starts from. No code was changed to move any of it.
+
+Import: 51,233 documents translated, 4,781 posted, 6,489 non-posting,
+**39,963 rejected**; 318 accounts created, **185 needing mapping**, 3 classes
+created. Rejections by reason: 29,253 no class on the line, its item or the
+header; 6,920 payment applications plus unapplied ≠ stated total; 3,775 entry
+does not balance; 14 journal entry debits ≠ credits; 1 no account for a line.
+By type: Purchase 14,187, Invoice 8,418 (every one), Payment 6,921,
+Bill 3,672, BillPayment 3,249 (every one), Deposit 1,438, SalesReceipt 1,191,
+JournalEntry 468, CreditMemo 230, VendorCredit 118, RefundReceipt 71.
+
+`tbdiff.log`, verbatim except that the 148 per-account `skip` rows between the
+summary and the footer are left out: they name real counterparties and lenders
+and stay in `.local/m0-run/tbdiff.log` (HANDOFF §3.5).
+
+```
+TRIAL BALANCE DIFF   aquamentor   as of 2026-10-14
+
+account                                       ledger           qbo       delta  tier
+Bank — Checking (1100)                    1448959.17      14681.50  1434277.67  must
+Credit card (2100)                          77478.37          0.00    77478.37  must
+Accounts receivable (1200+2300)            -16519.97      89717.17  -106237.14  must
+Accounts payable (2000+2050)              -541047.40     -22339.48  -518707.92  must
+Sales tax payable (2200)                      762.84          0.00      762.84  must
+Total income (4xxx)                             0.00   -1067532.28  1067532.28  must
+Total equity (3xxx)                       1071003.15      22113.17  1048889.98  must
+Inventory, raw materials (1300)                 0.00          0.00        0.00  may
+Inventory, finished goods (1310)          -125027.54      99117.18  -224144.72  may
+Cost of goods sold (5000)                       0.00        633.71     -633.71  may
+Manufacturing variance (5100)                   0.00      64297.22   -64297.22  may
+Parts and labour applied (5300)                 0.00          0.00        0.00  may
+Undeposited funds (1150)                   -28001.73      35212.69   -63214.42  may
+Sales income (4100)                             0.00          0.00        0.00  may
+Shipping income (4300)                          0.00      -3295.94     3295.94  may
+Discounts given (4900)                          0.00          0.00        0.00  may
+Returns and allowances (4950)                   0.00          0.00        0.00  may
+[... 148 per-account skip rows omitted, see above ...]
+
+MUST-MATCH FAILURES: 7        MAY-DIFFER UNEXPLAINED: 5
+```
+
+Open questions for Dan and Joel, each with a best guess at the policy behind
+it. A guess is a place to start the conversation, not a finding.
+
+1. **Class is mandatory in the ledger and nearly absent in QBO.** 29,253
+   rejections; QBO has 3 classes and most lines carry none. Every income,
+   AR, inventory and COGS variance below is downstream of this. *Guess:* W16
+   (D21) falls back to the item's default class, but QBO items carry none, so
+   the fallback never fires. Options: assign a default class to each of the
+   3,473 items (once, in the ledger's own item map), a single "unclassified"
+   class for history before a cut date, or class required only from the
+   1 Jan 2027 opening. The three QBO classes also did not match the W15 list
+   (`foam`, `sign`, `chair`, `drop`, `cnc`, …).
+2. **Payments and bill payments import with zero applications** (6,920 +
+   3,249). In the raw QBO payment the applied amount sits on `Line[].Amount`;
+   `LinkedTxn[]` has only `TxnId`/`TxnType`. `ledger`'s
+   `collect_applications` reads `LinkedTxn[].Amount`, so every application
+   is 0. *Guess:* not a policy question but an importer mapping defect,
+   recorded here rather than fixed because this entry is a baseline. Fixing
+   it should move AR, AP, Undeposited funds and Checking more than anything
+   else on this list.
+3. **Checking (1100): ledger 1,448,959.17 vs QBO 14,681.50.** *Guess:* two
+   things at once: (a) outflows (bill payments, purchases, deposits) are
+   mostly rejected, so the ledger keeps inflows it never spends; (b) QBO
+   splits cash across many bank accounts (PayPal, processors, a second
+   checking) and the ledger's 1100 may be collecting some of them.
+4. **Total income: ledger 0.00 vs QBO −1,067,532.28; equity 1,071,003.15 vs
+   22,113.17.** Every invoice and sales receipt was rejected (no class), so no
+   income posted. The ledger's equity looks like an opening-balance or
+   unmapped-account plug landing in 3xxx. *Guess:* QBO shows current-year
+   income and closes prior years into retained earnings; the ledger needs to
+   agree on that boundary (D24: books open 1 Jan 2027) and on where
+   unmapped balances go.
+5. **Accounts payable: −541,047.40 vs −22,339.48.** Bills partly post, bill
+   payments never do (item 2), so AP only grows. *Guess:* resolves with
+   item 2.
+6. **Accounts receivable: −16,519.97 vs 89,717.17.** No invoices posted, but
+   whatever payments and credit memos did reduced AR below zero. *Guess:*
+   items 1 and 2.
+7. **Credit card (2100): 77,478.37 vs 0.00.** *Guess:* QBO books card spend to
+   named card accounts that the tbdiff's 2100 line does not include, while
+   the ledger defaults card purchases to 2100. Mapping question: which QBO
+   accounts are 2100.
+8. **Sales tax payable (2200): 762.84 vs 0.00.** *Guess:* QBO keeps sales tax
+   in its agency liability account ("sales tax pay", one of the 185 unmapped);
+   the ledger posts line tax to 2200. Mapping question.
+9. **May-differ, unexplained (5):** Inventory finished goods (1310)
+   −125,027.54 vs 99,117.18; COGS (5000) 0 vs 633.71; Manufacturing variance
+   (5100) 0 vs 64,297.22; Undeposited funds (1150) −28,001.73 vs 35,212.69;
+   Shipping income (4300) 0 vs −3,295.94. *Guess:* inventory and COGS follow
+   from rejected invoices (no relief) and from the D20 costing policy (W2
+   capitalise raw material, W4 standard cost with variance to 5100, W12
+   moving average) against QBO expensing material on purchase; the 5100 that
+   QBO shows is history the ledger has no posting rule to reproduce; Undeposited funds drains through deposits while the payments that
+   fill it are rejected (item 2); shipping income follows item 1.
+10. **185 accounts need mapping before sign-off** (`ledger-import.log`).
+    Several look like personal or owner items (loans, "Personal Expense",
+    "y/e adj", "Ask My Accountant"). These are Joel's call.

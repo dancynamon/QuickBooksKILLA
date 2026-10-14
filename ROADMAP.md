@@ -35,7 +35,7 @@ to goal 2 rather than a detour. Three consequences run through the phases:
 
 ## 0. Where it stands
 
-`cargo test --workspace`: 672 tests (4 ignored), all offline, all green. Clippy clean.
+`cargo test --workspace`: 677 passed, 5 ignored, all offline, all green (Mac, 14 Oct 2026). Clippy clean.
 
 Everything that can be built **without Intuit credentials** has been built:
 money and rounding, realm scoping, SQLite replica with projection and
@@ -51,7 +51,7 @@ Everything **not** built needs credentials, Intuit's docs, or a UI toolchain:
 | `KeychainTokenStore` | A | **built 28 Sep** (`keychain.rs`, default on macOS); real-keychain test runs on the Mac |
 | OAuth loopback flow, or import of the `qbo_headless` refresh token | A | **flow built 13 Sep** (`oauth.rs`, `qbo-local auth`); running it needs the client id/secret and redirect URI on the Mac |
 | `HttpQboClient` | A | **built 13 Sep**, proven against a fake Intuit server; first real contact needs credentials |
-| First live sync, counts and wall-clock measured | A | credentials |
+| First live sync, counts and wall-clock measured | A | **done 14 Oct** (D26): 67,747 rows, 225 s, sweep clean, quarantine 0; CDC daemon running live |
 | CDC daemon loop, nightly snapshot | A | **built 11 Sep**, wired into the `qbo-local` binary (`daemon`, `sweep`, `snapshot`, `init`, `status`); runs with `--mock` until `HttpQboClient` exists |
 | Reconciliation sweep (DESIGN §7) | A | **built 11 Sep**; TB diff (step 5) waits on the ledger |
 | Fixture recorder and scrubber (HANDOFF §2.6) | A | **built 13 Sep**; a synthetic set is committed, real scrubbed ones need one live recording |
@@ -63,8 +63,18 @@ Everything **not** built needs credentials, Intuit's docs, or a UI toolchain:
 | Write UI into own store, export via outbox | D | C |
 | Statement import, sales-tax reports, accountant mode, Authorize.net, MCP server | G | **all built by 13 Sep** except the Authorize.net hosted payment link on the own invoice; nightly parallel-run command and `qbo-local report` built too |
 
-The Rust side has never made one HTTP call to Intuit. That is still the first
-thing to fix.
+**The Rust side now talks to Intuit** (13–14 Oct 2026, D26). The first live
+contact found five things the fake server could not: a projection that drops
+`MetaData`, a sync-order problem, paging on a tied sort key, name-list queries
+that skip inactive records, and a daemon that exited on EOF. All fixed, each
+with a test. Aquamentor is mirrored in full, the daemon runs on CDC, the token
+lives in the keychain and survived a restart and a rotation, and `ledger
+import` has run once: the tbdiff baseline is D27. The two-week read-only
+window started **14 Oct 2026**.
+
+Still open in M0: the 24-hour token idle check; scrubbed real fixtures
+(blocked, D26: the scrubber needs a slice and amount scrubbing first);
+registering `qbo-local-mcp` against the live replica.
 
 ---
 
