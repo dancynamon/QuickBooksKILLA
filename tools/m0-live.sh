@@ -45,8 +45,11 @@ step_tokens() {
 step_sync() {
   log "6. first live sync, read-only"
   $BIN/qbo-local init --db $DB --realm "$REALM" --name "Aquamentor, Inc."
-  timed sweep $BIN/qbo-local sweep --db $DB --realm "$REALM" --live
+  # Initial pull first: the driver's full sweep pages SELECT * (1000/page).
+  # The reconcile sweep after it only verifies; run on an empty replica it
+  # heals every id with its own GET and exhausts the budget (M0, 13 Oct 2026).
   timed daemon-once $BIN/qbo-local daemon --db $DB --realm "$REALM" --live --once
+  timed sweep $BIN/qbo-local sweep --db $DB --realm "$REALM" --live
   $BIN/qbo-local status --db $DB --config .local/config.toml | tee "$RUN/status-after-sync.log"
 }
 step_fixtures() {
