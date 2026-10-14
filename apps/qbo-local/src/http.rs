@@ -17,7 +17,7 @@
 //!
 //! - `query` builds `SELECT * FROM <Entity>` with an optional
 //!   `WHERE MetaData.LastUpdatedTime >= x AND < y` clause, followed by
-//!   `ORDERBY MetaData.LastUpdatedTime STARTPOSITION n MAXRESULTS m`, against
+//!   `ORDERBY Id STARTPOSITION n MAXRESULTS m` ([`PAGE_ORDER`]), against
 //!   `GET /v3/company/<realm>/query`. QBO's `STARTPOSITION` is 1-based; the
 //!   trait's `start_position` is 0-based (`crate::client::QboClient::query`
 //!   documents zero as "the first page"), so every call adds one before it
@@ -588,11 +588,7 @@ impl QboClient for HttpQboClient {
         // default `QboClient::index` (a full `query` with the payload
         // thrown away), so the reconciliation sweep's first step doesn't
         // pull whole payloads over the wire just to discard them.
-        let query_string = format!(
-            "SELECT Id, MetaData FROM {} ORDERBY MetaData.LastUpdatedTime STARTPOSITION {} MAXRESULTS {max_results}",
-            entity_type.as_str(),
-            start_position + 1,
-        );
+        let query_string = build_index_query(entity_type, start_position, max_results);
         let path = format!("/v3/company/{}/query", realm.as_str());
         let params = [
             ("query".to_string(), query_string),
@@ -679,8 +675,27 @@ impl QboClient for HttpQboClient {
     }
 }
 
+/// The sort every paged query uses. It must be unique per row: offset paging
+/// over a key with ties lets QBO return the tied rows in a different order on
+/// each request, so a row on a page boundary is skipped by one page and
+/// repeated by the next. `MetaData.LastUpdatedTime` has ties wherever records
+/// were bulk-imported (M0, 14 Oct 2026: 41 live Items skipped by the index
+/// and quarantined as "extra"; 15 Customers read twice by the initial pull).
+/// No caller depends on the order itself: the driver's cursor advances to the
+/// sync's start time, never to the last row read.
+const PAGE_ORDER: &str = "ORDERBY Id";
+
+/// `SELECT Id, MetaData FROM <Entity> ORDERBY Id STARTPOSITION n MAXRESULTS m`.
+fn build_index_query(entity_type: EntityType, start_position: usize, max_results: usize) -> String {
+    format!(
+        "SELECT Id, MetaData FROM {} {PAGE_ORDER} STARTPOSITION {} MAXRESULTS {max_results}",
+        entity_type.as_str(),
+        start_position + 1,
+    )
+}
+
 /// `SELECT * FROM <Entity> [WHERE MetaData.LastUpdatedTime >= x AND < y]
-/// ORDERBY MetaData.LastUpdatedTime STARTPOSITION n MAXRESULTS m`.
+/// ORDERBY Id STARTPOSITION n MAXRESULTS m`.
 ///
 /// `start_position` is the trait's 0-based page offset; QBO's `STARTPOSITION`
 /// counts from 1, so it goes on the wire as `start_position + 1`.
@@ -699,7 +714,7 @@ fn build_select(
         ));
     }
     query.push_str(&format!(
-        " ORDERBY MetaData.LastUpdatedTime STARTPOSITION {} MAXRESULTS {max_results}",
+        " {PAGE_ORDER} STARTPOSITION {} MAXRESULTS {max_results}",
         start_position + 1,
     ));
     query
@@ -858,7 +873,36 @@ mod tests {
         let query = build_select(EntityType::Invoice, None, 0, 100);
         assert_eq!(
             query,
-            "SELECT * FROM Invoice ORDERBY MetaData.LastUpdatedTime STARTPOSITION 1 MAXRESULTS 100"
+            "SELECT * FROM Invoice ORDERBY Id STARTPOSITION 1 MAXRESULTS 100"
+        );
+    }
+
+    #[test]
+    fn paged_queries_sort_on_the_unique_id_never_on_a_timestamp() {
+        // A timestamp sort has ties, and ties under offset paging skip and
+        // repeat rows across page boundaries (see `PAGE_ORDER`).
+        let window = UpdatedRange {
+            from: DateTime::parse_from_rfc3339("2026-10-01T00:00:00Z")
+                .unwrap()
+                .with_timezone(&Utc),
+            to: DateTime::parse_from_rfc3339("2026-10-14T00:00:00Z")
+                .unwrap()
+                .with_timezone(&Utc),
+        };
+        for query in [
+            build_select(EntityType::Item, None, 1000, 1000),
+            build_select(EntityType::Item, Some(window), 0, 1000),
+            build_index_query(EntityType::Item, 1000, 1000),
+        ] {
+            assert!(
+                query.contains(" ORDERBY Id STARTPOSITION "),
+                "query was: {query}"
+            );
+            assert!(!query.contains("ORDERBY MetaData"), "query was: {query}");
+        }
+        assert_eq!(
+            build_index_query(EntityType::Item, 1000, 1000),
+            "SELECT Id, MetaData FROM Item ORDERBY Id STARTPOSITION 1001 MAXRESULTS 1000"
         );
     }
 

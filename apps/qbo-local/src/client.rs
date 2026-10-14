@@ -435,9 +435,9 @@ impl QboClient for MockQbo {
             })
             .map(|(_, payload)| payload.clone())
             .collect();
-        // Ordered by update time, then id, so a paged read is stable — which is
-        // what STARTPOSITION paging assumes and what the real endpoint gives
-        // with an explicit ORDERBY.
+        // A total order, so a paged read is stable — which is what
+        // STARTPOSITION paging assumes. The real endpoint only gives that when
+        // the ORDERBY key is unique, hence `ORDERBY Id` in `http.rs`.
         matches.sort_by(|a, b| {
             a.last_updated_utc
                 .cmp(&b.last_updated_utc)
