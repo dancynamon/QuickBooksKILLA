@@ -198,6 +198,12 @@ pub struct HttpQboClient {
     agent: ureq::Agent,
     minor_version: u32,
     rotation_log: PathBuf,
+    /// Whether `index` still tries the projected `SELECT Id, MetaData` query.
+    /// Production QBO answered that projection with rows carrying no
+    /// `MetaData.LastUpdatedTime` (M0 live run, 13 Oct 2026), so the first
+    /// such page flips this off and every later page goes straight to the
+    /// full-page index — one wasted call per client, not one per page.
+    index_projection: bool,
 }
 
 impl HttpQboClient {
@@ -218,6 +224,7 @@ impl HttpQboClient {
             agent,
             minor_version: DEFAULT_MINOR_VERSION,
             rotation_log: rotation_log.into(),
+            index_projection: true,
         }
     }
 
@@ -591,11 +598,40 @@ impl QboClient for HttpQboClient {
             ("query".to_string(), query_string),
             self.minorversion_param(),
         ];
-        let value = self.request_json(Method::Get, &path, &params, None)?;
-        query_response_items(&value, entity_type)
-            .iter()
-            .map(to_index_entry)
-            .collect()
+        if self.index_projection {
+            let value = self.request_json(Method::Get, &path, &params, None)?;
+            let items = query_response_items(&value, entity_type);
+            let projected = items
+                .iter()
+                .all(|item| item.pointer("/MetaData/LastUpdatedTime").is_some());
+            if projected {
+                return items.iter().map(to_index_entry).collect();
+            }
+            // Keys only, never values: enough to see what the projection
+            // actually returned without logging a customer's data.
+            let keys: Vec<String> = items
+                .iter()
+                .find(|item| item.pointer("/MetaData/LastUpdatedTime").is_none())
+                .and_then(Value::as_object)
+                .map(|object| object.keys().cloned().collect())
+                .unwrap_or_default();
+            eprintln!(
+                "qbo-local: projected index of {} returned no MetaData.LastUpdatedTime \
+                 (keys: {}); using the full-page index from here on",
+                entity_type.as_str(),
+                keys.join(",")
+            );
+            self.index_projection = false;
+        }
+        Ok(self
+            .query(realm, entity_type, None, start_position, max_results)?
+            .into_iter()
+            .map(|payload| IndexEntry {
+                qbo_id: payload.qbo_id,
+                last_updated_utc: payload.last_updated_utc,
+                is_deleted: payload.is_deleted,
+            })
+            .collect())
     }
 
     fn fetch(

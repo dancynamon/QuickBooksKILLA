@@ -162,6 +162,66 @@ fn query_pages_and_converts_the_zero_based_start_to_intuits_one_based_startposit
 }
 
 #[test]
+fn index_falls_back_to_the_full_page_when_the_projection_drops_metadata() {
+    // Production QBO (M0 live run, 13 Oct 2026) answered
+    // `SELECT Id, MetaData FROM ...` with rows that had no
+    // MetaData.LastUpdatedTime. The index must still come back whole, and
+    // the projection is tried once per client, not once per page.
+    let queries: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let captured = Arc::clone(&queries);
+
+    let server = support::start(move |request: &FakeRequest| {
+        let query = request.query.get("query").cloned().unwrap_or_default();
+        captured.lock().unwrap().push(query.clone());
+        let start = extract_after(&query, "STARTPOSITION").unwrap();
+        let max = extract_after(&query, "MAXRESULTS").unwrap();
+        let ids = (start..start + max).filter(|id| (1..=3).contains(id));
+        let items: Vec<Value> = if query.starts_with("SELECT Id, MetaData") {
+            ids.map(|id| json!({ "Id": id.to_string(), "domain": "QBO", "sparse": true }))
+                .collect()
+        } else {
+            ids.map(|id| {
+                entity(
+                    &id.to_string(),
+                    "0",
+                    json!({ "DisplayName": format!("Customer {id}") }),
+                    &format!("2026-01-0{id}T00:00:00Z"),
+                )
+            })
+            .collect()
+        };
+        FakeResponse::json(200, json!({ "QueryResponse": { "Customer": items } }))
+    });
+
+    let directory = tempfile::tempdir().unwrap();
+    let mut client = fresh_client(&server, directory.path());
+
+    let first = client.index(&realm(), EntityType::Customer, 0, 2).unwrap();
+    assert_eq!(
+        first.iter().map(|e| e.qbo_id.as_str()).collect::<Vec<_>>(),
+        ["1", "2"]
+    );
+    assert_eq!(
+        first[1].last_updated_utc,
+        "2026-01-02T00:00:00Z".parse::<DateTime<Utc>>().unwrap()
+    );
+
+    let second = client.index(&realm(), EntityType::Customer, 2, 2).unwrap();
+    assert_eq!(
+        second.iter().map(|e| e.qbo_id.as_str()).collect::<Vec<_>>(),
+        ["3"]
+    );
+
+    let seen = queries.lock().unwrap();
+    let projected = seen
+        .iter()
+        .filter(|q| q.starts_with("SELECT Id, MetaData"))
+        .count();
+    assert_eq!(projected, 1, "queries were: {seen:?}");
+    assert_eq!(seen.len(), 3, "queries were: {seen:?}");
+}
+
+#[test]
 fn cdc_maps_a_deleted_status_to_is_deleted() {
     let server = support::start(|request: &FakeRequest| {
         assert_eq!(
