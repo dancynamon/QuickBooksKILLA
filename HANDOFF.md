@@ -298,7 +298,7 @@ per Dan, so Aquamentor alone:
 - [x] Initial sync wall-clock time reported (target < 10 min, measured not claimed) — 14 Oct 2026, D26
 - [x] CDC poll keeps the replica current — 14 Oct 2026, D26
 - [x] Token survives an app restart — 14 Oct 2026, D26
-- [ ] Token survives a 24-hour idle, including a rotation
+- [x] Token survives a 24-hour idle, including a rotation — 15 Oct 2026, on rotation evidence (D26); a no-use 24 h gap was not tested
 - [x] `cargo test` still fully offline and green — 14 Oct 2026, D26
 - [x] Writes still disabled for every realm — 14 Oct 2026, D26
 

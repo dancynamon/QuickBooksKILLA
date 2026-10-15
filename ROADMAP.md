@@ -72,7 +72,7 @@ lives in the keychain and survived a restart and a rotation, and `ledger
 import` has run once: the tbdiff baseline is D27. The two-week read-only
 window started **14 Oct 2026**.
 
-Still open in M0: the 24-hour token idle check; scrubbed real fixtures
+Still open in M0: scrubbed real fixtures
 (blocked, D26: the scrubber needs a slice and amount scrubbing first);
 registering `qbo-local-mcp` against the live replica.
 

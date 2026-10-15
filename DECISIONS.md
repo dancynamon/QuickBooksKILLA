@@ -536,8 +536,13 @@ one new Bill arrived (3,900 → 3,901), quarantine stayed 0. **Restart:** the
 daemon was killed and restarted with `m0-live.sh daemon`; it ticked within
 seconds with no token prompt. **Rotation:** the access token was refreshed
 and rotated at 16:33:39 UTC while the daemon ran; the restarted daemon and
-`status` read the rotated keychain item without a prompt. The 24-hour idle
-check is still to do.
+`status` read the rotated keychain item without a prompt. **24 hours:** by
+15 Oct 16:03 UTC the daemon had run 23 h unattended (two transient network
+timeouts, each retried next tick; nightly snapshot at 07:00 UTC); Intuit
+rotated the refresh token overnight (expiry 23 → 24 Jan 2027) and `status`
+showed the realm authorised. Dan ticked the 24-hour box on this rotation
+evidence; the token was in use throughout, so a no-use 24-hour gap is
+untested.
 
 **Fixtures: recorded, not committed.** `record` ran (rc=0, 81 pages, 172 MB
 under `.local/fixtures/raw`), then `scrub` hit two things. The fake-name list

@@ -12,7 +12,7 @@ From `HANDOFF.md` §5, Aquamentor only:
 - [x] Initial sync wall-clock reported (target under 10 minutes, measured) — 225 s, 81 requests, clean pull into an empty DB (`initial-pull-timing.log`); 334 s on the first pull before the query fixes
 - [x] CDC poll keeps the replica current (cursor advances, quarantine stays 0) — cursor 16:28:50 → 16:41:35 UTC over 10 min, a new Bill mirrored (3,900 → 3,901), quarantine 0 at t0 and t+10 (`status-t0-step5.log`, `status-t10-step5.log`)
 - [x] Token survives an app restart — daemon killed and restarted 14 Oct 16:41 UTC, ticked within seconds, no prompt; access token also rotated mid-run (16:33:39 UTC) and the rotated item read back cleanly
-- [ ] Token survives a 24-hour idle, including a rotation (follow-up check) — rotation seen 14 Oct; the 24-hour idle is still to run (from 15 Oct, `qbo-local status --db .local/replica.db --config .local/config.toml`)
+- [x] Token survives a 24-hour idle, including a rotation — ticked on rotation evidence (Dan, 15 Oct): over 23 h of live daemon use Intuit rotated the refresh token (expiry 23 Jan → 24 Jan 2027) and access tokens renewed hourly, every one saved to and read back from the keychain with no prompt; `status` authorised 15 Oct 16:03 UTC. Caveat: the token was in use, not idle — a no-use 24 h gap was not tested
 - [x] `cargo test --workspace` still fully offline and green — 677 passed, 0 failed, 5 ignored on the Mac, 14 Oct, after the M0 fixes (672 / 4 on Linux, 28 Sep)
 - [x] Writes still disabled for every realm — `write enabled : false` in every status log; only reads (query, CDC, GET, reports) went to Intuit, 13–14 Oct
 
