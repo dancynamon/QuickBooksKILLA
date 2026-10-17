@@ -1410,6 +1410,46 @@ function createBook() {
     };
   }
 
+  /** `render_document`'s result shape. The fixture writes no file: the
+   * path is where the real book would put it. */
+  function renderDocument(documentId) {
+    const doc = documents.get(documentId);
+    if (!doc) throw new LedgerFixtureError(`unknown document ${documentId}`);
+    const printable = ["Invoice", "Estimate", "SalesReceipt", "CreditMemo", "PurchaseOrder"];
+    if (!printable.includes(doc.kind)) throw new LedgerFixtureError(`a ${doc.kind} has no printed form`);
+    const open = doc.kind === "Invoice"
+      ? openDocuments("receivable", "9999-12-31").find((d) => d.document_id === documentId)
+      : null;
+    const balance = open ? toCents(open.open) : 0;
+    return {
+      path: `~/Documents/Ledger Documents/fixture/${doc.kind}-${doc.number ?? documentId}.pdf`,
+      page_count: 1,
+      document_id: documentId,
+      kind: doc.kind,
+      number: doc.number,
+      is_voided: doc.is_voided,
+      subtotal: fromCents(doc.total_cents),
+      tax: "0.00",
+      total: fromCents(doc.total_cents),
+      amount_paid: fromCents(doc.kind === "Invoice" ? doc.total_cents - balance : 0),
+      balance_due: fromCents(balance),
+      pay_link: { status: "not_configured", reason: "the fixture has no Authorize.net" },
+      warnings: [],
+    };
+  }
+
+  function renderStatement(contactId, asOf) {
+    if (!contacts.has(contactId)) throw new LedgerFixtureError(`unknown customer ${contactId}`);
+    const open = openDocuments("receivable", asOf).filter((d) => d.contact_id === contactId);
+    return {
+      path: `~/Documents/Ledger Documents/fixture/Statement-${contactId}-${asOf}.pdf`,
+      page_count: 1,
+      contact_id: contactId,
+      as_of: asOf,
+      open_items: open.length,
+    };
+  }
+
   /** `mcp.rs::apply_credit` over `books.rs::apply_credit`. */
   function applyCredit(creditId, targetId, amount, actor) {
     if (!actor) throw new LedgerFixtureError('missing "actor"');
@@ -1682,6 +1722,10 @@ function createBook() {
         return updateDocument(args.document, args.actor);
       case "void_document":
         return voidDocument(args.document_id, args.reason, args.actor);
+      case "render_document":
+        return renderDocument(args.document_id);
+      case "render_statement":
+        return renderStatement(args.contact_id, args.as_of);
       case "payment_link":
         return paymentLink(args.document_id);
       case "apply_credit":

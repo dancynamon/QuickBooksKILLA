@@ -41,6 +41,8 @@ export const TOOL = Object.freeze({
   voidDocument: "void_document",
   applyCredit: "apply_credit",
   paymentLink: "payment_link",
+  renderDocument: "render_document",
+  renderStatement: "render_statement",
   saveAndPostDocument: "save_and_post_document",
   reverseEntry: "reverse_entry",
   proposeAdjustment: "propose_adjustment",
@@ -159,6 +161,15 @@ export function createProvider(callTool) {
      * minted when the page is about to be opened, never printed. */
     paymentLink(documentId) {
       return callTool(TOOL.paymentLink, { document_id: documentId });
+    },
+    /** D39: write a PDF of one saved document; returns its path. `payLink`
+     * false leaves an open invoice's Authorize.net page out. Sends nothing. */
+    renderDocument(documentId, payLink) {
+      return callTool(TOOL.renderDocument, args({ document_id: documentId, pay_link: payLink }));
+    },
+    /** D39: a customer statement PDF as of a date; returns its path. */
+    renderStatement(contactId, asOf) {
+      return callTool(TOOL.renderStatement, { contact_id: contactId, as_of: asOf });
     },
     saveAndPostDocument(document, actor, items) {
       return callTool(TOOL.saveAndPostDocument, args({ document, actor, items }));

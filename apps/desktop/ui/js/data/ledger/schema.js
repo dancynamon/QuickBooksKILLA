@@ -257,6 +257,16 @@ export const SCHEMA = {
     result: "object",
     top: ["document_id", "invoice_number", "amount", "environment", "url", "token", "expires_at", "html"],
   },
+  // `mcp.rs::render_document` / `render_statement` — they write PDFs, never
+  // the book, so no `locked_through`.
+  render_document: {
+    result: "object",
+    top: ["path", "page_count", "document_id", "kind", "number", "is_voided", "subtotal", "tax", "total", "amount_paid", "balance_due", "pay_link", "warnings"],
+  },
+  render_statement: {
+    result: "object",
+    top: ["path", "page_count", "contact_id", "as_of", "open_items"],
+  },
   save_and_post_document: {
     result: "object",
     top: ["document_id", "version", "entry_id", "entry", ...WITH_LOCKED_THROUGH],

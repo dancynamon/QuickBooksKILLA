@@ -527,3 +527,14 @@ test("payment_link mints a sandbox page for an open invoice's open balance and r
   await assert.rejects(ledger.paymentLink("bill-3001"), /not an invoice/);
   await assert.rejects(ledger.paymentLink("inv-2001"), /fully paid/);
 });
+
+test("render_document and render_statement return the real tools' shapes and refuse what has no printed form", async () => {
+  const ledger = createFixtureProvider();
+  const doc = await ledger.renderDocument("inv-2003");
+  assertRow(doc, SCHEMA.render_document.top, "render_document");
+  assert.equal(doc.balance_due, "426.50");
+  const statement = await ledger.renderStatement("cust-harborview", "2026-10-15");
+  assertRow(statement, SCHEMA.render_statement.top, "render_statement");
+  assert.equal(statement.open_items, 2);
+  await assert.rejects(ledger.renderDocument("pmt-4001"), /no printed form/);
+});

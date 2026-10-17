@@ -136,7 +136,8 @@ export async function renderContacts(main, kind) {
             ${kind === "customer" ? `<td>${c.is_tax_exempt ? '<span class="tag">exempt</span>' : ""}</td>` : ""}
             <td class="r num">${plain(owed.get(c.contact_id) ?? null, { dashForZero: true })}</td>
             <td class="r"><button class="btn" type="button" data-edit="${esc(c.contact_id)}">Edit</button>
-              <a class="btn" href="#ledger-new/${kind === "customer" ? "Invoice" : "Bill"}" data-start="${esc(c.contact_id)}">${kind === "customer" ? "Invoice" : "Bill"}</a></td>
+              <a class="btn" href="#ledger-new/${kind === "customer" ? "Invoice" : "Bill"}" data-start="${esc(c.contact_id)}">${kind === "customer" ? "Invoice" : "Bill"}</a>
+              ${kind === "customer" ? `<button class="btn" type="button" data-statement="${esc(c.contact_id)}" title="Save a statement PDF as of today">Statement</button>` : ""}</td>
           </tr>`).join("")}</tbody>
         </table></div></div>
       </div>`;
@@ -147,6 +148,17 @@ export async function renderContacts(main, kind) {
         });
       });
       wireListControls(main, key, rerender);
+      main.querySelectorAll("[data-statement]").forEach((btn) => {
+        btn.addEventListener("click", async () => {
+          try {
+            const r = await ledgerProvider.renderStatement(btn.dataset.statement, todayIso());
+            main.dataset[`${key}Notice`] = JSON.stringify({ ok: true, text: `Saved statement ${r.path} (${r.open_items} open item${r.open_items === 1 ? "" : "s"}). Emailing it is a separate step.` });
+          } catch (err) {
+            main.dataset[`${key}Notice`] = JSON.stringify({ ok: false, text: err.message });
+          }
+          rerender();
+        });
+      });
       main.querySelectorAll("[data-start]").forEach((a) => {
         a.addEventListener("click", () => {
           sessionHint.contactId = a.dataset.start;

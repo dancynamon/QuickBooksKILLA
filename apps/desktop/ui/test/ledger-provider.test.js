@@ -60,6 +60,8 @@ test("ledger tauri provider calls invoke('ledger_query', ...) for every tool, wi
   await ledger.voidDocument("inv-1088", "entered twice", "dan");
   await ledger.applyCredit("cm-1", "inv-1088", "25.00", "dan");
   await ledger.paymentLink("inv-1088");
+  await ledger.renderDocument("inv-1088", false);
+  await ledger.renderStatement("cust-1", "2026-10-15");
   await ledger.saveAndPostDocument({ document_id: "d1", kind: "Invoice" }, "dan", { i1: { income: "4100", expense: "5000" } });
   await ledger.reverseEntry("je-1", "2026-09-15", "dan");
   await ledger.proposeAdjustment("joel", "why", [{ account: "6100", debit: "1.00" }]);
@@ -68,7 +70,7 @@ test("ledger tauri provider calls invoke('ledger_query', ...) for every tool, wi
   await ledger.closePeriod("2026-08-31", "dan", "close note");
   await ledger.reopenPeriod("2026-08-31", "dan", "reopen note");
 
-  assert.equal(calls.length, 29);
+  assert.equal(calls.length, 31);
   for (const call of calls) assert.equal(call.command, "ledger_query");
 
   const byTool = Object.fromEntries(calls.map((c) => [c.tool, c.args]));
@@ -95,6 +97,8 @@ test("ledger tauri provider calls invoke('ledger_query', ...) for every tool, wi
   assert.deepEqual(byTool[TOOL.voidDocument], { document_id: "inv-1088", reason: "entered twice", actor: "dan" });
   assert.deepEqual(byTool[TOOL.applyCredit], { credit_id: "cm-1", target_document_id: "inv-1088", amount: "25.00", actor: "dan" });
   assert.deepEqual(byTool[TOOL.paymentLink], { document_id: "inv-1088" });
+  assert.deepEqual(byTool[TOOL.renderDocument], { document_id: "inv-1088", pay_link: false });
+  assert.deepEqual(byTool[TOOL.renderStatement], { contact_id: "cust-1", as_of: "2026-10-15" });
   assert.deepEqual(byTool[TOOL.saveAndPostDocument], {
     document: { document_id: "d1", kind: "Invoice" }, actor: "dan",
     items: { i1: { income: "4100", expense: "5000" } },

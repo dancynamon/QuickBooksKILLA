@@ -246,8 +246,36 @@ function noticeHtml(notice) {
   return `<div class="form-ok">${parts.join(" · ")}</div>`;
 }
 
+const PRINTABLE = new Set(["Invoice", "Estimate", "SalesReceipt", "CreditMemo", "PurchaseOrder"]);
+
+/** D39: write this document's PDF and say where it went. Sends nothing. */
+function pdfButtonHtml(saved) {
+  return PRINTABLE.has(saved.kind)
+    ? `<div class="form-actions" style="margin-top:18px"><button class="btn" type="button" id="renderPdf">Save PDF</button><span class="hint" id="renderPdfNote" style="margin:0">Writes the ${esc(saved.kind === "PurchaseOrder" ? "purchase order" : saved.kind.toLowerCase())} as a PDF; emailing it is a separate step.</span></div>`
+    : "";
+}
+
+function wirePdf(main, saved) {
+  const btn = main.querySelector("#renderPdf");
+  if (!btn) return;
+  btn.addEventListener("click", async () => {
+    const note = main.querySelector("#renderPdfNote");
+    btn.disabled = true;
+    try {
+      const r = await ledgerProvider.renderDocument(saved.document_id);
+      const link = r.pay_link?.status === "attached" ? " · with a pay page beside it" : "";
+      note.textContent = `Saved ${r.path} (${r.page_count} page${r.page_count === 1 ? "" : "s"}, balance due ${plain(r.balance_due)})${link}.`;
+    } catch (err) {
+      note.textContent = err.message;
+      note.classList.add("neg");
+    } finally {
+      btn.disabled = false;
+    }
+  });
+}
+
 function voidFormHtml(saved) {
-  return `<form id="voidForm" class="panel" style="margin-top:18px" autocomplete="off"><div class="panel-body">
+  return `${pdfButtonHtml(saved)}<form id="voidForm" class="panel" style="margin-top:18px" autocomplete="off"><div class="panel-body">
     <div class="form-grid">
       <label class="form-field wide"><span class="lbl">Void ${esc(saved.number ?? saved.document_id)}</span>
         <input class="form-input" name="reason" placeholder="Why — kept on the document and its reversal" required>
@@ -286,9 +314,10 @@ function renderReadOnly(main, doc, why) {
         <td class="r num">${plain(l.amount)}</td>
       </tr>`).join("") || `<tr><td colspan="5" class="dim">No lines.</td></tr>`}</tbody>
     </table></div></div>
-    ${doc.is_voided ? "" : voidFormHtml(doc)}
+    ${doc.is_voided ? pdfButtonHtml(doc) : voidFormHtml(doc)}
   </div>`;
   wireVoid(main, doc);
+  wirePdf(main, doc);
 }
 
 function wireVoid(main, saved) {
@@ -390,6 +419,7 @@ function wire(main, kind, spec, draft, contact, itemsById, saved) {
     again();
   };
   wireVoid(main, saved);
+  if (saved) wirePdf(main, saved);
 
   main.querySelectorAll("[data-kind]").forEach((btn) => {
     btn.addEventListener("click", () => {

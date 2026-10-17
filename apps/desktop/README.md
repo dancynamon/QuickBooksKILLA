@@ -125,6 +125,10 @@ hand-posted from a form.
   hosted page for the open balance and opens it at once (the token lasts 15
   minutes, so it is never printed or emailed); the payment posts back to the
   invoice when its batch settles and is imported.
+  A saved invoice, estimate, sales receipt, credit memo or PO has **Save
+  PDF** (`render_document`, D39), and each customer has **Statement**
+  (`render_statement`, as of today). Both only write a file; emailing it is
+  a separate, gated step.
 - **Edit a document** (`#ledger-edit/<document_id>`) — the New document
   form over `get_document`/`update_document`: the saved document read back
   into a draft (a line's rate recovered when quantity × rate gives back
