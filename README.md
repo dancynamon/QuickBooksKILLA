@@ -121,6 +121,10 @@ the Tauri shell compiled. See `ROADMAP.md` and `docs/cowork-mac-session/`.
   command, `docs/NIGHTLY.md`); `qbo-local report` pulls QBO's trial balance
   and aging through the Reports API into the CSVs `tbdiff` and the boundary
   walk read
+- `tools/nightly.sh`: the nightly parallel run as one command (daemon and
+  cursor checks, snapshot, replay, trial balance and aging diffs, a dated
+  report, a notification only on failure) and its two launchd jobs
+  (`docs/NIGHTLY.md`, "Switching it on")
 - `ledger-mcp` over the shared stdio crate, and the desktop app's ledger
   screens (trial balance, P&L, balance sheet, sales tax with the ST-50
   mapping, GL, audit trail, adjustments, bank reconciliation, period close)

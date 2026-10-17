@@ -1,10 +1,11 @@
-//! AR and AP aging from a ledger file, one CSV per book, in the column shape
-//! `qbo-local report --name ar-aging|ap-aging` writes, so the two can be
-//! diffed by contact (docs/PRACTICE-RUN.md). Reads only.
+//! AR and AP aging from a ledger file, one CSV per book (`DIR/ar-<as-of>.csv`
+//! and `DIR/ap-<as-of>.csv`), in the column shape `qbo-local report --name
+//! ar-aging|ap-aging` writes, so the two can be diffed by contact. The
+//! nightly run's aging diff (`tools/nightly.sh`, docs/NIGHTLY.md) reads these;
+//! docs/PRACTICE-RUN.md used it as the `aging_csv` example. Reads only.
 //!
 //! ```text
-//! cargo run -p ledger --example aging_csv -- --db LEDGER.db --company aquamentor \
-//!     --as-of 2026-07-31 --out DIR
+//! ledger-aging --db LEDGER.db --company aquamentor --as-of 2026-07-31 --out DIR
 //! ```
 
 use std::path::PathBuf;
