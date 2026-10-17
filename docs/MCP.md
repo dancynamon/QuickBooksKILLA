@@ -280,6 +280,11 @@ link") — never from the config file.
 `import_payroll` reads `[payroll]` from `LEDGER_PAYROLL_CONFIG` (default
 `.local/config.toml`), unless a call passes `config_path`.
 
+Two more, for `render_document` / `render_statement` only (D39):
+`LEDGER_DOCUMENTS_CONFIG` names the file whose `[documents]` table they read
+(default `.local/config.toml` — the same file), and `LEDGER_DOCUMENTS_DIR`
+overrides where the PDFs go. See "Document tools" below.
+
 ## The write gate
 
 Two rules apply to every write tool below, uniformly, so a skill never has
@@ -734,6 +739,108 @@ expires_at, html }`. **The token lasts 15 minutes and must be POSTed** to
 page that does the POST as soon as it opens; save it and open it, or hand it
 to the customer at once. `environment` is `"sandbox"` unless production is
 enabled in the config.
+
+## Document tools
+
+D39: the PDFs QBO renders today — invoice, estimate, sales receipt, credit
+memo, purchase order and a customer statement — built from the own book
+(`apps/ledger/src/render.rs`). Both tools read the ledger and write one file;
+neither writes the ledger, **neither sends anything** (emailing a document is
+a separate, gated step), and both are refused while an import replay is in
+progress. The same output comes from the CLI: `ledger render document` and
+`ledger render statement` (`ledger --help`).
+
+**What prints.** Everything comes from saved documents and master data: the
+newest version of the document; the contact's display or company name and
+bill/ship addresses (newline-separated in `contacts`); the number, date,
+terms (`Net N` from the due date, else the contact's terms) and due date;
+each line's item SKU and description (the line's own description first),
+quantity, rate (amount ÷ quantity) and amount; subtotal, discount, sales tax
+at its rate, total; amount paid and balance due from the same open-item rule
+`open_documents` uses; the memo as NOTES. A voided document keeps its lines
+and totals, shows `Status: VOID` and a balance of 0.00, and has VOID across
+every page. A purchase order prints VENDOR and SHIP TO the company itself.
+Long documents paginate, repeating the table header, with "Page x of y" on
+every page.
+
+**Company identity** — name, legal name, address lines, phone, email,
+website, logo (an 8-bit PNG) and footer — comes from
+`[documents.company.<company_id>]` in the config file, never from code:
+
+```toml
+[documents]
+output_dir = "~/Documents/Ledger Documents"    # one subfolder per company
+# pay_url = "https://pay.example.com/i/{number}"   # optional, see below
+
+[documents.company.aquamentor]
+name = "Aquamentor"
+legal_name = "Suspended Aquatic Mentor Inc"
+address = ["Street", "Town, ST 00000"]
+phone = "(000) 000-0000"
+email = "billing@example.com"
+logo = "/absolute/path/to/logo.png"
+footer = "Thank you for your business."
+```
+
+With no table for the company, the ledger's own company display name prints
+alone. A logo that is missing or unreadable prints the name as a wordmark
+and adds a warning.
+
+**Where files go.** `LEDGER_DOCUMENTS_DIR`, else `output_dir`, else
+`~/Documents/Ledger Documents`, then `/<company_id>`. A directory inside a git
+work tree is refused unless it is under that tree's ignored `target/` or
+`.local/`, so a customer's PDF cannot be committed by accident. Files are
+named `Invoice 1001 - Blue Harbor Swim Club.pdf` (` (VOID)` added for a void)
+and `Statement - Blue Harbor Swim Club - 2027-04-20.pdf`; rendering again
+overwrites.
+
+### `render_document`
+
+```json
+{ "name": "render_document", "arguments": { "document_id": "0192d4c8-...", "pay_link": true } }
+```
+
+`document_id` is required; `pay_link` defaults to `true`. Refused for any
+kind but the five above. Returns `{ path, page_count, document_id, kind,
+number, is_voided, subtotal, tax, total, amount_paid, balance_due, pay_link,
+warnings }`.
+
+**Pay link.** For an open, non-voided invoice, when the server has an
+Authorize.net client (`ledger-mcp` always builds one from `[authnet]`), the
+tool calls the same code as `payment_link`, writes its self-submitting page
+beside the PDF as `<name>.pay.html`, and adds a PAY ONLINE box to the
+invoice. Because the token lasts 15 minutes (D30), the PDF never carries it:
+the box points at `pay_url` (the durable mint-on-click page D30 leaves as a
+follow-up) when that is configured, else tells the customer to use the link
+sent with the invoice — so the sending step should render (or call
+`payment_link`) right before it sends. `pay_link.status` is one of:
+
+| status | meaning |
+|---|---|
+| `attached` | minted; also `amount`, `environment`, `url`, `expires_at`, `page` (the `.pay.html` path). The token itself is only in that file. |
+| `not_applicable` | not an open, non-voided invoice |
+| `skipped` | `pay_link: false` |
+| `not_configured` | no client, no credentials, or `[authnet]` unusable; `reason` says which |
+| `failed` | the gateway or network refused; `reason`, and a warning. The PDF rendered without the box. |
+
+### `render_statement`
+
+```json
+{ "name": "render_statement", "arguments": { "contact_id": "cust-blue-harbor", "as_of": "2027-04-20" } }
+```
+
+One customer's open invoices and credit memos as of `as_of` (date, number,
+due date, amount, open balance, days past due) and the aging buckets
+Current / 1-30 / 31-60 / 61-90 / Over 90 / TOTAL DUE. Those are exactly that
+customer's row of `aging` (`book: "receivable"`) on the same date — the
+tests hold the two equal. Refused for a vendor or an unknown contact. A
+customer with nothing open gets a statement saying so. Returns `{ path,
+page_count, contact_id, as_of, open_items, aging, warnings }`, `aging` in
+`aging`'s row shape.
+
+Not yet on the statement: unapplied customer payments (they park in 2300, not
+AR, so `aging` does not carry them either) and an activity section (invoices
+and payments in a date range).
 
 ## Repointing a skill
 

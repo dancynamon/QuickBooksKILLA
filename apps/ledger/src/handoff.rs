@@ -927,6 +927,9 @@ mod tests {
             "open_documents",
             "aging",
             "get_document",
+            // Write PDFs to disk, never to the book.
+            "render_document",
+            "render_statement",
         ];
         let writes: Vec<String> = mcp::tools()
             .into_iter()

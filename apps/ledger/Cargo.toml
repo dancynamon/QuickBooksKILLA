@@ -6,6 +6,9 @@ description = "Double-entry general ledger for Aquamentor and WaterLine CNC. LED
 
 [dependencies]
 ledger-core = { path = "../../crates/ledger-core" }
+# Inflates the logo PNG and deflates it into the PDF (D39). Already in the
+# lock file through ureq's flate2; pure Rust.
+miniz_oxide = "0.9"
 qbo-local = { path = "../qbo-local" }
 mcp-stdio = { workspace = true }
 chrono = { workspace = true }

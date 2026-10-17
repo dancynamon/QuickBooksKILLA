@@ -63,3 +63,19 @@ name = "Aquamentor, Inc."
 [payroll.departments]
 # Fallback for anyone not listed above, by SurePayroll department.
 # "Shop" = { class = "foam" }
+
+# Customer documents (DECISIONS.md D39, docs/MCP.md "Document tools"): who
+# the PDFs say they are from, and where `ledger render` / `render_document`
+# write them. Real values belong in the gitignored .local/config.toml only.
+# [documents]
+# output_dir = "~/Documents/Ledger Documents"   # one subfolder per company
+# pay_url = "https://pay.example.com/i/{number}"  # durable pay page, when one exists
+#
+# [documents.company.aquamentor]
+# name = "Company Name"
+# legal_name = "Legal Company Name Inc"
+# address = ["Street", "Town, ST 00000"]
+# phone = "(000) 000-0000"
+# email = "billing@example.com"
+# logo = "/absolute/path/to/logo.png"
+# footer = "Thank you for your business."

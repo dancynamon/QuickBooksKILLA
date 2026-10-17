@@ -8,7 +8,10 @@
 //! All the protocol and tool logic lives in [`ledger::mcp`] and is tested
 //! there directly; this is just the stdio plumbing around it, matching
 //! `qbo-local-mcp`'s shape. `LEDGER_AUTHNET_CONFIG` (default
-//! `.local/config.toml`) names the `[authnet]` config `payment_link` reads. Diagnostics go to stderr — stdout ever carries
+//! `.local/config.toml`) names the `[authnet]` config `payment_link` reads;
+//! `LEDGER_DOCUMENTS_CONFIG` (same default) the `[documents]` table and
+//! `LEDGER_DOCUMENTS_DIR` the output folder `render_document` and
+//! `render_statement` use (D39). Diagnostics go to stderr — stdout ever carries
 //! only JSON-RPC response lines, since that is the wire a client reads.
 
 use ledger::mcp;

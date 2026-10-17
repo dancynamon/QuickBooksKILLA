@@ -33,6 +33,9 @@
 //! - [`mcp`]      — `ROADMAP.md` §G, §D: the MCP server over this ledger —
 //!   every report above as a read tool, plus gated writes through
 //!   [`post`] and [`store`]
+//! - [`render`]   — D39: invoice, estimate, sales receipt, credit memo,
+//!   purchase order and customer statement PDFs from saved documents and
+//!   master data, with the D30 pay link on an open invoice
 //! - [`verify`]   — §4, §5: an invariants sweep recomputed independently of
 //!   the schema's own triggers and foreign keys
 //! - [`payroll`]  — §12: the SurePayroll pay-run journal, one flagged
@@ -54,6 +57,7 @@ pub mod nightly;
 pub mod payroll;
 pub mod pipeline;
 pub mod post;
+pub mod render;
 pub mod report;
 pub mod slim;
 pub mod store;

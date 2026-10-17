@@ -260,6 +260,22 @@ enum Command {
     AuthnetCredentials {
         environment: String,
     },
+    RenderDocument {
+        db: PathBuf,
+        company: String,
+        document: String,
+        out: Option<PathBuf>,
+        config: Option<PathBuf>,
+        pay_link: bool,
+    },
+    RenderStatement {
+        db: PathBuf,
+        company: String,
+        customer: String,
+        as_of: NaiveDate,
+        out: Option<PathBuf>,
+        config: Option<PathBuf>,
+    },
     Verify {
         db: PathBuf,
         company: String,
@@ -401,6 +417,10 @@ USAGE:
     ledger authnet credentials --environment sandbox|production
     ledger payroll import --db PATH --company ID FILE
                    [--config PATH] [--dry-run]
+    ledger render document  --db PATH --company ID --document ID
+                   [--out DIR] [--config PATH] [--no-pay-link]
+    ledger render statement --db PATH --company ID --customer ID
+                   --as-of YYYY-MM-DD [--out DIR] [--config PATH]
     ledger opening --db PATH --company ID --as-of YYYY-MM-DD --qbo-csv PATH
     ledger boundary --db PATH --company ID --replica PATH --realm ID
                    --snapshots DIR
@@ -519,6 +539,18 @@ SUBCOMMANDS:
                     unmapped employee, a net pay that does not tie, or a
                     closed period. Re-running the same file posts nothing.
                     --dry-run prints the entries and writes nothing.
+    render document  Write a PDF of one saved invoice, estimate, sales
+                    receipt, credit memo or purchase order (D39): company
+                    identity from [documents] in --config, bill-to/ship-to,
+                    terms, lines, totals, amount paid, balance due, memo;
+                    VOID across a voided one. An open invoice also gets an
+                    Authorize.net pay link when [authnet] and credentials
+                    are set up (its page is written beside the PDF), unless
+                    --no-pay-link. Prints the path and page count. Sends
+                    nothing.
+    render statement  Write a customer statement PDF as of a date: open
+                    invoices and credits, and the aging buckets that tie to
+                    `aging` for that customer.
     opening   Apply (or idempotently skip/replace) the §6 opening balance
               entry as of a date, from a QBO trial balance CSV of the same
               shape tbdiff reads.
@@ -633,6 +665,17 @@ FLAGS:
                            $LEDGER_AUTHNET_CONFIG or .local/config.toml
                            (authnet link only).
     --environment ENV     sandbox or production (authnet credentials only).
+    --document ID         render document: the document's document_id.
+    --customer ID         render statement: the customer's contact_id.
+    --out DIR             render: the directory to write into (default
+                           $LEDGER_DOCUMENTS_DIR, else [documents] output_dir,
+                           else ~/Documents/Ledger Documents, each plus
+                           /<company>). Refused inside a git work tree except
+                           its target/ or .local/.
+    --config PATH         render: the file holding [documents] (and
+                           [authnet] for the pay link), default
+                           $LEDGER_DOCUMENTS_CONFIG or .local/config.toml.
+    --no-pay-link         render document: never mint a pay link.
     --out DIR             Directory tbdiff-<as-of>.txt/.csv are written into
                            (nightly only); created if it does not exist.
     --out FILE.html       authnet link: write the page that POSTs the
@@ -785,6 +828,7 @@ fn parse(args: &[String]) -> Result<Command, UsageError> {
         "bank" => parse_bank(args),
         "authnet" => parse_authnet(args),
         "payroll" => parse_payroll(args),
+        "render" => parse_render(args),
         "opening" => parse_opening(args),
         "boundary" => parse_boundary(args),
         "verify" => parse_verify(args),
@@ -1269,6 +1313,62 @@ fn parse_authnet_link(mut args: Args<'_>) -> Result<Command, UsageError> {
         config,
         out,
     })
+}
+
+fn parse_render(mut args: Args<'_>) -> Result<Command, UsageError> {
+    let Some(sub) = args.next() else {
+        return Err(UsageError::new(
+            "render requires a subcommand (document, statement)",
+        ));
+    };
+    let mut db = None;
+    let mut company = None;
+    let mut document = None;
+    let mut customer = None;
+    let mut as_of = None;
+    let mut out = None;
+    let mut config = None;
+    let mut pay_link = true;
+    while let Some(flag) = args.next() {
+        match flag.as_str() {
+            "--db" => db = Some(PathBuf::from(next_value(&mut args, "--db")?)),
+            "--company" => company = Some(next_value(&mut args, "--company")?),
+            "--document" if sub == "document" => {
+                document = Some(next_value(&mut args, "--document")?)
+            }
+            "--customer" if sub == "statement" => {
+                customer = Some(next_value(&mut args, "--customer")?)
+            }
+            "--as-of" if sub == "statement" => {
+                as_of = Some(parse_date(&next_value(&mut args, "--as-of")?, "--as-of")?)
+            }
+            "--out" => out = Some(PathBuf::from(next_value(&mut args, "--out")?)),
+            "--config" => config = Some(PathBuf::from(next_value(&mut args, "--config")?)),
+            "--no-pay-link" if sub == "document" => pay_link = false,
+            other => return Err(UsageError::unknown_flag(other)),
+        }
+    }
+    let db = db.ok_or_else(|| UsageError::missing_flag("--db"))?;
+    let company = company.ok_or_else(|| UsageError::missing_flag("--company"))?;
+    match sub.as_str() {
+        "document" => Ok(Command::RenderDocument {
+            db,
+            company,
+            document: document.ok_or_else(|| UsageError::missing_flag("--document"))?,
+            out,
+            config,
+            pay_link,
+        }),
+        "statement" => Ok(Command::RenderStatement {
+            db,
+            company,
+            customer: customer.ok_or_else(|| UsageError::missing_flag("--customer"))?,
+            as_of: as_of.ok_or_else(|| UsageError::missing_flag("--as-of"))?,
+            out,
+            config,
+        }),
+        other => Err(UsageError::unknown_subcommand(&format!("render {other}"))),
+    }
 }
 
 fn parse_authnet_credentials(mut args: Args<'_>) -> Result<Command, UsageError> {
@@ -2029,6 +2129,22 @@ fn execute(command: Command) -> Result<ExitCode, CommandError> {
         Command::AuthnetCredentials { environment } => {
             run_authnet_credentials(&environment).map(ok)
         }
+        Command::RenderDocument {
+            db,
+            company,
+            document,
+            out,
+            config,
+            pay_link,
+        } => run_render_document(&db, &company, &document, out, config, pay_link).map(ok),
+        Command::RenderStatement {
+            db,
+            company,
+            customer,
+            as_of,
+            out,
+            config,
+        } => run_render_statement(&db, &company, &customer, as_of, out, config).map(ok),
         Command::Opening {
             db,
             company,
@@ -3133,6 +3249,82 @@ fn run_authnet_link(
             println!("page        : {} (open before it expires)", path.display());
         }
         None => println!("token       : {}", minted.token),
+    }
+    Ok(())
+}
+
+/// `ledger render document`: one saved document to a PDF (D39).
+fn run_render_document(
+    db: &std::path::Path,
+    company: &str,
+    document: &str,
+    out: Option<PathBuf>,
+    config: Option<PathBuf>,
+    pay_link: bool,
+) -> Result<(), CommandError> {
+    use ledger::render::{self, PayLinkMode, PayLinkOutcome, RenderConfig};
+    let ledger = Ledger::open(db).map_err(runtime)?;
+    let documents_path = config.clone().unwrap_or_else(render::default_config_path);
+    let settings = RenderConfig::load(&documents_path).map_err(runtime)?;
+    let dir = render::output_dir(&settings, company, out.as_deref()).map_err(runtime)?;
+    let mut client =
+        pay_link.then(|| link::live_client(&config.unwrap_or_else(link::default_config_path)));
+    let mode = match client.as_mut() {
+        Some(client) => PayLinkMode::Client(client.as_mut()),
+        None => PayLinkMode::Off,
+    };
+    let done = render::render_document(
+        &ledger,
+        company,
+        document,
+        &settings,
+        &dir,
+        mode,
+        Utc::now(),
+    )
+    .map_err(runtime)?;
+    println!("file        : {}", done.rendered.path.display());
+    println!("pages       : {}", done.rendered.page_count);
+    println!("total       : {}", fmt_money(done.figures.total));
+    println!("balance due : {}", fmt_money(done.figures.balance));
+    match &done.pay_link {
+        PayLinkOutcome::Attached { link, page } => println!(
+            "pay link    : {} (open before {})",
+            page.display(),
+            link.expires_at.to_rfc3339()
+        ),
+        PayLinkOutcome::NotConfigured(reason) => println!("pay link    : none ({reason})"),
+        PayLinkOutcome::Failed(reason) => println!("pay link    : failed ({reason})"),
+        PayLinkOutcome::Skipped | PayLinkOutcome::NotApplicable => {}
+    }
+    for warning in &done.rendered.warnings {
+        eprintln!("warning: {warning}");
+    }
+    Ok(())
+}
+
+/// `ledger render statement`: one customer's open items and aging (D39).
+fn run_render_statement(
+    db: &std::path::Path,
+    company: &str,
+    customer: &str,
+    as_of: NaiveDate,
+    out: Option<PathBuf>,
+    config: Option<PathBuf>,
+) -> Result<(), CommandError> {
+    use ledger::render::{self, RenderConfig};
+    let ledger = Ledger::open(db).map_err(runtime)?;
+    let settings =
+        RenderConfig::load(&config.unwrap_or_else(render::default_config_path)).map_err(runtime)?;
+    let dir = render::output_dir(&settings, company, out.as_deref()).map_err(runtime)?;
+    let done = render::render_statement(&ledger, company, customer, as_of, &settings, &dir)
+        .map_err(runtime)?;
+    println!("file        : {}", done.rendered.path.display());
+    println!("pages       : {}", done.rendered.page_count);
+    println!("open items  : {}", done.open_items);
+    println!("total due   : {}", fmt_money(done.aging.total));
+    for warning in &done.rendered.warnings {
+        eprintln!("warning: {warning}");
     }
     Ok(())
 }

@@ -588,6 +588,7 @@ dependencies = [
  "chrono",
  "ledger-core",
  "mcp-stdio",
+ "miniz_oxide",
  "proptest",
  "qbo-local",
  "rusqlite",
