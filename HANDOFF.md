@@ -43,7 +43,7 @@ backend in §2.1. Never in the repo, never in a dotfile Dropbox syncs.
 
 ## 1. Where the work stands
 
-`cargo test` — 217 tests, all offline, all green. `cargo clippy --all-targets` —
+`cargo test` — 222 tests, all offline, all green. `cargo clippy --all-targets` —
 clean.
 
 Built and tested:
@@ -61,10 +61,10 @@ Built and tested:
 | `worker` | Drain loop, dependency resolution, local-id rewriting |
 | `http` | `HttpQboClient`: request building, fault-code mapping, 401 → one refresh + resend; `live::UreqTransport` behind `--features live` |
 | `oauth` | Authorize URL, loopback callback (state-checked), code exchange, `TokenManager` (persist-before-use, generation fallback on `invalid_grant` only, JSONL rotation log) |
-| `driver` | Initial sweep, CDC poll, truncation backfill |
+| `driver` | Initial sweep, CDC poll, truncation backfill; `reconcile` (§7): heal missing/stale, quarantine extras, orphaned-line check |
 
-**Not built:** the keychain token backend (§2.1), the reconciliation sweep, the
-Tauri shell, the React UI. M0 needs only the first; tokens currently land in
+**Not built:** the keychain token backend (§2.1), the §7.5 trial-balance diff,
+the Tauri shell, the React UI. M0 needs only the first; tokens currently land in
 `FileTokenStore` under the app home, mode 0700, never inside Dropbox.
 
 ### 1.1 Running M0 on the Mac
@@ -74,6 +74,7 @@ export QBO_CLIENT_ID=...  QBO_CLIENT_SECRET=...      # from the Intuit app; neve
 cargo run --release --features live --bin qbo-local -- authorize            # redirect URI http://localhost:8765/callback must be registered
 cargo run --release --features live --bin qbo-local -- sync --realm <id>    # initial sweep; prints per-type counts and wall clock
 cargo run --release --features live --bin qbo-local -- sync --realm <id> --watch 300   # CDC poll loop
+cargo run --release --features live --bin qbo-local -- reconcile --realm <id>         # nightly / on-demand verification
 ```
 
 App home is `~/Library/Application Support/qbo-local` (override with

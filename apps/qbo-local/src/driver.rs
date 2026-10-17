@@ -20,6 +20,10 @@ use crate::sync::{
     SyncCursor, SyncStrategy, CDC_RESPONSE_CAP, DEFAULT_CDC_MAX_AGE_DAYS,
 };
 
+mod reconcile;
+
+pub use reconcile::{Discrepancy, ReconcileReport};
+
 /// QBO's own paging maximum for a query.
 pub const MAX_PAGE_SIZE: usize = 1000;
 

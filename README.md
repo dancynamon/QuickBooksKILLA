@@ -31,7 +31,7 @@ than engineering judgement.
 ## Build
 
 ```sh
-cargo test          # 217 tests, all offline
+cargo test          # 222 tests, all offline
 cargo clippy --all-targets
 cargo run --bin qbo-local
 
@@ -65,8 +65,11 @@ Built and tested:
 - OAuth: authorize URL, loopback callback with state check, code exchange,
   refresh with generation fallback and persist-before-use
 
-Not built yet: the keychain token backend, the reconciliation sweep, the Tauri
-shell, the React UI.
+- Reconciliation sweep (§7): missing/stale healed, extras quarantined never
+  deleted, orphaned-line check
+
+Not built yet: the keychain token backend, the trial-balance diff (§7.5,
+ledger territory), the Tauri shell, the React UI.
 
 The first live authentication run should happen wherever the OAuth credentials
 already live, rather than moving them onto another machine.

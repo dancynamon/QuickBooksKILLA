@@ -27,6 +27,8 @@ pub enum StoreError {
     Json(#[from] serde_json::Error),
     #[error("replica schema version {found} is newer than this build supports ({supported})")]
     SchemaTooNew { found: i64, supported: i64 },
+    #[error("stored value is unreadable: {0}")]
+    Corrupt(String),
 }
 
 /// A forward-only, numbered migration. Applied in a transaction, version
@@ -770,6 +772,70 @@ impl Store {
         Ok(entities)
     }
 
+    // -----------------------------------------------------------------------
+    // Reconciliation (§7)
+    // -----------------------------------------------------------------------
+
+    /// Every mirrored id of a type with its update time and tombstone flag —
+    /// the local half of the reconciliation diff. Ids and timestamps only, so
+    /// the whole book's index fits in memory without loading a payload.
+    pub fn entity_index(
+        &self,
+        realm: &RealmId,
+        entity_type: EntityType,
+    ) -> Result<Vec<IndexedEntity>, StoreError> {
+        let mut statement = self.connection.prepare(
+            "SELECT qbo_id, last_updated_utc, is_deleted FROM entities
+             WHERE realm_id = ?1 AND entity_type = ?2",
+        )?;
+        let rows = statement.query_map(params![realm.as_str(), entity_type.as_str()], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (qbo_id, updated, deleted) = row?;
+            let last_updated_utc = DateTime::parse_from_rfc3339(&updated)
+                .map_err(|e| StoreError::Corrupt(format!("{qbo_id}: {e}")))?
+                .with_timezone(&Utc);
+            out.push(IndexedEntity {
+                qbo_id,
+                last_updated_utc,
+                is_deleted: deleted != 0,
+            });
+        }
+        Ok(out)
+    }
+
+    /// Quarantine a mirrored entity without touching its row. The reconcile
+    /// path's only response to local data QBO no longer has: §7.4 says never
+    /// auto-delete, and a quarantine row clears itself the next time a parse of
+    /// the same record succeeds.
+    pub fn quarantine(
+        &self,
+        realm: &RealmId,
+        entity: &MirroredEntity,
+        reason: &str,
+        now: DateTime<Utc>,
+    ) -> Result<(), StoreError> {
+        quarantine_in(&self.connection, realm, entity, reason, now)
+    }
+
+    /// Line rows whose parent document is missing. The foreign key should make
+    /// this zero; reconciliation checks rather than assumes.
+    pub fn orphaned_lines(&self, realm: &RealmId) -> Result<i64, StoreError> {
+        Ok(self.connection.query_row(
+            "SELECT COUNT(*) FROM document_lines l
+             LEFT JOIN documents d ON d.realm_id = l.realm_id AND d.qbo_id = l.doc_qbo_id
+             WHERE l.realm_id = ?1 AND d.qbo_id IS NULL",
+            params![realm.as_str()],
+            |row| row.get(0),
+        )?)
+    }
+
     pub fn quarantined(&self, realm: &RealmId) -> Result<Vec<QuarantinedEntity>, StoreError> {
         let mut statement = self.connection.prepare(
             "SELECT entity_type, qbo_id, reason FROM quarantine_entities
@@ -891,6 +957,14 @@ pub struct ReprojectReport {
     pub parsed: usize,
     pub not_projected: usize,
     pub quarantined: usize,
+}
+
+/// One row of [`Store::entity_index`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IndexedEntity {
+    pub qbo_id: String,
+    pub last_updated_utc: DateTime<Utc>,
+    pub is_deleted: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

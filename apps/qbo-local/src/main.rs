@@ -8,6 +8,7 @@
 //! ```text
 //! qbo-local authorize [--port 8765] [--sandbox]
 //! qbo-local sync --realm <id> [--db <path>] [--sandbox] [--watch <seconds>]
+//! qbo-local reconcile --realm <id> [--db <path>] [--sandbox]
 //! ```
 
 use chrono::Utc;
@@ -118,6 +119,7 @@ mod live {
         match command {
             "authorize" => authorize(args),
             "sync" => sync(args),
+            "reconcile" => reconcile(args),
             other => Err(format!("unknown command {other:?}").into()),
         }
     }
@@ -196,7 +198,10 @@ mod live {
         Ok(())
     }
 
-    fn sync(args: &[String]) -> Result<(), Error> {
+    type LiveDriver = SyncDriver<HttpQboClient<UreqTransport, TokenManager<UreqTransport, FileTokenStore>>>;
+
+    /// Store and driver for `--realm`, shared by `sync` and `reconcile`.
+    fn open(args: &[String]) -> Result<(RealmId, Store, LiveDriver), Error> {
         let home = home()?;
         let realm = RealmId::parse(value(args, "--realm").ok_or("--realm is required")?)?;
         let db = value(args, "--db")
@@ -210,12 +215,44 @@ mod live {
         } else {
             HttpQboConfig::production()
         };
-        let watch = value(args, "--watch").map(str::parse::<u64>).transpose()?;
-
         let store = Store::open(&db)?;
         store.register_realm(&realm, realm.as_str(), Utc::now())?;
         let client = HttpQboClient::new(UreqTransport::default(), tokens(&home)?, config);
-        let mut driver = SyncDriver::new(client, SyncOptions::default(), Utc::now());
+        let driver = SyncDriver::new(client, SyncOptions::default(), Utc::now());
+        Ok((realm, store, driver))
+    }
+
+    fn reconcile(args: &[String]) -> Result<(), Error> {
+        let (realm, store, mut driver) = open(args)?;
+        let scope: Vec<EntityType> = EntityType::m0_scope().collect();
+        let started = Instant::now();
+        let (reports, orphans) = driver.reconcile_realm(&store, &realm, &scope, Utc::now())?;
+        let mut dirty = 0;
+        for report in &reports {
+            println!(
+                "  {:<14} remote {:>6}  local {:>6}  healed {:>4}  quarantined {:>3}  requests {:>4}",
+                report.entity_type.as_str(),
+                report.remote,
+                report.local,
+                report.healed,
+                report.quarantined_extra,
+                report.requests
+            );
+            dirty += report.discrepancies.len();
+        }
+        println!(
+            "{dirty} discrepancies, {orphans} orphaned lines, {:.1}s wall clock",
+            started.elapsed().as_secs_f64()
+        );
+        if orphans > 0 {
+            return Err(format!("{orphans} document lines have no parent document").into());
+        }
+        Ok(())
+    }
+
+    fn sync(args: &[String]) -> Result<(), Error> {
+        let watch = value(args, "--watch").map(str::parse::<u64>).transpose()?;
+        let (realm, store, mut driver) = open(args)?;
         let scope: Vec<EntityType> = EntityType::m0_scope().collect();
 
         loop {
