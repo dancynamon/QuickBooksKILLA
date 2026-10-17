@@ -297,3 +297,61 @@ fn a_bill_payment_with_nothing_applied_posts_its_total_as_an_ap_debit() {
     assert_eq!(balance_of(&tb, "BANK1"), Money::from_minor(-15_440));
     assert_eq!(balance_of(&tb, "AP1"), Money::from_minor(15_440));
 }
+
+#[test]
+fn an_inventory_adjustment_posts_to_the_items_own_inventory_account_when_it_is_not_1310() {
+    let store = Store::open_in_memory().unwrap();
+    store.register_realm(&realm(), "Aquamentor", now()).unwrap();
+    // Two QBO inventory asset accounts: the first takes 1310, the second 1311.
+    for (id, name) in [("INV1", "998-Inventory Asset"), ("INV2", "Inventory Asset")] {
+        seed(
+            &store,
+            EntityType::Account,
+            id,
+            json!({ "Id": id, "Name": name, "AccountType": "Other Current Asset",
+                    "AccountSubType": "Inventory", "Active": true }),
+        );
+    }
+    seed(
+        &store,
+        EntityType::Account,
+        "SHR1",
+        json!({ "Id": "SHR1", "Name": "Inventory Shrinkage", "AccountType": "Cost of Goods Sold", "Active": true }),
+    );
+    seed(
+        &store,
+        EntityType::Item,
+        "5066",
+        json!({ "Id": "5066", "Name": "Kickboard", "Type": "Inventory", "Active": false,
+                "PurchaseCost": 50, "AssetAccountRef": { "value": "INV2" } }),
+    );
+    seed(
+        &store,
+        EntityType::InventoryAdjustment,
+        "901",
+        json!({ "Id": "901", "DocNumber": "2715", "TxnDate": "2026-10-14",
+                "AdjustAccountRef": { "value": "SHR1" },
+                "Line": [{ "Id": "1", "DetailType": "ItemAdjustmentLineDetail",
+                           "ItemAdjustmentLineDetail": { "ItemRef": { "value": "5066" }, "QtyDiff": 2 } }] }),
+    );
+
+    let ledger = Ledger::open_in_memory().unwrap();
+    ledger
+        .create_company("aquamentor", "Aquamentor", Some(realm().as_str()), now())
+        .unwrap();
+    let report = import_replica(
+        &ledger,
+        &store,
+        &realm(),
+        "aquamentor",
+        &ImportOptions::with_d28_fallback(None, None),
+        now(),
+    )
+    .unwrap();
+    assert!(report.rejected.is_empty(), "{:?}", report.rejected);
+
+    let tb = report::trial_balance(&ledger, "aquamentor", NaiveDate::from_ymd_opt(2026, 10, 16).unwrap())
+        .unwrap();
+    assert_eq!(balance_of(&tb, "INV2"), Money::from_minor(10_000));
+    assert_eq!(balance_of(&tb, "SHR1"), Money::from_minor(-10_000));
+}

@@ -133,6 +133,13 @@ const fn seed(
 }
 
 /// The §2 table, in order.
+/// An inventory asset account: 1300 raw materials, 1310 finished goods, and
+/// the 13xx slots the import gives a second or third QBO inventory account
+/// (QBO books often carry more than one; the mapping numbers them 1311, …).
+pub fn is_inventory_asset(number: &str) -> bool {
+    number.len() == 4 && number.starts_with("13") && number != WORK_IN_PROGRESS
+}
+
 pub fn seed_chart() -> Vec<AccountSeed> {
     use Classification::*;
     vec![
