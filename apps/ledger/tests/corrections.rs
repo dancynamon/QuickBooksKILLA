@@ -49,6 +49,8 @@ fn customer(id: &str, name: &str) -> Contact {
         bill_address: None,
         ship_address: None,
         terms_days: Some(30),
+        due_day: None,
+        terms_source_ref: None,
         is_tax_exempt: false,
         default_class: Some(ClassId("foam".to_string())),
         is_active: true,

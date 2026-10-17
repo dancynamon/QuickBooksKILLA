@@ -59,6 +59,8 @@ fn contact(id: &str, kind: ContactKind, name: &str) -> Contact {
         bill_address: Some("12 Harbor Road\nBayville, NJ 08721".to_string()),
         ship_address: None,
         terms_days: Some(30),
+        due_day: None,
+        terms_source_ref: None,
         is_tax_exempt: false,
         default_class: (kind == ContactKind::Customer).then(|| ClassId("foam".to_string())),
         is_active: true,

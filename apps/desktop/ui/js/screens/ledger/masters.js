@@ -9,7 +9,8 @@ import { ledgerProvider } from "../../data/ledger/index.js";
 import { esc, plain } from "../../format.js";
 import { viewHead, withState } from "../shared.js";
 import { todayIso } from "./shared.js";
-import { ITEM_TYPES, buildContact, buildItem } from "./masterData.js";
+import { ITEM_TYPES, buildContact, buildItem, contactTermsLabel } from "./masterData.js";
+import { termsOf } from "../../data/ledger/terms.js";
 
 const CONTACT_KINDS = {
   customer: { label: "Customers", one: "customer" },
@@ -131,7 +132,7 @@ export async function renderContacts(main, kind) {
           <tbody>${list.length === 0 ? `<tr><td colspan="7" class="dim">None.</td></tr>` : list.map((c) => `<tr>
             <td>${esc(c.display_name)}${c.company_name ? ` <span class="dim">${esc(c.company_name)}</span>` : ""}${c.is_active ? "" : ' <span class="tag">inactive</span>'}</td>
             <td class="dim">${esc(c.email ?? "")}</td>
-            <td class="dim">${c.terms_days ? `Net ${c.terms_days}` : "On receipt"}</td>
+            <td class="dim">${esc(contactTermsLabel(c))}</td>
             <td class="dim">${esc(c.default_class ?? "")}</td>
             ${kind === "customer" ? `<td>${c.is_tax_exempt ? '<span class="tag">exempt</span>' : ""}</td>` : ""}
             <td class="r num">${plain(owed.get(c.contact_id) ?? null, { dashForZero: true })}</td>
@@ -167,6 +168,12 @@ export async function renderContacts(main, kind) {
 
       const form = main.querySelector("#contactForm");
       form?.querySelector("[name='display_name']")?.focus();
+      form?.querySelector("#termsType")?.addEventListener("change", (event) => {
+        const byDay = event.target.value === "day_of_month";
+        for (const [id, hide] of [["#termsNet", byDay], ["#termsByDay", !byDay]]) {
+          form.querySelector(id).style.display = hide ? "none" : "contents";
+        }
+      });
       form?.addEventListener("submit", async (event) => {
         event.preventDefault();
         try {
@@ -187,6 +194,24 @@ export async function renderContacts(main, kind) {
  * the entry screen, which takes it once. */
 export const sessionHint = { contactId: null };
 
+/** Net N, or due on day D with QBO's roll-over window (D41). */
+function termsFields(c) {
+  const terms = termsOf(c);
+  const byDay = terms.type === "day_of_month";
+  return `<label class="form-field"><span class="lbl">Terms</span>
+      <select class="form-select" name="terms_type" id="termsType">
+        <option value="net" ${byDay ? "" : "selected"}>Net days</option>
+        <option value="day_of_month" ${byDay ? "selected" : ""}>Day of the month</option>
+      </select></label>
+    <span id="termsNet" style="display:${byDay ? "none" : "contents"}">
+      ${field("Net days", "terms_days", c?.terms_days, 'inputmode="numeric" placeholder="due on receipt"')}
+    </span>
+    <span id="termsByDay" style="display:${byDay ? "contents" : "none"}">
+      ${field("Due on day", "due_day", byDay ? terms.day : "", 'inputmode="numeric" placeholder="1 to 31 (31 is the last)"')}
+      ${field("Next month if within (days)", "next_month_within", byDay ? terms.next_month_within : "", 'inputmode="numeric" placeholder="0"')}
+    </span>`;
+}
+
 function contactEditor(kind, spec, c) {
   return `<div class="panel" style="margin-bottom:14px">
     <div class="panel-head"><span class="lbl">${c ? `Edit ${esc(c.display_name)}` : `New ${spec.one}`}</span>
@@ -197,7 +222,7 @@ function contactEditor(kind, spec, c) {
         ${field("Company", "company_name", c?.company_name)}
         ${field("Email", "email", c?.email, 'type="email"')}
         ${field("Phone", "phone", c?.phone)}
-        ${field("Terms (net days)", "terms_days", c?.terms_days, 'inputmode="numeric" placeholder="due on receipt"')}
+        ${termsFields(c)}
         ${field("Default class", "default_class", c?.default_class)}
         <label class="form-field wide"><span class="lbl">Bill to</span><textarea class="form-textarea" name="bill_address" rows="2">${esc(c?.bill_address ?? "")}</textarea></label>
         <label class="form-field wide"><span class="lbl">Ship to</span><textarea class="form-textarea" name="ship_address" rows="2">${esc(c?.ship_address ?? "")}</textarea></label>

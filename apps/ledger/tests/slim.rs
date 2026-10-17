@@ -194,7 +194,10 @@ fn build_replica_without_feed(store: &Store, invoice_1001_paid: bool) {
         store,
         EntityType::Term,
         "4",
-        json!({ "Id": "4", "Name": "10th of month", "DayOfMonthDue": 10, "Active": true }),
+        // Shaped like the live replica's date-driven terms (D41).
+        json!({ "Id": "4", "Name": "10th of month", "Type": "DATE_DRIVEN", "DayOfMonthDue": 10,
+                "DueNextMonthDays": 5, "DiscountDayOfMonth": 1, "DiscountPercent": 0,
+                "Active": true }),
     );
 
     seed(
@@ -534,8 +537,22 @@ fn the_slim_import_brings_masters_opening_and_open_items_across_and_every_check_
     let lakeside = books::contact(&ledger, CO, "32").unwrap().unwrap();
     assert!(lakeside.is_tax_exempt);
     assert_eq!(
-        lakeside.terms_days, None,
-        "a date-driven term is due on receipt"
+        (lakeside.terms_days, lakeside.terms()),
+        (
+            None,
+            books::Terms::DayOfMonth {
+                day: 10,
+                next_month_within: 5
+            }
+        ),
+        "a date-driven term comes across as a day of the month"
+    );
+    assert_eq!(lakeside.terms_source_ref.as_deref(), Some("4"));
+    assert_eq!(blue.terms_source_ref.as_deref(), Some("3"));
+    assert!(
+        !report.warnings.iter().any(|w| w.contains("term 4")),
+        "{:?}",
+        report.warnings
     );
     assert_eq!(
         books::contact(&ledger, CO, "77").unwrap().unwrap().kind,
@@ -780,6 +797,60 @@ fn a_rerun_is_a_no_op_and_a_rerun_after_a_late_payment_voids_the_item_and_replac
             .iter()
             .all(|d| d.document_id != "qbo:Invoice:I1")
     );
+}
+
+#[test]
+fn a_rerun_carries_a_date_driven_term_over_a_book_that_had_it_due_on_receipt() {
+    let ledger = book();
+    assert!(run(&ledger, &replica(false), &options(false, true)).passed());
+
+    // What the import wrote before D41: Lakeside due on receipt, no term id.
+    let mut was = books::contact(&ledger, CO, "32").unwrap().unwrap();
+    was.set_terms(books::Terms::Net { days: 0 });
+    books::upsert_contact(&ledger, CO, &was, now()).unwrap();
+    assert_eq!(
+        books::contact(&ledger, CO, "32").unwrap().unwrap().terms(),
+        books::Terms::Net { days: 0 }
+    );
+
+    let again = run(&ledger, &replica(false), &options(false, true));
+    assert!(again.passed(), "{}", again.render_text(CO));
+    let lakeside = books::contact(&ledger, CO, "32").unwrap().unwrap();
+    assert_eq!(
+        lakeside.terms(),
+        books::Terms::DayOfMonth {
+            day: 10,
+            next_month_within: 5
+        }
+    );
+
+    // A Q1 invoice entered in the own book takes its due date from it:
+    // dated 6 January, the 10th is 4 days away, so it is due 10 February.
+    let mut invoice = slim_invoice("inv-q1", ymd(2027, 1, 6));
+    invoice.due_date = None;
+    let (prepared, _) = books::prepare_document(&ledger, CO, invoice, Default::default()).unwrap();
+    assert_eq!(prepared.due_date, Some(ymd(2027, 2, 10)));
+}
+
+fn slim_invoice(id: &str, on: NaiveDate) -> ledger::types::LedgerDocument {
+    ledger::types::LedgerDocument {
+        document_id: id.to_string(),
+        kind: DocKind::Invoice,
+        number: None,
+        txn_date: on,
+        due_date: None,
+        contact: Some(books::contact_ref(ContactKind::Customer, "32")),
+        header_class: None,
+        lines: Vec::new(),
+        tax: None,
+        deposit_to: None,
+        pay_from: None,
+        applications: Vec::new(),
+        unapplied: Money::ZERO,
+        is_voided: false,
+        source_ref: None,
+        memo: None,
+    }
 }
 
 #[test]

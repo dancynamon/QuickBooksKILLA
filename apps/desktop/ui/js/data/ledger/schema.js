@@ -90,8 +90,8 @@ export const BANK_LINE_FIELDS = [
 // `mcp.rs::contact_json`
 export const CONTACT_FIELDS = [
   "contact_id", "kind", "display_name", "company_name", "email", "phone",
-  "bill_address", "ship_address", "terms_days", "is_tax_exempt",
-  "default_class", "is_active", "source_ref",
+  "bill_address", "ship_address", "terms_days", "terms", "terms_label",
+  "terms_source_ref", "is_tax_exempt", "default_class", "is_active", "source_ref",
 ];
 
 // `mcp.rs::item_json`

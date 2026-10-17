@@ -22,7 +22,7 @@
 
 use std::collections::HashMap;
 
-use chrono::{DateTime, NaiveDate, Utc};
+use chrono::{DateTime, Datelike, NaiveDate, Utc};
 use rusqlite::{params, OptionalExtension, Row};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -112,6 +112,8 @@ pub enum BooksError {
     HasApplications { id: String, applied: String },
     #[error("cannot apply the credit: {0}")]
     BadApplication(String),
+    #[error("bad terms: {0}")]
+    BadTerms(String),
 }
 
 // ---------------------------------------------------------------------------
@@ -133,9 +135,13 @@ pub struct Contact {
     pub bill_address: Option<String>,
     #[serde(default)]
     pub ship_address: Option<String>,
-    /// Net days. `None` means due on receipt.
+    /// Net days. `None` means due on receipt, unless `due_day` is set.
     #[serde(default)]
     pub terms_days: Option<i64>,
+    /// Date-driven terms (D41): due on a day of the month. When set it
+    /// decides the due date and `terms_days` must be `None`.
+    #[serde(default)]
+    pub due_day: Option<DueDay>,
     #[serde(default)]
     pub is_tax_exempt: bool,
     #[serde(default)]
@@ -145,10 +151,156 @@ pub struct Contact {
     /// The QBO id when imported. Kept forever.
     #[serde(default)]
     pub source_ref: Option<String>,
+    /// The QBO term id the terms came from when imported. Kept like
+    /// `source_ref`, so converting terms later can still say where each
+    /// contact's started.
+    #[serde(default)]
+    pub terms_source_ref: Option<String>,
 }
 
 fn yes() -> bool {
     true
+}
+
+/// QBO's date-driven term (Term `Type` `DATE_DRIVEN`, D41): due on `day` of
+/// the month, the first such day on or after the document date, moved a
+/// month later when that day is `next_month_within` days or fewer away. A
+/// day past the month's end is its last day (31 in February is the 28th or
+/// 29th).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct DueDay {
+    /// 1 to 31 (QBO `DayOfMonthDue`).
+    pub day: u32,
+    /// 0 to 31 (QBO `DueNextMonthDays`).
+    #[serde(default)]
+    pub next_month_within: u32,
+}
+
+/// A contact's terms, whichever way they are stored.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum Terms {
+    /// Due `days` after the document date; 0 is due on receipt.
+    Net { days: i64 },
+    DayOfMonth {
+        day: u32,
+        #[serde(default)]
+        next_month_within: u32,
+    },
+}
+
+impl Terms {
+    /// The due date of a document dated `txn_date`.
+    pub fn due_date(self, txn_date: NaiveDate) -> NaiveDate {
+        match self {
+            Terms::Net { days } => txn_date + chrono::Days::new(days.max(0) as u64),
+            Terms::DayOfMonth {
+                day,
+                next_month_within,
+            } => {
+                let mut due = day_in_month(txn_date.year(), txn_date.month(), day);
+                if due < txn_date {
+                    due = day_in_next_month(due, day);
+                }
+                if (due - txn_date).num_days() <= i64::from(next_month_within) {
+                    due = day_in_next_month(due, day);
+                }
+                due
+            }
+        }
+    }
+
+    /// How a person reads them: "Net 30", "Due on receipt", "Due the 1st",
+    /// "Due the last of the month".
+    pub fn label(self) -> String {
+        match self {
+            Terms::Net { days } if days <= 0 => "Due on receipt".to_string(),
+            Terms::Net { days } => format!("Net {days}"),
+            Terms::DayOfMonth { day, .. } if day >= 31 => "Due the last of the month".to_string(),
+            Terms::DayOfMonth { day, .. } => format!("Due the {}", ordinal(day)),
+        }
+    }
+
+    pub fn check(self) -> Result<(), BooksError> {
+        match self {
+            Terms::Net { days } if days < 0 => {
+                Err(BooksError::BadTerms(format!("net days {days} is negative")))
+            }
+            Terms::DayOfMonth { day, .. } if !(1..=31).contains(&day) => Err(BooksError::BadTerms(
+                format!("day of month {day} is not 1 to 31"),
+            )),
+            Terms::DayOfMonth {
+                next_month_within, ..
+            } if next_month_within > 31 => Err(BooksError::BadTerms(format!(
+                "next month within {next_month_within} days is more than 31"
+            ))),
+            _ => Ok(()),
+        }
+    }
+}
+
+/// `day` of the month, or the month's last day when it has fewer.
+fn day_in_month(year: i32, month: u32, day: u32) -> NaiveDate {
+    let first = NaiveDate::from_ymd_opt(year, month, 1).expect("valid month");
+    let last = (first + chrono::Months::new(1))
+        .pred_opt()
+        .expect("in range");
+    NaiveDate::from_ymd_opt(year, month, day.clamp(1, last.day())).expect("clamped day")
+}
+
+fn day_in_next_month(date: NaiveDate, day: u32) -> NaiveDate {
+    let next = date.with_day(1).expect("first") + chrono::Months::new(1);
+    day_in_month(next.year(), next.month(), day)
+}
+
+fn ordinal(n: u32) -> String {
+    let suffix = match (n % 10, n % 100) {
+        (_, 11..=13) => "th",
+        (1, _) => "st",
+        (2, _) => "nd",
+        (3, _) => "rd",
+        _ => "th",
+    };
+    format!("{n}{suffix}")
+}
+
+impl Contact {
+    /// The terms that fill a due date: the day of the month when set, else
+    /// net days (none is due on receipt, net 0).
+    pub fn terms(&self) -> Terms {
+        match self.due_day {
+            Some(DueDay {
+                day,
+                next_month_within,
+            }) => Terms::DayOfMonth {
+                day,
+                next_month_within,
+            },
+            None => Terms::Net {
+                days: self.terms_days.unwrap_or(0),
+            },
+        }
+    }
+
+    /// Stores `terms`: net 0 as due on receipt (`terms_days` `None`).
+    pub fn set_terms(&mut self, terms: Terms) {
+        match terms {
+            Terms::Net { days } => {
+                self.terms_days = (days != 0).then_some(days);
+                self.due_day = None;
+            }
+            Terms::DayOfMonth {
+                day,
+                next_month_within,
+            } => {
+                self.terms_days = None;
+                self.due_day = Some(DueDay {
+                    day,
+                    next_month_within,
+                });
+            }
+        }
+    }
 }
 
 const fn contact_kind_str(kind: ContactKind) -> &'static str {
@@ -168,7 +320,7 @@ fn parse_contact_kind(raw: &str) -> Result<ContactKind, BooksError> {
 
 const CONTACT_COLUMNS: &str = "contact_id, kind, display_name, company_name, email, phone,
      bill_address, ship_address, terms_days, is_tax_exempt, default_class, is_active,
-     source_ref";
+     source_ref, due_day, due_next_month_within, terms_source_ref";
 
 fn contact_from_row(row: &Row<'_>) -> rusqlite::Result<(Contact, String)> {
     let kind: String = row.get(1)?;
@@ -189,6 +341,16 @@ fn contact_from_row(row: &Row<'_>) -> rusqlite::Result<(Contact, String)> {
             default_class: row.get::<_, Option<String>>(10)?.map(ClassId),
             is_active: row.get::<_, i64>(11)? != 0,
             source_ref: row.get(12)?,
+            due_day: row
+                .get::<_, Option<u32>>(13)?
+                .map(|day| -> rusqlite::Result<DueDay> {
+                    Ok(DueDay {
+                        day,
+                        next_month_within: row.get::<_, Option<u32>>(14)?.unwrap_or(0),
+                    })
+                })
+                .transpose()?,
+            terms_source_ref: row.get(15)?,
         },
         kind,
     ))
@@ -207,11 +369,20 @@ pub fn upsert_contact(
     contact: &Contact,
     now: DateTime<Utc>,
 ) -> Result<(), BooksError> {
+    if contact.terms_days.is_some() && contact.due_day.is_some() {
+        return Err(BooksError::BadTerms(format!(
+            "{} has both net days and a day of the month",
+            contact.display_name
+        )));
+    }
+    contact.terms().check()?;
     ledger.conn().execute(
         "INSERT INTO contacts (company_id, contact_id, kind, display_name, company_name, email,
              phone, bill_address, ship_address, terms_days, is_tax_exempt, default_class,
-             is_active, source_ref, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+             is_active, source_ref, updated_at, due_day, due_next_month_within,
+             terms_source_ref)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17,
+             ?18)
          ON CONFLICT (company_id, contact_id) DO UPDATE SET
              kind = excluded.kind, display_name = excluded.display_name,
              company_name = excluded.company_name, email = excluded.email,
@@ -220,7 +391,9 @@ pub fn upsert_contact(
              is_tax_exempt = excluded.is_tax_exempt, default_class = excluded.default_class,
              is_active = excluded.is_active,
              source_ref = COALESCE(excluded.source_ref, contacts.source_ref),
-             updated_at = excluded.updated_at",
+             updated_at = excluded.updated_at, due_day = excluded.due_day,
+             due_next_month_within = excluded.due_next_month_within,
+             terms_source_ref = COALESCE(excluded.terms_source_ref, contacts.terms_source_ref)",
         params![
             company,
             contact.contact_id,
@@ -237,6 +410,9 @@ pub fn upsert_contact(
             contact.is_active as i64,
             contact.source_ref,
             now.to_rfc3339(),
+            contact.due_day.map(|d| d.day),
+            contact.due_day.map(|d| d.next_month_within),
+            contact.terms_source_ref,
         ],
     )?;
     Ok(())
@@ -676,7 +852,8 @@ const fn is_taxed_sale(kind: DocKind) -> bool {
 ///   document; every item line's item must exist and be active.
 /// - A numbered type with no number gets [`next_number`]; a number another
 ///   document of the same type already holds is refused.
-/// - An invoice or bill with no due date gets `txn_date + terms_days`.
+/// - An invoice or bill with no due date gets one from the contact's
+///   [`Terms`]: `txn_date + terms_days`, or the day of the month (D41).
 /// - No header class takes the contact's default class.
 /// - A taxed sale with no tax gets one: the taxable base (taxable lines less
 ///   taxable discounts) times the configured rate, banker's rounding
@@ -760,8 +937,7 @@ pub fn prepare_document(
 
     if let Some(found) = &contact_row {
         if doc.due_date.is_none() && matches!(doc.kind, DocKind::Invoice | DocKind::Bill) {
-            doc.due_date =
-                Some(doc.txn_date + chrono::Days::new(found.terms_days.unwrap_or(0).max(0) as u64));
+            doc.due_date = Some(found.terms().due_date(doc.txn_date));
         }
         if doc.header_class.is_none() {
             doc.header_class = found.default_class.clone();

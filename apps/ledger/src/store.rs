@@ -589,6 +589,16 @@ CREATE TABLE item_class_map (
 ) STRICT;
 "#,
     },
+    Migration {
+        version: 8,
+        name: "date-driven terms: due on a day of the month, and the QBO term id (D41)",
+        sql: r#"
+ALTER TABLE contacts ADD COLUMN due_day INTEGER CHECK (due_day BETWEEN 1 AND 31);
+ALTER TABLE contacts ADD COLUMN due_next_month_within INTEGER
+    CHECK (due_next_month_within BETWEEN 0 AND 31);
+ALTER TABLE contacts ADD COLUMN terms_source_ref TEXT;
+"#,
+    },
 ];
 
 pub fn latest_version() -> i64 {

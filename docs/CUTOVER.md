@@ -25,9 +25,9 @@ live replica, and what each check means when it fails. The code is
 1. **Masters**, keyed by their QBO id, with the id in `source_ref`:
    chart of accounts and classes (the same mapping `ledger import` uses, so
    the 185 `needs_mapping` accounts land in their x99N slots exactly as
-   before), customers and vendors (terms folded into `terms_days`; a
-   date-driven QBO term has no net-days equivalent and is reported, then
-   treated as due on receipt), items (accounts through the chart mapping,
+   before), customers and vendors (a net QBO term into `terms_days`, a
+   date-driven one into a day of the month, D41; the QBO term id is kept in
+   `terms_source_ref`), items (accounts through the chart mapping,
    default class from QBO's `ClassRef` when it has one, inventory items with
    their asset account). Categories are skipped; group items come across as
    non-inventory; a SKU QBO lets two items share comes across on the first
@@ -375,9 +375,12 @@ the passing numbers mean):
 - **Items pointing at non-income accounts (D34)** and **inventory relief
   (D36):** affect the Q1 replay, not the slim import.
 - **20 date-driven payment terms** (due on the 1st or the last of the month)
-  have no net-days equivalent; 3,126 customers and 49 vendors use one and
-  came across as due on receipt. Policy: convert to net days, or teach the
-  books a day-of-month term.
+  are used by 3,126 customers and 49 vendors. The rehearsal brought them
+  across as due on receipt; since D41 the book has day-of-month terms and a
+  re-run of `import-slim` carries each one over as QBO defines it. Still
+  Dan's call (D41): several are named like net terms ("Net 45", "Net 90",
+  "Due on receipt") but are date-driven in QBO, and converting them to net
+  days remains possible (`terms_source_ref` names each contact's QBO term).
 - **6 duplicate SKUs** in QBO; the second item of each came across without a
   SKU.
 - **Sales receipt and credit memo numbering** jumps to 249284 and 512753

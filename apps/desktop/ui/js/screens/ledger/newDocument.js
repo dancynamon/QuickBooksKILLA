@@ -26,6 +26,8 @@ import {
   fromCents, lineForItem, previewTotals, toCents,
 } from "./entry.js";
 import { sessionHint } from "./masters.js";
+import { contactTermsLabel } from "./masterData.js";
+import { termsOf } from "../../data/ledger/terms.js";
 
 const ACTOR = "dan";
 
@@ -341,7 +343,9 @@ function wireVoid(main, saved) {
 
 function contactNote(contact, spec) {
   const bits = [];
-  bits.push(contact.terms_days ? `Net ${contact.terms_days}` : "Due on receipt");
+  const terms = termsOf(contact);
+  bits.push(esc(contactTermsLabel(contact))
+    + (terms.type === "day_of_month" && terms.next_month_within > 0 ? ` (next month if dated within ${terms.next_month_within} days)` : ""));
   if (contact.default_class) bits.push(`class ${esc(contact.default_class)} unless a line says otherwise`);
   if (spec.taxed && contact.is_tax_exempt) bits.push("tax exempt");
   if (contact.email) bits.push(esc(contact.email));

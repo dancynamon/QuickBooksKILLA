@@ -1449,6 +1449,109 @@ mistake the aging exists to prevent. The ledger would keep the money in
 already. If no, the parallel run's aging check compares against QBO's
 aging less unapplied payments, and the difference is explained by W8.
 
+
+
+
+## D41 — Date-driven terms: the book learns QBO's day-of-month term
+
+17 Oct 2026. **Built; the policy question stays open for Dan.** The live
+rehearsal (`docs/CUTOVER.md`) found 20 QBO terms of `Type` `DATE_DRIVEN`,
+used by 3,126 customers and 49 vendors, that `terms_days` could not hold, so
+the slim import made them due on receipt. Converting them to net days and
+supporting day-of-month terms were both open. Supporting them is additive
+and keeps conversion possible, so the book now has both shapes.
+
+**What QBO's Term entity says** (field definitions as Intuit's v3 Term
+entity documents them, quoted through CData's QuickBooks Online connector,
+<https://cdn.cdata.com/help/RNK/jdbc/pg_table-terms.htm>; Intuit's own
+reference page, <https://developer.intuit.com/app/developer/qbo/docs/api/accounting/all-entities/term>,
+renders client-side and could not be read):
+
+- `DueDays`: days from delivery until payment is due (a `STANDARD` term).
+- `DayOfMonthDue`: "the payment must be received by this day of the month".
+- `DueNextMonthDays`: "the payment is due next month if it was issued the
+  specified number of days before" `DayOfMonthDue`. QBO's term editor calls
+  it "Due the next month if issued within N days of due date".
+- `DiscountPercent`, `DiscountDays`, `DiscountDayOfMonth`: early-payment
+  discounts. Not carried (no discount is non-zero on a date-driven term in
+  the replica).
+- The replica stores the type as `"DATE_DRIVEN"` (CData spells it
+  `DateDriven`); the import keys on `DayOfMonthDue` being present, not on
+  the spelling.
+
+**What the docs leave open, settled from QBO's own invoices.** The docs do
+not say whether "within N days" includes N, or what day 31 means in a short
+month. The replica holds 3,193 invoices and bills on these terms. 3,030 carry
+a due date equal to their date (channel imports set it), and 146 of the
+other 163 match the rule below exactly. At the boundary, where the due day
+is exactly 5 days away, two invoices rolled (term 47: 2023-04-25 and
+2023-05-26 → due 2023-05-31 and 2023-06-30) and one did not (term 50,
+2024-12-26 → 2024-12-31, likely typed by hand). Day 31 is the month's last
+day (2023-04-25 → 2023-04-30 is 5 days, so it rolls). A 2010 QuickBooks
+Desktop write-up (<https://ehlim.typepad.com/quickbooks-asia/2010/06/lets-talk-about-terms.html>)
+counts the window exclusively. QBO's data outweighs it, so the book counts
+inclusively.
+
+**The rule** (`books::Terms::due_date`, mirrored in the desktop's
+`js/data/ledger/terms.js`):
+
+1. Take day D of the document's month, clamped to the month's last day.
+   If that is before the document date, take day D of the next month,
+   clamped.
+2. If that day is N days or fewer after the document date (N =
+   `DueNextMonthDays`; a document dated on the day itself is 0 days away),
+   move it one month, clamped again. It moves once only, which is why N is
+   capped at 31.
+
+So "the 1st, within 5" dated 7 October is due 1 November; dated 27 October
+(5 days out) it is due 1 December. "The 31st" dated 3 February 2027 is due
+28 February; in 2028, the 29th.
+
+**What changed.**
+
+- `contacts` (migration 8): `due_day` and `due_next_month_within`, set only
+  when `terms_days` is null (refused otherwise), and `terms_source_ref`, the
+  QBO term id, kept across later upserts like `source_ref`.
+- `books::prepare_document` (and so `update_document` and `create_document`)
+  fills a missing invoice or bill due date from `Contact::terms()`. The aging
+  reads the stored due date, as before. Open items the slim import brings
+  across keep QBO's `DueDate`.
+- `ledger import-slim` reads a date-driven term into the day-of-month shape.
+  A re-run carries it over contacts an earlier run left due on receipt.
+- `ledger-mcp`: a contact comes back with `terms` (`{"type": "net", "days":
+  30}` or `{"type": "day_of_month", "day": 1, "next_month_within": 5}`),
+  `terms_label` and `terms_source_ref`, next to `terms_days` unchanged.
+  `upsert_contact` takes either `terms_days` or `terms` (`docs/MCP.md`).
+- The desktop: the contact editor picks Net days or Day of the month (due
+  day, next month if within N days); the list, the entry form's note and the
+  rendered invoice say "Due the 1st" or "Due the last of the month".
+
+**The 20 terms, as the replica has them** (all have `DueNextMonthDays` 5):
+
+| QBO term (id) | day | customers | vendors |
+|---|---:|---:|---:|
+| WEB/CC (62) | 31 | 1,499 | 2 |
+| CREDIT CARD (47) | 31 | 1,150 | 32 |
+| PAYPAL (46) | 31 | 335 | 0 |
+| PIA (50) | 31 | 49 | 2 |
+| CHECK (63) | 31 | 33 | 0 |
+| CREDIT CARD AMEX (49) | 31 | 32 | 7 |
+| Due on receipt (37) | 1 | 6 | 5 |
+| WALMART (66) | 31 | 6 | 0 |
+| T/T (64), TBD (61) | 31 | 5 each | 0 |
+| Net 45 (51) | 31 | 4 | 1 |
+| REPLACE/NO CHARGE (65) | 31 | 2 | 0 |
+| 1% 15 Net 30, 2% 20 NET 30 DAYS, 30 & 120, 30 & 60, 30 & 90, 30/60/90, Net 90, PROMO (53–60) | 1 | 0 | 0 |
+
+**For Dan.** Carried over faithfully, a customer on "Due on receipt" (37)
+or "Net 45" (51) gets the due date QBO itself computes: the 1st or the last
+of the month, not on receipt or 45 days. Payment-method terms (WEB/CC,
+CREDIT CARD, PAYPAL) make an own-book invoice entered with no due date due
+at month end, where the channel imports used to set it to the sale date.
+The import does what QBO does. Converting a term to net days is a later
+upsert per contact, and `terms_source_ref` says which contacts were on which
+QBO term.
+
 ## D42 — QBO sales orders: mirrored from a feed, a `SalesOrder` kind in the book
 
 17 Oct 2026. CUTOVER.md's blocker #1: QBO sales orders were not in the

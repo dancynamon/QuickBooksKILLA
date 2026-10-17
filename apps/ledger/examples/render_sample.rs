@@ -50,6 +50,8 @@ fn customer(id: &str, name: &str, bill: &str, ship: Option<&str>) -> Contact {
         bill_address: Some(bill.into()),
         ship_address: ship.map(String::from),
         terms_days: Some(30),
+        due_day: None,
+        terms_source_ref: None,
         is_tax_exempt: false,
         default_class: Some(ClassId("foam".into())),
         is_active: true,
