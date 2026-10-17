@@ -15,6 +15,7 @@ use std::str::FromStr;
 
 use chrono::NaiveDate;
 use ledger_core::{round_money, Money, RoundingPolicy};
+use qbo_local::domain::EntityType;
 use qbo_local::project::{ParsedEntity, ParsedItem, ParsedLine, Projection};
 use qbo_local::store::MirroredEntity;
 use rust_decimal::Decimal;
@@ -393,6 +394,25 @@ pub fn translate(
     );
     let unapplied = json_money(raw, "UnappliedAmt", &qbo_id)?.unwrap_or(Money::ZERO);
 
+    // D37: the three QBO entities with no line form of their own.
+    match entity.entity_type {
+        EntityType::Transfer | EntityType::CreditCardPayment => {
+            doc_lines = transfer_lines(
+                entity.entity_type,
+                raw,
+                doc.total,
+                (&header_class, txn_date),
+                ctx,
+                &mut class_sources,
+                &mut warnings,
+            );
+        }
+        EntityType::InventoryAdjustment => {
+            value_adjustment_lines(&mut doc_lines, raw, ctx, &mut warnings);
+        }
+        _ => {}
+    }
+
     // D29: a QBO Payment's lines are its applications, one per document
     // paid, and they are already `applications` above. What the document
     // states is its `TotalAmt`, so that is the one line it keeps: the
@@ -448,6 +468,126 @@ pub fn translate(
         class_sources,
         warnings,
     })
+}
+
+/// D37: a Transfer or CreditCardPayment moves one amount between two
+/// accounts and carries no lines. It posts as a two-line journal: Dr the
+/// receiving account (`ToAccountRef`, `CreditCardAccountRef`), Cr the paying
+/// one (`FromAccountRef`, `BankAccountRef`). An unmapped or missing account
+/// leaves the line without one, for the posting gate to refuse.
+fn transfer_lines(
+    entity_type: EntityType,
+    raw: &Value,
+    amount: Money,
+    (header_class, txn_date): (&Option<ClassId>, NaiveDate),
+    ctx: &TranslateContext,
+    class_sources: &mut Vec<(i64, ClassSource)>,
+    warnings: &mut Vec<String>,
+) -> Vec<DocLine> {
+    let (to_key, from_key) = match entity_type {
+        EntityType::CreditCardPayment => ("CreditCardAccountRef", "BankAccountRef"),
+        _ => ("ToAccountRef", "FromAccountRef"),
+    };
+    class_sources.clear();
+    [(1, to_key, Side::Debit), (2, from_key, Side::Credit)]
+        .into_iter()
+        .map(|(line_no, key, side)| {
+            let account = match json_reference(raw, key) {
+                Some(id) => match ctx.accounts.by_source_ref(&id) {
+                    Some(mapped) => Some(mapped.ledger_number.clone()),
+                    None => {
+                        warnings.push(format!("{key} {id} has no ledger mapping"));
+                        None
+                    }
+                },
+                None => {
+                    warnings.push(format!("{key} is missing"));
+                    None
+                }
+            };
+            // A transfer to an expense account is rare but legal; it wants a
+            // class like any other P&L line.
+            let class = if account.as_ref().is_some_and(crate::post::requires_class) {
+                let (class, source) =
+                    resolve_line_class(line_no, None, None, header_class, txn_date, ctx, warnings);
+                if let Some(source) = source {
+                    class_sources.push((line_no, source));
+                }
+                class
+            } else {
+                None
+            };
+            DocLine {
+                line_no,
+                kind: LineKind::Journal,
+                amount,
+                class,
+                item_id: None,
+                account,
+                is_taxable: false,
+                qty: None,
+                unit_cost: None,
+                description: Some(key.trim_end_matches("Ref").to_string()),
+                posting: Some(side),
+                entity: None,
+            }
+        })
+        .collect()
+}
+
+/// D37: a QBO InventoryAdjustment states a signed `QtyDiff` per item and no
+/// amount. Each item line is valued at the item's `PurchaseCost` and becomes
+/// the signed `Account` line §1's inventory-adjustment rule posts, against the
+/// item's own inventory asset account. A line that cannot be valued stays an
+/// `Item` line, which the posting function refuses, so a partly valued
+/// adjustment never posts.
+fn value_adjustment_lines(
+    lines: &mut [DocLine],
+    raw: &Value,
+    ctx: &TranslateContext,
+    warnings: &mut Vec<String>,
+) {
+    if let Some(id) = json_reference(raw, "AdjustAccountRef") {
+        let mapped = ctx
+            .accounts
+            .by_source_ref(&id)
+            .map(|mapped| mapped.ledger_number.0.clone());
+        if mapped.as_deref() != Some(chart::INVENTORY_ADJUSTMENT) {
+            warnings.push(format!(
+                "adjust account {id} maps to {}; §1 posts the offset to {}",
+                mapped.as_deref().unwrap_or("no ledger account"),
+                chart::INVENTORY_ADJUSTMENT
+            ));
+        }
+    }
+    for line in lines.iter_mut().filter(|line| line.kind == LineKind::Item) {
+        let item = line.item_id.as_deref().and_then(|id| ctx.items.get(id));
+        let asset = item
+            .and_then(|context| context.item.asset_account_id.as_deref())
+            .and_then(|id| ctx.accounts.by_source_ref(id))
+            .map(|mapped| mapped.ledger_number.clone());
+        let cost = item.and_then(|context| context.item.purchase_cost);
+        let valued = match (asset, cost, line.qty) {
+            (Some(account), Some(cost), Some(qty)) => {
+                round_money(cost * qty, RoundingPolicy::LineExtension)
+                    .ok()
+                    .map(|amount| (account, amount))
+            }
+            _ => None,
+        };
+        match valued {
+            Some((account, amount)) => {
+                line.kind = LineKind::Account;
+                line.account = Some(account);
+                line.amount = amount;
+            }
+            None => warnings.push(format!(
+                "line {}: item {} has no mapped inventory account, purchase cost or quantity; the adjustment cannot be valued",
+                line.line_no,
+                line.item_id.as_deref().unwrap_or("(none)")
+            )),
+        }
+    }
 }
 
 /// The line kind a QBO pseudo item stands for, or `None` for a real item id.
@@ -786,6 +926,9 @@ fn dockind_of(doc_type: qbo_local::domain::DocumentType) -> DocKind {
         D::Purchase => DocKind::Purchase,
         D::Deposit => DocKind::Deposit,
         D::JournalEntry => DocKind::JournalEntry,
+        // D37: a transfer is a two-line journal; see `transfer_lines`.
+        D::Transfer | D::CreditCardPayment => DocKind::JournalEntry,
+        D::InventoryAdjustment => DocKind::InventoryAdjustment,
     }
 }
 

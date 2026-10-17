@@ -197,6 +197,15 @@ fn resolve_fixed(account: &ParsedAccount) -> Option<(&'static str, Classificatio
             (chart::INVENTORY_FINISHED, Asset)
         });
     }
+    // D37: QBO's own "Inventory Shrinkage" account is the offset every
+    // InventoryAdjustment names; §1 posts that offset to 5150.
+    if (matches_kind(account, "CostOfGoodsSold")
+        || matches_kind(account, "Expense")
+        || matches_kind(account, "OtherExpense"))
+        && (name_contains(account, "shrinkage") || name_contains(account, "inventory adjustment"))
+    {
+        return Some((chart::INVENTORY_ADJUSTMENT, Cogs));
+    }
     if matches_kind(account, "CostOfGoodsSold") {
         return Some((chart::COGS, Cogs));
     }

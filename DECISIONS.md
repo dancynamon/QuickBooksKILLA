@@ -741,3 +741,58 @@ replica would lose it.
 
 Why: keeps FY2027 whole in the new books and QBO the single entry point
 until cutover, with one quarter of replay instead of fourteen years.
+
+## D37 — Mirror and post Transfer, CreditCardPayment, InventoryAdjustment
+
+17 Oct 2026. Follows the practice parallel run (D32, docs/PRACTICE-RUN.md on
+its branch): once posting bugs were fixed, the only must-tier bank variance
+left was entities the replica never mirrored. As of 10/16/26: 135,758.35 of
+CreditCardPayment, a net 2,055.98 of Transfer (checking +133,702.37, cards
+−135,758.35, equity −1,000.00), and one 100.00 inventory shrinkage
+adjustment. Without these, every Q1 2027 nightly run goes red on checking
+and the cards.
+
+**qbo-local.** `EntityType` and `DocumentType` gain the three, appended last
+in the documents tier. CDC covers them (D25: "all API entities except" a
+list that does not name them). Facts from Intuit's API reference, read
+17 Oct 2026:
+
+| Entity | Shape | Code |
+|---|---|---|
+| Transfer | `FromAccountRef`, `ToAccountRef`, `Amount`; no lines, no `TotalAmt` | projected total = `Amount` |
+| CreditCardPayment | `BankAccountRef`, `CreditCardAccountRef`, `Amount`, optional `VendorRef`. Read and query responses wrap it as **`CreditCardPaymentTxn`** | `EntityType::response_key`; CDC accepts either name, since only the query shape is documented |
+| InventoryAdjustment | `AdjustAccountRef`, lines of `ItemAdjustmentLineDetail { ItemRef, QtyDiff }`. **No amount anywhere**, and **no Query operation documented** (Create, Read, Update, Delete only) | projected total = 0; `QtyDiff` read as the line qty |
+
+**Ledger.** No new `DocKind`:
+
+- Transfer → `JournalEntry`, Dr `ToAccountRef` / Cr `FromAccountRef`.
+- CreditCardPayment → `JournalEntry`, Dr `CreditCardAccountRef` /
+  Cr `BankAccountRef`.
+- InventoryAdjustment → `InventoryAdjustment`, the §1 row: each line is
+  valued at `QtyDiff × item PurchaseCost`, against the item's mapped asset
+  account (1300/1310) and 5150. `post_inventory_adjustment` now posts every
+  line (it took one) and takes the line's class before the header's. A line
+  it cannot value refuses the whole document, never a partial post.
+- An Expense/COGS account named "shrinkage" or "inventory adjustment" now
+  maps to 5150, so QBO's own Inventory Shrinkage account lands where §1
+  posts. Any other `AdjustAccountRef` posts to 5150 anyway, with a warning.
+
+**Open, for the first live sync (Dan; a rebuilt qbo-local triggers the
+keychain prompt, D26):**
+
+1. Whether `SELECT * FROM InventoryAdjustment` works. If QBO refuses it, the
+   sweep fails for that type only (it syncs last), and the fix is a CDC-only
+   path for it: CDC reaches back 30 days, enough for the Q1 2027 replay but
+   not the Q3 2026 practice window.
+2. Valuation. QBO values an adjustment itself, and the payload doesn't say at
+   what cost. The 100.00 should tie if the item's `PurchaseCost` matches
+   QBO's cost; if not, tbdiff shows the difference on 1300/1310 and 5150, and
+   the source becomes the InventoryValuationDetail report.
+3. Classes. QBO adjustments carry no `ClassRef`, so Q1 2027 lines need an
+   item default class or are refused, the same rule as every other Q1 line
+   (D29).
+
+*Rejected: new `Transfer`/`CreditCardPayment` doc kinds.* A two-line journal
+posts the same entry. New variants would spread into every exhaustive
+`DocKind` match, the desktop app's included, and buy nothing until the own
+books need their own transfer form.

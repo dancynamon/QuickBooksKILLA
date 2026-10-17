@@ -757,17 +757,17 @@ fn build_select(
 /// empty array.
 fn query_response_items(value: &Value, entity_type: EntityType) -> Vec<Value> {
     value
-        .pointer(&format!("/QueryResponse/{}", entity_type.as_str()))
+        .pointer(&format!("/QueryResponse/{}", entity_type.response_key()))
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default()
 }
 
 fn parse_single_entity(value: &Value, entity_type: EntityType) -> Result<EntityPayload, QboError> {
-    let object = value.get(entity_type.as_str()).ok_or_else(|| {
+    let object = value.get(entity_type.response_key()).ok_or_else(|| {
         QboError::Validation(format!(
             "response missing {:?} object: {value}",
-            entity_type.as_str()
+            entity_type.response_key()
         ))
     })?;
     to_entity_payload(entity_type, object)
@@ -799,7 +799,7 @@ fn parse_cdc_response(value: &Value) -> Result<Vec<EntityPayload>, QboError> {
                 if METADATA_KEYS.contains(&key.as_str()) {
                     continue;
                 }
-                let Ok(entity_type) = EntityType::parse(&key) else {
+                let Ok(entity_type) = EntityType::parse_response_key(&key) else {
                     continue;
                 };
                 let Value::Array(items) = items else { continue };
@@ -1085,6 +1085,34 @@ mod tests {
         assert!(payloads
             .iter()
             .any(|p| p.entity_type == EntityType::Invoice && p.qbo_id == "20" && p.is_deleted));
+    }
+
+    #[test]
+    fn credit_card_payments_are_read_from_their_txn_key() {
+        // D37: Intuit's API reference wraps this entity as
+        // `CreditCardPaymentTxn` on read and query.
+        let row = json!({ "Id": "29", "SyncToken": "0", "Amount": 10.0,
+                          "MetaData": { "LastUpdatedTime": "2026-01-01T00:00:00Z" } });
+        let query = json!({ "QueryResponse": { "CreditCardPaymentTxn": [row.clone()] } });
+        assert_eq!(
+            query_response_items(&query, EntityType::CreditCardPayment).len(),
+            1
+        );
+        let read = json!({ "CreditCardPaymentTxn": row.clone() });
+        assert_eq!(
+            parse_single_entity(&read, EntityType::CreditCardPayment)
+                .unwrap()
+                .qbo_id,
+            "29"
+        );
+        // CDC: accepted under either name, since the docs show only the
+        // query shape.
+        for key in ["CreditCardPaymentTxn", "CreditCardPayment"] {
+            let cdc = json!({ "CDCResponse": [ { "QueryResponse": [ { key: [row.clone()] } ] } ] });
+            let payloads = parse_cdc_response(&cdc).unwrap();
+            assert_eq!(payloads.len(), 1, "{key}");
+            assert_eq!(payloads[0].entity_type, EntityType::CreditCardPayment);
+        }
     }
 
     #[test]
