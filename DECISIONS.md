@@ -720,3 +720,78 @@ the switch possible.
 *Rejected: drop history entirely.* The replica already answers every
 historical lookup, so nothing is lost by not replaying it, and dropping the
 replica would lose it.
+
+## D31 — Real fixtures: a closed slice, amounts scaled per document, a secret seed
+
+17 Oct 2026, in build. Unblocks D26's "fixtures: recorded, not committed".
+(D29 and D30 are taken on sibling branches.)
+
+**Slice, not the book.** `qbo-local slice` reads the replica read-only and
+records a few hundred records instead of 67k: N customers and M vendors
+picked by a hash of `--pick-seed` (or named with `--customer`/`--vendor`),
+their `--max-docs` newest documents since `--since`, then closure — every
+`…Ref` and `LinkedTxn` outward, recursively; every document that links *to*
+an in-slice document (the payments applied to an invoice), so a balance can
+be checked against what was applied; masters never pull documents. Deposits
+are hubs (one deposit batches many customers' payments) and would drag in the
+whole book: a deposit joins only when every document it links is already in,
+and a payment's link to a deposit left out is removed from the sliced copy
+(counted). A reference the replica itself cannot satisfy (US `TAX`/`NON`) is
+left alone; any other reference outside the slice stops the run.
+`--max-records` (default 1500) refuses a slice nobody can review. The slice is
+recorded through the same `MockQbo` + `RecordingQbo` path as `record`, so
+`replay` and the scrubber read it like any recording, plus
+`deny-names.txt`: every customer and vendor name in the book, because a
+memo in the slice can name a contact outside it.
+
+**Amounts: scaled per entity, derived figures recomputed.** Each entity gets
+its own factor f, HMAC(seed, "Type:Id") into [0.40, 0.80] ∪ [1.25, 2.50].
+Leaves (line amounts, unit prices, unapplied amounts) are scaled and rounded
+half-up to the cent (D9); UnitPrice keeps its own places and the line Amount
+becomes Qty × UnitPrice. Everything derived is recomputed from the new leaves:
+subtotal lines, percent discounts, NetAmountTaxable, each tax line at its
+stored TaxPercent, TotalTax, TotalAmt; applications, Balance and
+RemainingCredit; payment and deposit totals; contact Balance and
+BalanceWithJobs; an account's CurrentBalanceWithSubAccounts. Applications
+keep their shape — fully paid stays fully paid, unpaid stays unpaid, part
+paid stays strictly part paid — and are spread across the paying lines by
+largest remainder, so the cents add up exactly. Journal entries scale the
+debit total and allocate both sides to it by largest remainder, so they
+still balance.
+
+Every derived figure is **residual-preserving**: new = formula(new leaves) +
+round(f × (old − formula(old leaves))). A consistent original keeps a zero
+residual and stays exactly consistent; a real-book oddity (D27's 3,775
+entries that do not balance) stays odd by a scaled amount instead of being
+silently fixed or left holding a real number. The scrubber checks this on
+every run: any invariant the original satisfied and the output breaks stops
+the run before anything is written.
+
+**The seed is a secret** (`.local/fixtures/scrub-seed`, created on first
+run). Fake names, emails, phones, streets and every factor are keyed with it,
+so a known public price or a guessed customer name cannot be checked against
+the fixture. Same seed, same slice: byte-identical output, so a re-record
+diffs cleanly. `--keep-amounts` exists for invented data only (the committed
+synthetic set, unchanged by this) and needs no seed; report files, whose
+amounts no formula ties to the entities, are refused unless it is given.
+
+**Leak detector, widened as D26 asked.** Names of three characters or fewer
+match whole words only (no more `USD`); longer names still match as
+substrings; digit-only names never match inside text; fakes are masked
+before the check and never equal an original. It now also fails the run on
+an original email, phone, street line or realm id anywhere; any email not at
+example.com or phone-shaped number; an original amount of 10.00 or more
+written as text; and any money field of 1.00 or more equal to its own
+original. Any string that would trip it is replaced on the way through
+(names) or redacted (`[scrubbed]`), so the detector stays a backstop.
+
+*Rejected: one global factor.* One public price (a rescue tube's) would give
+it away and with it every balance. *Rejected: integer multipliers* (exact,
+no rounding repair): the gcd of the cents recovers the multiplier.
+*Rejected: random fresh amounts.* Nothing would stay consistent without
+re-deriving the whole book, which is the residual method anyway, minus the
+real data's shape. *Rejected: loosening the detector for short names.*
+Whole-word matching keeps them caught where they mean something.
+
+Not run against the live replica: `tools/make-real-fixture.sh` is Dan's step,
+and its output is read file by file before anything is committed.

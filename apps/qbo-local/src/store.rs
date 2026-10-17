@@ -620,6 +620,43 @@ impl Store {
         )?)
     }
 
+    /// Every mirrored entity of the realm, one at a time, in a fixed order
+    /// (type, then id). A callback rather than a `Vec` so a whole book's raw
+    /// JSON (~170 MB at M0) never has to sit in memory at once — the slicer
+    /// keeps only a summary of each row.
+    pub fn for_each_entity(
+        &self,
+        realm: &RealmId,
+        mut visit: impl FnMut(MirroredEntity) -> Result<(), StoreError>,
+    ) -> Result<(), StoreError> {
+        let mut statement = self.connection.prepare(
+            "SELECT entity_type, qbo_id, sync_token, last_updated_utc, is_deleted, raw_json
+             FROM entities WHERE realm_id = ?1 ORDER BY entity_type, qbo_id",
+        )?;
+        let mut rows = statement.query(params![realm.as_str()])?;
+        while let Some(row) = rows.next()? {
+            let entity_type: String = row.get(0)?;
+            // A type this build does not know is skipped, not fatal: the
+            // slicer only follows the types it can name.
+            let Ok(entity_type) = EntityType::parse(&entity_type) else {
+                continue;
+            };
+            let last_updated: String = row.get(3)?;
+            let raw: String = row.get(5)?;
+            visit(MirroredEntity {
+                entity_type,
+                qbo_id: row.get(1)?,
+                sync_token: row.get(2)?,
+                last_updated_utc: DateTime::parse_from_rfc3339(&last_updated)
+                    .map(|dt| dt.with_timezone(&Utc))
+                    .unwrap_or_else(|_| Utc::now()),
+                is_deleted: row.get::<_, i64>(4)? != 0,
+                raw_json: serde_json::from_str(&raw)?,
+            })?;
+        }
+        Ok(())
+    }
+
     // -----------------------------------------------------------------------
     // Sync application (§4.1)
     // -----------------------------------------------------------------------

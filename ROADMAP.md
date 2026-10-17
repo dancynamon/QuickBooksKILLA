@@ -54,7 +54,7 @@ Everything **not** built needs credentials, Intuit's docs, or a UI toolchain:
 | First live sync, counts and wall-clock measured | A | **done 14 Oct** (D26): 67,747 rows, 225 s, sweep clean, quarantine 0; CDC daemon running live |
 | CDC daemon loop, nightly snapshot | A | **built 11 Sep**, wired into the `qbo-local` binary (`daemon`, `sweep`, `snapshot`, `init`, `status`); runs with `--mock` until `HttpQboClient` exists |
 | Reconciliation sweep (DESIGN §7) | A | **built 11 Sep**; TB diff (step 5) waits on the ledger |
-| Fixture recorder and scrubber (HANDOFF §2.6) | A | **built 13 Sep**; a synthetic set is committed, real scrubbed ones need one live recording |
+| Fixture recorder and scrubber (HANDOFF §2.6) | A | **built 13 Sep**; slice + amount scrubbing 17 Oct (D31); a synthetic set is committed, a real scrubbed slice needs one run of `tools/make-real-fixture.sh` and Dan's review |
 | Verify the four ⚠️ API facts (DESIGN §0, §12) | A, gates C | **done 28 Sep, D25**; RequestId Customer/Item scope only settles in a sandbox |
 | Read-only query API over `Store` | B | **built 11 Sep** |
 | UI shell and read screens | B | **UI built 13 Sep** in `apps/desktop` (every §B1 screen, 13 node tests, driven in headless Chromium); the Tauri shell compiles on the Mac |
@@ -73,7 +73,8 @@ import` has run once: the tbdiff baseline is D27. The two-week read-only
 window started **14 Oct 2026**.
 
 Still open in M0: scrubbed real fixtures
-(blocked, D26: the scrubber needs a slice and amount scrubbing first);
+(unblocked, D31: `tools/make-real-fixture.sh` slices and scrubs; Dan runs it
+and reviews the output before anything is committed);
 registering `qbo-local-mcp` against the live replica.
 
 ---

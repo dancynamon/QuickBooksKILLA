@@ -35,6 +35,7 @@ use qbo_local::oauth::{self, OAuthConfig};
 use qbo_local::ratelimit::RealmLimits;
 use qbo_local::reconcile::{ReconcileOptions, ReconcileReport, Reconciler};
 use qbo_local::reports;
+use qbo_local::slice::{self, SliceOptions};
 use qbo_local::store::backup::SnapshotPolicy;
 use qbo_local::store::{latest_version, ProjectedTable, RealmSummary, Store};
 use qbo_local::sync::{CDC_LOOKBACK_DAYS, DEFAULT_CDC_MAX_AGE_DAYS};
@@ -162,6 +163,12 @@ enum Command {
         realm: RealmId,
         dir: PathBuf,
     },
+    Slice {
+        db: PathBuf,
+        realm: RealmId,
+        dir: PathBuf,
+        options: SliceOptions,
+    },
     Report {
         realm: RealmId,
         name: ReportKind,
@@ -264,6 +271,13 @@ SUBCOMMANDS:
                 it — see tools/scrub-fixtures.py.
     replay      Sync a realm from fixtures previously recorded into DIR,
                 touching no network at all.
+    slice       Record a small, referentially closed slice of the replica
+                (--db, opened read-only) into DIR as fixtures, plus
+                DIR/deny-names.txt for the scrubber. Starts from --customers
+                N / --vendors N picked by --pick-seed (or --customer ID /
+                --vendor ID, repeatable), their --max-docs newest documents
+                since --since, and closes over every reference. Real data:
+                scrub before committing (tools/make-real-fixture.sh, D31).
     report      Pull one Reports API report (LEDGER-DESIGN.md §6, §7) and
                 write it as CSV to --out: trial-balance in the
                 qbo_account_id,name,balance shape `ledger tbdiff`/`opening`/
@@ -301,6 +315,14 @@ FLAGS:
     --record DIR            Also record the report response(s) into DIR, the
                             same shape `qbo-local record` writes for a sync
                             (report, snapshots).
+    --customers N, --vendors N
+                            Contacts to pick for a slice (default 8 and 4).
+    --customer ID, --vendor ID
+                            A contact to include in a slice, by id (repeatable).
+    --since YYYY-MM-DD      Seed a slice with documents from this date on.
+    --max-docs N            Newest documents per contact to seed with (default 12).
+    --max-records N         Refuse a slice larger than this (default 1500).
+    --pick-seed S           Which contacts a slice picks (default \"slice\").
     --from-year YYYY        First year to snapshot, inclusive (snapshots only).
     --to-year YYYY          Last year to snapshot, inclusive (snapshots only).
 
@@ -381,6 +403,7 @@ fn parse(args: &[String]) -> Result<Command, UsageError> {
         "snapshot" => parse_snapshot(args),
         "record" => parse_record(args),
         "replay" => parse_replay(args),
+        "slice" => parse_slice(args),
         "report" => parse_report(args),
         "snapshots" => parse_snapshots(args),
         other => Err(UsageError::unknown_subcommand(other)),
@@ -666,6 +689,41 @@ fn parse_replay(mut args: Args<'_>) -> Result<Command, UsageError> {
     })
 }
 
+fn parse_slice(mut args: Args<'_>) -> Result<Command, UsageError> {
+    let mut db = None;
+    let mut realm = None;
+    let mut dir = None;
+    let mut options = SliceOptions::default();
+    while let Some(flag) = args.next() {
+        match flag.as_str() {
+            "--db" => db = Some(PathBuf::from(next_value(&mut args, "--db")?)),
+            "--realm" => realm = Some(parse_realm(&next_value(&mut args, "--realm")?)?),
+            "--dir" => dir = Some(PathBuf::from(next_value(&mut args, "--dir")?)),
+            "--customers" => {
+                options.customers = parse_usize(&next_value(&mut args, flag)?, flag)?
+            }
+            "--vendors" => options.vendors = parse_usize(&next_value(&mut args, flag)?, flag)?,
+            "--customer" => options.customer_ids.push(next_value(&mut args, flag)?),
+            "--vendor" => options.vendor_ids.push(next_value(&mut args, flag)?),
+            "--since" => options.since = Some(parse_date(&next_value(&mut args, flag)?, flag)?),
+            "--max-docs" => {
+                options.max_docs_per_contact = parse_usize(&next_value(&mut args, flag)?, flag)?
+            }
+            "--max-records" => {
+                options.max_records = parse_usize(&next_value(&mut args, flag)?, flag)?
+            }
+            "--pick-seed" => options.pick_seed = next_value(&mut args, flag)?,
+            other => return Err(UsageError::unknown_flag(other)),
+        }
+    }
+    Ok(Command::Slice {
+        db: db.ok_or_else(|| UsageError::missing_flag("--db"))?,
+        realm: realm.ok_or_else(|| UsageError::missing_flag("--realm"))?,
+        dir: dir.ok_or_else(|| UsageError::missing_flag("--dir"))?,
+        options,
+    })
+}
+
 /// `--live` xor `--replay DIR`: exactly one, same rule for `report` and
 /// `snapshots`. `--mock` has no equivalent here — there is no report-shaped
 /// double.
@@ -840,6 +898,12 @@ fn execute(command: Command) -> Result<(), CommandError> {
             config,
         } => run_record(&db, &realm, &dir, mock, live, config.as_deref()),
         Command::Replay { db, realm, dir } => run_replay(&db, &realm, &dir),
+        Command::Slice {
+            db,
+            realm,
+            dir,
+            options,
+        } => run_slice(&db, &realm, &dir, &options),
         Command::Report {
             realm,
             name,
@@ -1371,6 +1435,40 @@ fn run_replay(db: &Path, realm: &RealmId, dir: &Path) -> Result<(), CommandError
         .map_err(runtime)?;
 
     print_sync_report_table(&report);
+    Ok(())
+}
+
+// -- slice ------------------------------------------------------------------
+
+/// `HANDOFF.md` §2.6, D31: record a small, referentially closed slice of the
+/// replica into `dir`, ready for `tools/scrub-fixtures.py`. Opens the replica
+/// read-only and touches no network.
+fn run_slice(
+    db: &Path,
+    realm: &RealmId,
+    dir: &Path,
+    options: &SliceOptions,
+) -> Result<(), CommandError> {
+    let store = Store::open_read_only(db).map_err(runtime)?;
+    let report = slice::slice_realm(&store, realm, options).map_err(runtime)?;
+    let entries = slice::record_slice(&report, realm, dir, Utc::now()).map_err(runtime)?;
+
+    println!("replica records  : {}", report.replica_records);
+    println!("slice records    : {}", report.entities.len());
+    for entity_type in EntityType::m0_scope() {
+        let count = report.count(entity_type);
+        if count > 0 {
+            println!("  {:<15}{count}", entity_type.as_str());
+        }
+    }
+    println!("seed contacts    : {}", report.seed_contacts.len());
+    println!("pruned links     : {} (to deposits outside the slice)", report.pruned_links);
+    println!("unresolvable refs: {} (targets the replica does not hold)", report.unresolvable_refs);
+    println!("deny-list names  : {}", report.deny_names.len());
+    println!("recorded to      : {} ({entries} manifest entries)", dir.display());
+    println!();
+    println!("This is real data. Scrub it before anything leaves .local/ — see");
+    println!("tools/make-real-fixture.sh and HANDOFF.md §2.6.");
     Ok(())
 }
 

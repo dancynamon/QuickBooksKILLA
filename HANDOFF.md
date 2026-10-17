@@ -217,7 +217,20 @@ way out. This repository has already had to be cleaned once, and finding real
 names in a test file after the fact is much more work than inventing them up
 front.
 
-**The three commands, in the order a real recording session uses them:**
+**A real fixture is a slice, scrubbed — one script (D31):**
+
+    tools/make-real-fixture.sh [--customers 8 --vendors 4 --since YYYY-MM-DD ...]
+
+It runs `qbo-local slice` against `.local/replica.db` (read-only; a few
+hundred records, closed over every reference, plus `deny-names.txt`), then
+`scrub-fixtures.py --seed-file .local/fixtures/scrub-seed` (names, contacts
+*and amounts*, invariants re-checked, leak detector), then replays the
+scrubbed set into a throwaway replica. Everything lands in
+`.local/fixtures/slice-<stamp>/`; the scrubbed directory is read file by file
+before it is copied to `apps/qbo-local/tests/fixtures/real-slice/` and
+committed. The seed is a secret: keep it, never commit it.
+
+**The three underlying commands, in the order a full recording session uses them:**
 
 1. `qbo-local record --db PATH --realm ID --dir .local/fixtures/<realm> --live`
    — records every response a full sweep makes into `--dir`, via
@@ -227,13 +240,16 @@ front.
    instead — it never touches the network and proves the plumbing, which is
    what `qbo-local`'s own CLI tests use it for; it is not how real fixtures
    get made.
-2. `python3 tools/scrub-fixtures.py .local/fixtures/<realm> <scrubbed-dir>` —
+2. `python3 tools/scrub-fixtures.py --seed-file SEED .local/fixtures/<realm> <scrubbed-dir>` —
    the only path from a recording to something safe to `git add`. Writes a
    fresh directory (never in place), deterministically, and refuses to write
    anything at all if its own leak detector finds an original name surviving
    somewhere in the output — the backstop the rule above depends on. Read the
    module docstring for the exact field rules (names, addresses, phone,
-   email, `DocNumber`'s offset, `realmId`).
+   email, `DocNumber`'s offset, `realmId`, and D31's amount rules).
+   `--keep-amounts` (no seed) is for invented data only; a full-book
+   recording with its `reports/` is refused without it, which is why real
+   fixtures come from `slice` rather than `record`.
 3. `qbo-local replay --db PATH --realm ID --dir <scrubbed-dir>` — syncs a
    realm entirely from a fixture directory, via `fixture::FixtureQbo`, touching
    no network at all. This is what the offline suite exercises against —
