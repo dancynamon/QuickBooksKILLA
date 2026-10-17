@@ -16,6 +16,7 @@ pub mod backup;
 pub mod index;
 pub mod lineage;
 pub mod query;
+pub mod sales_orders;
 pub mod search;
 
 use crate::domain::{ContactType, DocumentType, EntityType, RealmId};
@@ -41,6 +42,10 @@ pub enum StoreError {
     /// none of the SQL-only paths above needed an error variant for.
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
+    /// A sales-order feed (D42) that cannot be projected, or a stored row
+    /// that no longer reads back.
+    #[error("sales orders: {0}")]
+    SalesOrder(String),
 }
 
 /// A forward-only, numbered migration. Applied in a transaction, version
@@ -370,6 +375,73 @@ CREATE TRIGGER lines_fts_au AFTER UPDATE ON document_lines BEGIN
     VALUES ('delete', old.rowid, old.description);
     INSERT INTO lines_fts(rowid, description) VALUES (new.rowid, new.description);
 END;
+"#,
+    },
+    Migration {
+        version: 3,
+        name: "sales orders, mirrored from a feed (D42)",
+        sql: r#"
+-- QBO sales orders are a commerce-module object, not a v3 entity (D42), so
+-- they get their own tables rather than rows in entities/documents: their
+-- ids are the commerce module's, and no v3 path may ever reach them.
+CREATE TABLE sales_orders (
+    realm_id           TEXT NOT NULL REFERENCES realms(realm_id),
+    qbo_id             TEXT NOT NULL,
+    doc_number         TEXT,
+    txn_date           TEXT NOT NULL,
+    customer_id        TEXT,
+    customer_name      TEXT,
+    po_number          TEXT,
+    due_date           TEXT,
+    ship_date          TEXT,
+    order_status       TEXT,
+    invoice_status     TEXT,
+    fulfillment_status TEXT,
+    total_minor        INTEGER NOT NULL,
+    -- Still to be invoiced, before tax.
+    open_minor         INTEGER NOT NULL,
+    is_open            INTEGER NOT NULL,
+    version            TEXT,
+    memo               TEXT,
+    invoice_ids        TEXT NOT NULL,   -- JSON array of v3 Invoice ids
+    is_deleted         INTEGER NOT NULL DEFAULT 0,
+    raw_json           TEXT NOT NULL,
+    mirrored_at        TEXT NOT NULL,
+    PRIMARY KEY (realm_id, qbo_id)
+) STRICT;
+
+CREATE INDEX idx_sales_orders_open ON sales_orders(realm_id, is_open, txn_date);
+CREATE INDEX idx_sales_orders_number ON sales_orders(realm_id, doc_number);
+
+CREATE TABLE sales_order_lines (
+    realm_id      TEXT NOT NULL,
+    so_qbo_id     TEXT NOT NULL,
+    line_no       INTEGER NOT NULL,
+    line_id       TEXT,
+    item_id       TEXT,
+    description   TEXT,
+    qty           TEXT,
+    unit_price    TEXT,
+    amount_minor  INTEGER NOT NULL,
+    is_taxable    INTEGER NOT NULL DEFAULT 0,
+    qty_invoiced  TEXT NOT NULL,
+    qty_open      TEXT,
+    open_minor    INTEGER NOT NULL,
+    invoice_ids   TEXT NOT NULL,        -- JSON array of v3 Invoice ids
+    PRIMARY KEY (realm_id, so_qbo_id, line_no),
+    FOREIGN KEY (realm_id, so_qbo_id) REFERENCES sales_orders(realm_id, qbo_id)
+) STRICT;
+
+-- One row per realm: the last feed applied. A sales order has no CDC, so
+-- this is how a reader knows how fresh the mirror is.
+CREATE TABLE sales_order_snapshots (
+    realm_id     TEXT PRIMARY KEY REFERENCES realms(realm_id),
+    captured_at  TEXT NOT NULL,
+    synced_at    TEXT NOT NULL,
+    source       TEXT NOT NULL,
+    order_count  INTEGER NOT NULL,
+    complete     INTEGER NOT NULL
+) STRICT;
 "#,
     },
 ];

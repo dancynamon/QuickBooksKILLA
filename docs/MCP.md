@@ -173,6 +173,11 @@ records are quarantined for failing to parse.
 }
 ```
 
+Sales orders are not on this server: they are not a v3 entity and reach the
+replica from a feed (D42). `qbo-local sales-orders --db … --realm …` lists
+the mirrored ones; the `ledger` server's `open_sales_orders` lists the
+book's.
+
 ### `class_tree` / `chart_of_accounts`
 
 Every QBO class (with parent, for the hierarchy) or every account (with
@@ -444,6 +449,21 @@ QBO's aging with these.
 { "name": "aging", "arguments": { "book": "receivable", "as_of": "2026-10-15" } }
 ```
 
+### `open_sales_orders`
+
+Sales orders (D42) with what is still to be invoiced, oldest first:
+`document_id`, `number`, `contact_id`, `contact_name`, `txn_date`,
+`subtotal` (lines less discounts, before tax), `invoiced` (what the invoices
+made from it took), `open`, `invoice_ids`, `memo`, `source_ref` (QBO's
+commerce id for one the cutover import carried). Only orders with something
+open unless `all`; voided orders never. `as_of` counts orders and invoices
+dated on or before it. Nothing is stored: an order's state is derived from
+the invoices that link to it.
+
+```json
+{ "name": "open_sales_orders", "arguments": { "as_of": "2027-01-31" } }
+```
+
 ### `get_document`
 
 The newest saved version of one document, as an editor needs it back: every
@@ -462,7 +482,8 @@ entry form with this, then sends it back through `update_document`.
 
 ### `save_and_post_document`
 
-Saves a document and, unless it is an Estimate or PurchaseOrder, posts the
+Saves a document and, unless it is an Estimate, SalesOrder or PurchaseOrder,
+posts the
 entry `crate::post`'s rules table derives from it. See "Repointing a skill"
 below for a full example. Because an MCP call has no replica to look items
 up in, an inline `items` map (item id to `ItemAccounts` JSON) supplies
@@ -481,8 +502,9 @@ when the slim import loads them.
 
 The standalone entry path (D28), and the one a repointed skill should use.
 It takes what a person would type and fills the rest from master data: a new
-`document_id`, the next `number` for invoices, estimates, sales receipts,
-credit memos, refund receipts and POs (a number already in use is refused),
+`document_id`, the next `number` for invoices, estimates, sales orders,
+sales receipts, credit memos, refund receipts and POs (a number already in
+use is refused),
 `due_date` from the contact's terms, `header_class` from the contact's
 default, and sales tax at the NJ rate on taxable lines (zero for an exempt
 customer). The contact must exist, be active and be the right kind; every
@@ -508,6 +530,69 @@ item must exist. A document the posting rules refuse leaves nothing saved.
 
 Returns `{ document_id, version, number, due_date, total, tax, entry_id,
 entry, locked_through }`.
+
+A **sales order** (D42) is the same call with `"kind": "SalesOrder"`: a
+customer, numbered in its own series, taxed like an invoice (the tax is
+shown, and computed again on the invoice), never posted (`entry_id` is
+`null`). Put the customer's PO on `memo`. A shipping charge is a
+`"kind": "Shipping"` line (it posts to 4300 on the invoice; as an `Item`
+line it would post to 4100). This is exactly what the process-sales-order
+pipeline's ledger backend sends for a sales order:
+
+```json
+{
+  "name": "create_document",
+  "arguments": {
+    "actor": "process-sales-order",
+    "document": {
+      "kind": "SalesOrder",
+      "txn_date": "2027-01-06",
+      "contact": { "kind": "Customer", "id": "cust-blue-harbor" },
+      "memo": "PO 4471",
+      "lines": [
+        { "kind": "Item", "item_id": "rt-50-red", "qty": "10", "amount": "199.50",
+          "description": "Rescue tube 50in, red", "is_taxable": false },
+        { "kind": "Shipping", "item_id": "ship-fedex-ground", "qty": "1",
+          "amount": "42.00", "description": "Shipping - FedEx Ground" }
+      ]
+    }
+  }
+}
+```
+
+Returns the same fields as an invoice; keep `document_id` (and `number`, the
+SO number to quote back to the customer) for the conversion.
+
+### `convert_to_invoice`
+
+Makes the invoice for a sales order (D42) and closes what it takes. It
+copies the order's customer, class, memo and lines — every line, or only
+`lines` (`[{ "line_no", "qty" }]`, `qty` optional: a smaller quantity
+scales the amount) — then numbers, dates due, taxes, saves and posts it
+exactly as `create_document` does. The invoice carries one application to
+the sales order for the pre-tax subtotal it took: a link back, never money
+(open items, aging and posting all ignore an application to a contract).
+Invoicing the whole order closes it; invoicing part leaves the rest open,
+and a remainder nobody will invoice is dropped by voiding the sales order
+(`void_document`), which leaves its invoices alone.
+
+Refused: not a sales order, voided, nothing left to invoice, taking more
+than is open, no `lines` on an order already partly invoiced (so nothing is
+invoiced twice), a closed period, an import replay in progress.
+
+```json
+{
+  "name": "convert_to_invoice",
+  "arguments": {
+    "actor": "process-shipment",
+    "sales_order_id": "019a…",
+    "txn_date": "2027-01-09"
+  }
+}
+```
+
+Returns `create_document`'s fields for the invoice plus `sales_order_id`,
+`sales_order_open` and `sales_order_closed`.
 
 ### `update_document`
 

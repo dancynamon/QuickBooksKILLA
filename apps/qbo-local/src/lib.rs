@@ -51,6 +51,7 @@ pub mod project;
 pub mod ratelimit;
 pub mod reconcile;
 pub mod reports;
+pub mod sales_orders;
 pub mod slice;
 pub mod store;
 pub mod sync;

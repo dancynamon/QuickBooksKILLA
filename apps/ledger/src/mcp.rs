@@ -62,6 +62,7 @@ use crate::books::{self, Book, BooksError, Contact, Item};
 use crate::payroll::{self, PayrollError};
 use crate::post::{self, PostError, Posting};
 use crate::report;
+use crate::sales_orders::{self, ConvertLine, ConvertRequest, SalesOrderError};
 use crate::store::{AdjustmentState, CommandMeta, Ledger, LedgerError};
 use crate::types::{
     AccountId, ClassId, ContactKind, ContactRef, ItemAccounts, JournalEntry, JournalLine,
@@ -286,6 +287,16 @@ impl<'a> LedgerToolSet<'a> {
                     .map_err(ledger_err)?;
                 document_json(&doc, version)
             }
+            "open_sales_orders" => {
+                let as_of = parse_optional_date(&args, "as_of")?;
+                let all = args.get("all").and_then(Value::as_bool).unwrap_or(false);
+                let orders = sales_orders::sales_orders(self.ledger, &self.company, as_of, !all)
+                    .map_err(sales_order_err)?;
+                Ok(json!(orders
+                    .iter()
+                    .map(sales_order_json)
+                    .collect::<Vec<_>>()))
+            }
             "aging" => {
                 let book = parse_book(&args)?;
                 let as_of = parse_date(&args, "as_of")?;
@@ -303,6 +314,7 @@ impl<'a> LedgerToolSet<'a> {
             "upsert_contact" => self.upsert_contact(&mut args),
             "upsert_item" => self.upsert_item(&mut args),
             "create_document" => self.create_document(&mut args),
+            "convert_to_invoice" => self.convert_to_invoice(&args),
             "update_document" => self.update_document(&mut args),
             "void_document" => self.void_document(&args),
             "apply_credit" => self.apply_credit(&mut args),
@@ -399,9 +411,7 @@ impl<'a> LedgerToolSet<'a> {
     /// by the opening entry. Posting a new version of it would put its AR or
     /// AP on the books a second time.
     fn refuse_if_carried_by_opening(&self, document_id: &str) -> Result<(), ToolError> {
-        if books::carried_by_opening(self.ledger, &self.company, document_id)
-            .map_err(books_err)?
-        {
+        if books::carried_by_opening(self.ledger, &self.company, document_id).map_err(books_err)? {
             return Err(ToolError::new(format!(
                 "{document_id} came across in the cutover import and its balance sits in the \
                  opening entry; settle it with a payment or credit, or adjust it with a journal \
@@ -474,6 +484,94 @@ impl<'a> LedgerToolSet<'a> {
         let (doc, ctx) =
             books::prepare_document(self.ledger, &self.company, doc, PostingConfig::default())
                 .map_err(books_err)?;
+        self.save_and_post_prepared(doc, &ctx, actor, "mcp_create_document")
+    }
+
+    /// D42: the invoice for a sales order, linked back to it, through the
+    /// same checks, numbering, tax and save-and-post as create_document.
+    fn convert_to_invoice(&mut self, args: &Value) -> Result<Value, ToolError> {
+        self.refuse_if_replaying()?;
+        let actor = required_str(args, "actor")?.to_string();
+        let sales_order_id = required_str(args, "sales_order_id")?.to_string();
+        let txn_date = parse_date(args, "txn_date")?;
+        let lines = match args.get("lines") {
+            None | Some(Value::Null) => None,
+            Some(Value::Array(lines)) => {
+                let mut out = Vec::with_capacity(lines.len());
+                for line in lines {
+                    let line_no = line.get("line_no").and_then(Value::as_i64).ok_or_else(|| {
+                        ToolError::new("each of \"lines\" needs an integer \"line_no\"")
+                    })?;
+                    let qty = match line.get("qty") {
+                        None | Some(Value::Null) => None,
+                        Some(Value::String(raw)) => Some(
+                            Decimal::from_str(raw)
+                                .map_err(|_| ToolError::new(format!("invalid \"qty\": {raw:?}")))?,
+                        ),
+                        Some(Value::Number(n)) => Some(
+                            Decimal::from_str(&n.to_string())
+                                .map_err(|_| ToolError::new(format!("invalid \"qty\": {n}")))?,
+                        ),
+                        Some(other) => {
+                            return Err(ToolError::new(format!("invalid \"qty\": {other}")))
+                        }
+                    };
+                    out.push(ConvertLine { line_no, qty });
+                }
+                Some(out)
+            }
+            Some(other) => {
+                return Err(ToolError::new(format!(
+                    "\"lines\" must be an array of {{\"line_no\", \"qty\"}}, got {other}"
+                )))
+            }
+        };
+        let invoice = sales_orders::invoice_from_sales_order(
+            self.ledger,
+            &self.company,
+            &sales_order_id,
+            ConvertRequest {
+                document_id: uuid::Uuid::now_v7().to_string(),
+                txn_date,
+                lines,
+                number: args
+                    .get("number")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                memo: args.get("memo").and_then(Value::as_str).map(str::to_string),
+            },
+        )
+        .map_err(sales_order_err)?;
+        let (invoice, ctx) = books::prepare_document(
+            self.ledger,
+            &self.company,
+            invoice,
+            PostingConfig::default(),
+        )
+        .map_err(books_err)?;
+        let mut result =
+            self.save_and_post_prepared(invoice, &ctx, actor, "mcp_convert_to_invoice")?;
+        let remaining = sales_orders::sales_orders(self.ledger, &self.company, None, false)
+            .map_err(sales_order_err)?
+            .into_iter()
+            .find(|so| so.document_id == sales_order_id);
+        if let (Value::Object(map), Some(so)) = (&mut result, remaining) {
+            map.insert("sales_order_id".into(), json!(sales_order_id));
+            map.insert("sales_order_open".into(), json!(money_str(so.open)));
+            map.insert("sales_order_closed".into(), json!(so.open.is_zero()));
+        }
+        Ok(result)
+    }
+
+    /// Saves a prepared document as its next version and posts it: the
+    /// common tail of create_document and convert_to_invoice.
+    fn save_and_post_prepared(
+        &mut self,
+        doc: LedgerDocument,
+        ctx: &PostingContext,
+        actor: String,
+        command_kind: &str,
+    ) -> Result<Value, ToolError> {
         // Post before saving, so a document the posting rules refuse (a
         // missing class, an unbalanced journal) leaves nothing behind. The
         // version it will be saved as is the next one.
@@ -482,7 +580,7 @@ impl<'a> LedgerToolSet<'a> {
             .document_version_count(&self.company, &doc.document_id)
             .map_err(ledger_err)?
             + 1;
-        let posting = post::post(&doc, next_version, &ctx).map_err(post_err)?;
+        let posting = post::post(&doc, next_version, ctx).map_err(post_err)?;
 
         let now = Utc::now();
         let version = self
@@ -492,7 +590,7 @@ impl<'a> LedgerToolSet<'a> {
                 &doc,
                 CommandMeta {
                     actor_id: actor,
-                    kind: "mcp_create_document".to_string(),
+                    kind: command_kind.to_string(),
                     hlc: now.to_rfc3339(),
                 },
                 now,
@@ -1136,6 +1234,23 @@ pub fn tools() -> Vec<ToolSpec> {
             ),
         },
         ToolSpec {
+            name: "open_sales_orders",
+            description: "Sales orders (D42) with what is still to be invoiced, oldest first: \
+                `document_id`, `number`, `contact_id`, `contact_name`, `txn_date`, `subtotal` \
+                (lines less discounts, before tax), `invoiced` (what invoices made from it \
+                took), `open`, `invoice_ids`, `memo`, `source_ref` (the QBO sales order id \
+                when the cutover import carried it). Only orders with something open unless \
+                `all`; voided orders never. `as_of` (YYYY-MM-DD) counts orders and invoices \
+                dated on or before it; omitted, every one.",
+            input_schema: tool_schema(
+                json!({
+                    "as_of": date_prop("YYYY-MM-DD. Omit for today and beyond."),
+                    "all": { "type": "boolean", "description": "Include fully invoiced orders." },
+                }),
+                &[],
+            ),
+        },
+        ToolSpec {
             name: "aging",
             description: "AR (`book` \"receivable\") or AP (`book` \"payable\") aging as of \
                 a date: one row per contact with current, 1-30, 31-60, 61-90 and over-90 days \
@@ -1183,7 +1298,8 @@ pub fn tools() -> Vec<ToolSpec> {
         ToolSpec {
             name: "create_document",
             description: "The standalone way to enter a document (D28): an invoice, estimate, \
-                sales receipt, credit memo, purchase order, bill, payment, bill payment and the \
+                sales order (`kind` \"SalesOrder\", D42; never posts — see \
+                convert_to_invoice), sales receipt, credit memo, purchase order, bill, payment, bill payment and the \
                 rest. Send only what a person would type: `kind`, `txn_date`, `contact` \
                 ({\"kind\":\"Customer\" or \"Vendor\",\"id\":...}), and `lines` (each \
                 `kind`, `amount`, and `item_id` for Item, Shipping and Discount lines, \
@@ -1192,7 +1308,7 @@ pub fn tools() -> Vec<ToolSpec> {
                 ([{\"target_document_id\",\"target_kind\",\"amount\"}]). Every other \
                 LedgerDocument field may be left out. The contact must exist, be active and be \
                 the right kind; every item must exist. Fills in: `document_id` (new), `number` \
-                (next in sequence for invoices, estimates, sales receipts, credit memos, refund \
+                (next in sequence for invoices, estimates, sales orders, sales receipts, credit memos, refund \
                 receipts and purchase orders; a number already used is refused), `due_date` \
                 (from the contact's terms), `header_class` (the contact's default), and `tax` on \
                 sales (taxable lines at the NJ rate, zero for an exempt customer). Then saves \
@@ -1212,6 +1328,35 @@ pub fn tools() -> Vec<ToolSpec> {
                     },
                 }),
                 &["document", "actor"],
+            ),
+        },
+        ToolSpec {
+            name: "convert_to_invoice",
+            description: "Makes the invoice for a sales order (D42) and closes what it takes: \
+                copies the order's customer, class, memo and lines (every line, or only \
+                `lines` — [{\"line_no\", \"qty\"}], `qty` optional, a smaller quantity \
+                scaling the amount), then numbers, dates due, taxes, saves and posts it \
+                exactly as create_document does. The invoice carries an application to the \
+                sales order for the pre-tax subtotal it took: a link, never money. Invoicing \
+                the whole order closes it; to drop a remainder nobody will invoice, void the \
+                sales order. Refused: not a sales order, voided, nothing left to invoice, \
+                taking more than is open, no `lines` on an order already partly invoiced, a \
+                closed period, an import replay in progress. Returns create_document's \
+                fields plus `sales_order_id`, `sales_order_open` and `sales_order_closed`.",
+            input_schema: tool_schema(
+                json!({
+                    "sales_order_id": { "type": "string" },
+                    "txn_date": date_prop("The invoice date, YYYY-MM-DD."),
+                    "lines": {
+                        "type": "array",
+                        "description": "Which order lines to invoice; omit for all.",
+                        "items": { "type": "object" },
+                    },
+                    "number": { "type": "string", "description": "Omit for the next invoice number." },
+                    "memo": { "type": "string", "description": "Omit to keep the order's memo." },
+                    "actor": { "type": "string", "description": "Who is invoicing it." },
+                }),
+                &["sales_order_id", "txn_date", "actor"],
             ),
         },
         ToolSpec {
@@ -1318,7 +1463,7 @@ pub fn tools() -> Vec<ToolSpec> {
         ToolSpec {
             name: "save_and_post_document",
             description: "Saves a document (a new version if `document_id` already exists) and, \
-                unless it is an Estimate or PurchaseOrder (contracts, not transactions), posts \
+                unless it is an Estimate, SalesOrder or PurchaseOrder (contracts, not transactions), posts \
                 the balanced journal entry the posting-rules table (`LEDGER-DESIGN.md` §1) \
                 derives from it. `document` is a full LedgerDocument: at minimum \
                 `document_id`, `kind` (\"Invoice\", \"SalesReceipt\", \"Bill\", \"Payment\", \
@@ -2180,6 +2325,29 @@ fn revision_json(revision: &books::Revision) -> Result<Value, ToolError> {
     }))
 }
 
+fn sales_order_json(so: &sales_orders::OpenSalesOrder) -> Value {
+    json!({
+        "document_id": so.document_id,
+        "number": so.number,
+        "contact_id": so.contact_id,
+        "contact_name": so.contact_name,
+        "txn_date": so.txn_date.to_string(),
+        "subtotal": money_str(so.subtotal),
+        "invoiced": money_str(so.invoiced),
+        "open": money_str(so.open),
+        "invoice_ids": so.invoice_ids,
+        "memo": so.memo,
+        "source_ref": so.source_ref,
+    })
+}
+
+fn sales_order_err(err: SalesOrderError) -> ToolError {
+    match err {
+        SalesOrderError::Books(inner) => books_err(inner),
+        other => ToolError::new(other.to_string()),
+    }
+}
+
 fn open_document_json(doc: &books::OpenDocument) -> Value {
     json!({
         "document_id": doc.document_id,
@@ -2388,11 +2556,13 @@ mod tests {
             "list_contacts",
             "list_items",
             "open_documents",
+            "open_sales_orders",
             "aging",
             "get_document",
             "upsert_contact",
             "upsert_item",
             "create_document",
+            "convert_to_invoice",
             "update_document",
             "void_document",
             "apply_credit",
@@ -2835,6 +3005,153 @@ mod tests {
             open["result"]["structuredContent"][0]["open"],
             json!("56.62")
         );
+    }
+
+    /// D42: a sales order is numbered and never posts; convert_to_invoice
+    /// makes the invoice from it, part then the rest, and the order closes.
+    #[test]
+    fn a_sales_order_converts_to_invoices_and_closes() {
+        let ledger = seed_ledger();
+        let mut server = new_server(&ledger, COMPANY.to_string());
+        seed_master_data(&mut server);
+
+        let response = call_tool(
+            &mut server,
+            4,
+            "create_document",
+            json!({ "actor": "pipeline", "document": {
+                "kind": "SalesOrder", "txn_date": "2026-09-01",
+                "contact": { "kind": "Customer", "id": "c-pool" },
+                "memo": "PO 77",
+                "lines": [
+                    { "kind": "Item", "item_id": "mat", "qty": "4", "amount": "100.00",
+                      "is_taxable": true, "description": "Swim mat" },
+                    { "kind": "Description", "amount": "0.00", "description": "Ship blind" }
+                ]
+            }}),
+        );
+        assert_ne!(response["result"]["isError"], json!(true), "{response}");
+        let created = &response["result"]["structuredContent"];
+        assert_eq!(created["number"], json!("1001"));
+        assert_eq!(created["entry_id"], Value::Null);
+        assert_eq!(created["tax"], json!("6.62"));
+        let so_id = created["document_id"].as_str().unwrap().to_string();
+
+        let open = call_tool(&mut server, 5, "open_sales_orders", json!({}));
+        let rows = &open["result"]["structuredContent"];
+        assert_eq!(rows.as_array().unwrap().len(), 1, "{open}");
+        assert_eq!(rows[0]["open"], json!("100.00"));
+        assert_eq!(rows[0]["contact_name"], json!("Pool Co"));
+
+        // A part: one of the four mats.
+        let response = call_tool(
+            &mut server,
+            6,
+            "convert_to_invoice",
+            json!({ "actor": "dan", "sales_order_id": so_id, "txn_date": "2026-09-10",
+                    "lines": [{ "line_no": 1, "qty": "1" }] }),
+        );
+        assert_ne!(response["result"]["isError"], json!(true), "{response}");
+        let first = &response["result"]["structuredContent"];
+        assert_eq!(first["total"], json!("26.66"));
+        assert_eq!(first["sales_order_open"], json!("75.00"));
+        assert_eq!(first["sales_order_closed"], json!(false));
+        assert!(first["entry_id"].is_string());
+        let first_id = first["document_id"].as_str().unwrap().to_string();
+        let invoice = call_tool(
+            &mut server,
+            7,
+            "get_document",
+            json!({ "document_id": first_id }),
+        );
+        let invoice = &invoice["result"]["structuredContent"];
+        assert_eq!(invoice["memo"], json!("PO 77"));
+        assert_eq!(
+            invoice["applications"][0]["target_kind"],
+            json!("sales_order")
+        );
+        assert_eq!(invoice["applications"][0]["amount"], json!("25.00"));
+
+        // With part invoiced, "everything" is refused rather than doubled.
+        let response = call_tool(
+            &mut server,
+            8,
+            "convert_to_invoice",
+            json!({ "actor": "dan", "sales_order_id": so_id, "txn_date": "2026-09-12" }),
+        );
+        assert_eq!(response["result"]["isError"], json!(true), "{response}");
+        // More than is left is refused too.
+        let response = call_tool(
+            &mut server,
+            9,
+            "convert_to_invoice",
+            json!({ "actor": "dan", "sales_order_id": so_id, "txn_date": "2026-09-12",
+                    "lines": [{ "line_no": 1 }] }),
+        );
+        assert_eq!(response["result"]["isError"], json!(true), "{response}");
+
+        let response = call_tool(
+            &mut server,
+            10,
+            "convert_to_invoice",
+            json!({ "actor": "dan", "sales_order_id": so_id, "txn_date": "2026-09-12",
+                    "lines": [{ "line_no": 1, "qty": 3 }, { "line_no": 2 }] }),
+        );
+        assert_ne!(response["result"]["isError"], json!(true), "{response}");
+        let second = &response["result"]["structuredContent"];
+        assert_eq!(second["number"], json!("1002"));
+        assert_eq!(second["sales_order_closed"], json!(true));
+
+        let open = call_tool(&mut server, 11, "open_sales_orders", json!({}));
+        assert_eq!(open["result"]["structuredContent"], json!([]));
+        let all = call_tool(&mut server, 12, "open_sales_orders", json!({ "all": true }));
+        let row = &all["result"]["structuredContent"][0];
+        assert_eq!(row["invoiced"], json!("100.00"));
+        assert_eq!(row["invoice_ids"].as_array().unwrap().len(), 2);
+
+        // The link moves no money: AR is the two invoices, nothing more
+        // (26.66 + 79.97; each invoice rounds its own tax).
+        let aging = call_tool(
+            &mut server,
+            13,
+            "aging",
+            json!({ "book": "receivable", "as_of": "2026-09-30" }),
+        );
+        assert_eq!(
+            aging["result"]["structuredContent"]["totals"]["total"],
+            json!("106.63")
+        );
+        let response = call_tool(
+            &mut server,
+            14,
+            "convert_to_invoice",
+            json!({ "actor": "dan", "sales_order_id": so_id, "txn_date": "2026-09-12",
+                    "lines": [{ "line_no": 1, "qty": 1 }] }),
+        );
+        assert_eq!(response["result"]["isError"], json!(true), "{response}");
+        let text = response["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("nothing left to invoice"), "{text}");
+
+        // An invoice made from an order stays editable after the order is voided.
+        let voided = call_tool(
+            &mut server,
+            15,
+            "void_document",
+            json!({ "actor": "dan", "document_id": so_id, "reason": "test" }),
+        );
+        assert_ne!(voided["result"]["isError"], json!(true), "{voided}");
+        let edited = call_tool(
+            &mut server,
+            16,
+            "update_document",
+            json!({ "actor": "dan", "document": {
+                "document_id": first_id, "kind": "Invoice", "txn_date": "2026-09-10",
+                "contact": { "kind": "Customer", "id": "c-pool" }, "memo": "edited",
+                "lines": [{ "kind": "Item", "item_id": "mat", "qty": "1", "amount": "25.00",
+                            "is_taxable": true }]
+            }}),
+        );
+        assert_ne!(edited["result"]["isError"], json!(true), "{edited}");
     }
 
     #[test]

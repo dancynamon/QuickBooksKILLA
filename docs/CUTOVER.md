@@ -32,9 +32,10 @@ live replica, and what each check means when it fails. The code is
    their asset account). Categories are skipped; group items come across as
    non-inventory; a SKU QBO lets two items share comes across on the first
    one only.
-2. **Numbering**: each numbered type (estimate, invoice, sales receipt,
-   credit memo, refund receipt, purchase order) continues past QBO's
-   highest numeric `DocNumber` in the replica, paid documents included.
+2. **Numbering**: each numbered type (estimate, sales order, invoice, sales
+   receipt, credit memo, refund receipt, purchase order) continues past
+   QBO's highest numeric `DocNumber` in the replica, paid documents
+   included (sales orders: the highest SO number in the sales-order feed).
 3. **One opening entry**, dated the as-of date, from QBO's trial balance:
    one line per account, balanced by construction, plus one reclass: customer
    payments still unapplied on the date move from 1200 to 2300, where the
@@ -50,12 +51,53 @@ live replica, and what each check means when it fails. The code is
    estimates and open purchase orders. "Open on the date" is worked out from the documents, not from
    QBO's `Balance` field, so an invoice paid on 5 January is still open as of
    31 December.
+5. **Open sales orders** (D42), as `SalesOrder` documents, never posted,
+   saved like the estimates: only the lines, and the quantities, still to be
+   invoiced on the date, with QBO's SO number, customer, dates, and the
+   customer's PO on the memo (`PO …`); `source_ref` is QBO's commerce id. An
+   order invoiced after the as-of date counts as open on it (the line's
+   invoices are looked up in the replica by date). They come from the
+   replica's **sales-order feed**, not from CDC: QBO sales orders are not a
+   v3 entity, so the daemon never sees them (see "Sales orders: the feed"
+   below). In the ledger, `convert_to_invoice` turns one into its invoice
+   and closes it.
 
-**Not brought across**: QBO sales orders. They are not mirrored in the
-replica (no SalesOrder entity; they live in QBO's Advanced Commerce API), so
-open sales orders have to be re-entered in the ledger or carried as
-estimates. Paid documents and all other history stay in the replica and QBO
-(D28).
+Paid documents and all other history stay in the replica and QBO (D28).
+
+## Sales orders: the feed
+
+The replica holds sales orders only once a `qbo-sales-orders/1` feed has
+been applied to it (format: `apps/qbo-local/src/sales_orders.rs`, D42). Apply
+one before every rehearsal and before the real run, after the last sales
+order of the year is entered and invoiced:
+
+```bash
+qbo-local sync-sales-orders --db .local/replica.db --realm REALM --feed .local/cutover/sales-orders.json
+```
+
+```bash
+qbo-local sales-orders --db .local/replica.db --realm REALM
+```
+
+- `--feed` is a file or an `http(s)` URL. The feed must be complete (every
+  sales order the realm has, `"complete": true`); the import's check fails
+  on a partial one, and on none.
+- The first `sync-sales-orders` against a replica migrates it to schema 3
+  (three new tables; nothing existing changes). A daemon binary older than
+  this change refuses a schema-3 replica when it next starts, so rebuild and
+  restart the daemon with this change before, or together with, the first
+  sync. While the daemon runs, the sync is one short write transaction
+  alongside its own, which SQLite's WAL serialises.
+- Take the `replica-copy.db` backup below **after** the sync, so the copy
+  carries the feed.
+- The feed's producer is not in this repo: it reads each sales order out of
+  the QBO web app's own order store through the qbo-headless browser
+  session (the only credential QBO accepts for sales orders) and writes the
+  commerce fields across one for one. Until it exists, a feed can be
+  written by hand from the Sales Orders list: every order still "Not
+  invoiced" or partly invoiced, plus the newest order whatever its status
+  (the ledger's SO numbering continues past the highest number in the
+  feed), marked `"complete": true`.
 
 ## Rehearsing against the live replica
 
@@ -130,6 +172,7 @@ Every one fails the run.
 | AP open items tie to 2000 | as AR, for AP | as AR |
 | AR aging by customer equals QBO's | each customer's open balance, bucket by bucket (current, 1–30, 31–60, 61–90, over 90), matches QBO's aging report, counting the unapplied payments the ledger holds in 2300 | a document the translation could not read (precision), a due date read differently, a payment dated after the as-of date applied to a document dated before it that QBO ages differently |
 | AP aging by vendor equals QBO's | as AR | as AR |
+| QBO sales orders mirrored | a complete sales-order feed is in the replica, so no open order is lost silently (D42) | no `sync-sales-orders` ran against the replica copy, or the feed was partial |
 | trial balance equals QBO's on every must-tier line | §7's must-tier groups: checking, card, AR+2300, AP+2050, sales tax, total income, total equity | an account mapped onto a must-tier number the QBO CSV does not carry; `needs_mapping` accounts are skipped by design |
 
 The 185 `needs_mapping` accounts never fail the run on their own (tbdiff
@@ -271,8 +314,12 @@ the passing numbers mean):
 
 **What would block a real run on 31 December 2026**, as things stand:
 
-1. **QBO sales orders** are not in the replica; open ones need re-entering or
-   carrying as estimates (Dan).
+1. **QBO sales orders** (D42): the replica, the import and the ledger now
+   carry them (a mirrored feed, open lines as of the date, a `SalesOrder`
+   kind that converts to its invoice), and the run fails without a feed.
+   What is still missing is the feed's **producer** (qbo-headless reading
+   each order through the browser session); until it exists, a hand-written
+   feed of the orders still "Not invoiced" does the job (Dan).
 2. **D35 / the 185 (now 184) accounts** need Joel's mapping table before
    the run's must-tier pass means what it says, and before sign-off (§2).
 3. **QBO's Opening Balance Equity** must be zero at the FY2026 close, or the

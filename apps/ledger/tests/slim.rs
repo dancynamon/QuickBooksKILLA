@@ -110,7 +110,25 @@ fn payment(
 /// The replica described in the module docs. `invoice_1001_paid` adds a
 /// payment on 30 December that settles invoice 1001: the late change Joel's
 /// close might bring.
+/// The replica every run starts from, with an empty, complete sales-order
+/// feed applied (D42: the run fails without one).
 fn build_replica(store: &Store, invoice_1001_paid: bool) {
+    build_replica_without_feed(store, invoice_1001_paid);
+    apply_sales_orders(store, json!([]));
+}
+
+fn apply_sales_orders(store: &Store, orders: Value) {
+    let feed = serde_json::from_value(json!({
+        "feed": qbo_local::sales_orders::FEED_FORMAT, "realmId": realm().as_str(),
+        "capturedAt": "2027-01-02T12:00:00Z", "complete": true, "salesOrders": orders,
+    }))
+    .unwrap();
+    store
+        .apply_sales_order_feed(&realm(), &feed, "test", now())
+        .unwrap();
+}
+
+fn build_replica_without_feed(store: &Store, invoice_1001_paid: bool) {
     store.register_realm(&realm(), "Aquamentor", now()).unwrap();
     for (id, raw) in [
         (
@@ -663,7 +681,10 @@ fn the_slim_import_brings_masters_opening_and_open_items_across_and_every_check_
     let ap = books::aging(&ledger, CO, Book::Payable, as_of()).unwrap();
     assert_eq!(ap.totals.total, usd(60_000));
     assert_eq!(ap.rows[0].contact_name, "Foam Supply Co");
-    assert!(report.warnings.iter().any(|w| w.contains("sales orders")));
+    assert!(report
+        .checks
+        .iter()
+        .any(|c| c.name.contains("sales orders mirrored") && c.passed));
 }
 
 #[test]
@@ -1258,4 +1279,133 @@ fn the_translation_works_out_what_a_bill_payment_left_unapplied() {
     .unwrap();
     assert_eq!(unapplied["qbo:BillPayment:BP2"], 3_000);
     assert_eq!(unapplied["qbo:BillPayment:BP1"], 0);
+}
+
+/// D42: the open sales orders of the as-of date come across as never-posted
+/// SalesOrder documents carrying only what was still to be invoiced then,
+/// and convert to invoices in the ledger.
+#[test]
+fn open_sales_orders_are_carried_as_of_the_date_and_convert_to_invoices() {
+    let ledger = book();
+    let store = replica(false);
+    seed_q1_invoice(&store);
+    apply_sales_orders(
+        &store,
+        json!([
+            // One line still open, one invoiced (by an invoice the replica
+            // does not hold, so taken as before the date).
+            { "id": "1490000501", "orderNumber": "1501", "issuedAt": "2026-12-10T08:00:00Z",
+              "customerId": "31", "customerPONumber": "PO-9", "orderStatus": "OPEN",
+              "paymentStatus": "PARTIALLY_INVOICED", "totalAmount": "225.00",
+              "lines": [
+                { "id": "1", "itemId": "501", "description": "Rescue tube", "quantity": 2,
+                  "rate": "100", "amount": "200.00", "taxable": true },
+                { "id": "2", "itemId": "502", "quantity": 1, "rate": "25", "amount": "25.00",
+                  "quantityConsumedInInvoices": 1, "invoiceIds": ["I9"] }
+              ] },
+            // Invoiced in full, but by I5, dated 12 January 2027: open on the date.
+            { "id": "1490000502", "orderNumber": "1502", "issuedAt": "2026-12-20",
+              "customerId": "32", "orderStatus": "OPEN", "paymentStatus": "INVOICED",
+              "totalAmount": "100.00", "invoiceIds": ["I5"],
+              "lines": [{ "itemId": "502", "quantity": 4, "rate": "25", "amount": "100",
+                          "quantityConsumedInInvoices": 4, "invoiceIds": ["I5"] }] },
+            // Invoiced before the date: closed.
+            { "id": "1490000503", "orderNumber": "1503", "issuedAt": "2026-11-01",
+              "customerId": "31", "orderStatus": "OPEN", "paymentStatus": "PAID",
+              "totalAmount": "50.00",
+              "lines": [{ "itemId": "502", "quantity": 2, "rate": "25", "amount": "50",
+                          "quantityConsumedInInvoices": 2, "invoiceIds": ["I9"] }] },
+            // Entered after the date.
+            { "id": "1490000504", "orderNumber": "1504", "issuedAt": "2027-01-05",
+              "customerId": "31", "orderStatus": "OPEN", "paymentStatus": "NOT_INVOICED",
+              "totalAmount": "25.00",
+              "lines": [{ "itemId": "502", "quantity": 1, "rate": "25", "amount": "25" }] }
+        ]),
+    );
+
+    let report = run(&ledger, &store, &options(false, true));
+    assert!(report.passed(), "{}", report.render_text(CO));
+    assert_eq!(report.open_counts.get("sales_order"), Some(&2));
+    assert!(report.next_numbers.contains(&(DocKind::SalesOrder, 1505)));
+
+    let open = ledger::sales_orders::sales_orders(&ledger, CO, None, true).unwrap();
+    assert_eq!(open.len(), 2);
+    let first = &open[0];
+    assert_eq!(first.document_id, "qbo:SalesOrder:1490000501");
+    assert_eq!(first.number.as_deref(), Some("1501"));
+    assert_eq!(first.open, usd(20_000));
+    assert_eq!(first.memo.as_deref(), Some("PO PO-9"));
+    assert_eq!(first.source_ref.as_deref(), Some("1490000501"));
+    assert_eq!(open[1].open, usd(10_000));
+    let doc = books::latest_document(&ledger, CO, &first.document_id).unwrap();
+    assert_eq!(doc.lines.len(), 1);
+    assert_eq!(doc.lines[0].item_id.as_deref(), Some("501"));
+    assert!(doc.lines[0].is_taxable);
+    // Never posted: nothing on the trial balance moved for it.
+    assert!(ledger
+        .live_entries_for_document(CO, &first.document_id)
+        .unwrap()
+        .is_empty());
+
+    // In 2027 the carried order becomes an invoice and closes.
+    let invoice = ledger::sales_orders::invoice_from_sales_order(
+        &ledger,
+        CO,
+        &first.document_id,
+        ledger::sales_orders::ConvertRequest {
+            document_id: "inv-from-so".into(),
+            txn_date: ymd(2027, 1, 8),
+            lines: None,
+            number: None,
+            memo: None,
+        },
+    )
+    .unwrap();
+    let (invoice, _) = books::prepare_document(
+        &ledger,
+        CO,
+        invoice,
+        ledger::types::PostingConfig::default(),
+    )
+    .unwrap();
+    // Past I5's 1201, the highest QBO invoice number.
+    assert_eq!(invoice.number.as_deref(), Some("1202"));
+    assert_eq!(invoice.contact.as_ref().map(|c| c.id.as_str()), Some("31"));
+    ledger
+        .save_document(
+            CO,
+            &invoice,
+            ledger::store::CommandMeta {
+                actor_id: "test".into(),
+                kind: "test".into(),
+                hlc: now().to_rfc3339(),
+            },
+            now(),
+        )
+        .unwrap();
+    let open = ledger::sales_orders::sales_orders(&ledger, CO, None, true).unwrap();
+    assert_eq!(open.len(), 1);
+    assert_eq!(open[0].number.as_deref(), Some("1502"));
+
+    // A re-run with the order gone from QBO's open list voids the carried copy.
+    apply_sales_orders(&store, json!([]));
+    let again = run(&ledger, &store, &options(false, true));
+    assert!(again.passed(), "{}", again.render_text(CO));
+    assert_eq!(again.voided_stale, 2);
+}
+
+#[test]
+fn without_a_sales_order_feed_the_run_fails_rather_than_drop_open_orders() {
+    let ledger = book();
+    let store = Store::open_in_memory().unwrap();
+    build_replica_without_feed(&store, false);
+    let report = run(&ledger, &store, &options(false, true));
+    assert!(!report.passed());
+    let failed = failed(&report);
+    assert!(
+        failed
+            .iter()
+            .any(|name| name.contains("sales orders mirrored")),
+        "{failed:?}"
+    );
 }

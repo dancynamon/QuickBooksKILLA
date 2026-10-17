@@ -42,6 +42,10 @@ pub struct ContactRef {
 #[derive(Copy, Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 pub enum DocKind {
     Estimate,
+    /// A customer's order, between the estimate and the invoice (D42).
+    /// Like an estimate it never posts; unlike one it is the order the
+    /// invoice is made from, which closes it.
+    SalesOrder,
     Invoice,
     SalesReceipt,
     CreditMemo,
@@ -64,6 +68,7 @@ pub enum DocKind {
 impl DocKind {
     pub const ALL: &'static [DocKind] = &[
         DocKind::Estimate,
+        DocKind::SalesOrder,
         DocKind::Invoice,
         DocKind::SalesReceipt,
         DocKind::CreditMemo,
@@ -83,14 +88,25 @@ impl DocKind {
         DocKind::Settlement,
     ];
 
-    /// Estimates and purchase orders are contracts, not transactions (§1).
+    /// Estimates, sales orders and purchase orders are contracts, not
+    /// transactions (§1, D42).
     pub const fn posts(self) -> bool {
-        !matches!(self, DocKind::Estimate | DocKind::PurchaseOrder)
+        !self.is_contract()
+    }
+
+    /// A contract: it never posts, and an application that targets one is a
+    /// link saying where a document came from, never money (D42).
+    pub const fn is_contract(self) -> bool {
+        matches!(
+            self,
+            DocKind::Estimate | DocKind::SalesOrder | DocKind::PurchaseOrder
+        )
     }
 
     pub const fn as_str(self) -> &'static str {
         match self {
             DocKind::Estimate => "estimate",
+            DocKind::SalesOrder => "sales_order",
             DocKind::Invoice => "invoice",
             DocKind::SalesReceipt => "sales_receipt",
             DocKind::CreditMemo => "credit_memo",

@@ -17,12 +17,15 @@
 //!   vendor credits open on the date (worked out from the replica's
 //!   documents with [`books::open_items`], so a payment dated after the
 //!   as-of date does not close them), AR/AP lines that journal entries and
-//!   deposits left open, unapplied payments, open estimates and open purchase
-//!   orders. An AR or AP document's balance is already in the opening entry's
+//!   deposits left open, unapplied payments, open estimates, open purchase
+//!   orders and open sales orders (D42: from the replica's sales-order feed,
+//!   only what was still to be invoiced on the date). An AR or AP document's balance is already in the opening entry's
 //!   1200/2000 line, so it is saved under [`books::SLIM_OPEN_ITEM_KIND`] and
 //!   never posted; [`books::open_documents`] reads it like any other, which
 //!   is what makes the aging tie to the control account.
-//! - **Checks**, every one failing the run: the plug and 3950 are zero; AR
+//! - **Checks**, every one failing the run: a complete sales-order feed is
+//!   in the replica (D42; without one, open sales orders would be lost
+//!   silently); the plug and 3950 are zero; AR
 //!   open items equal 1200 and AP open items equal 2000; AR aging by customer
 //!   and AP aging by vendor equal QBO's (its aging report when given, else the
 //!   documents' own `Balance` fields); the trial balance equals QBO's on every
@@ -42,6 +45,7 @@ use thiserror::Error;
 
 use ledger_core::{round_money, Money, MoneyError, RoundingPolicy};
 use qbo_local::domain::{EntityType, RealmId};
+use qbo_local::sales_orders::SalesOrder;
 use qbo_local::store::{MirroredEntity, Store, StoreError};
 
 use crate::books::{self, Book, BooksError, Contact, Item, ItemType, OpenDocument};
@@ -57,7 +61,8 @@ use crate::types::{
     LedgerDocument, LineKind,
 };
 
-/// The oplog kind open estimates and purchase orders are saved under. They
+/// The oplog kind open estimates, sales orders and purchase orders are saved
+/// under. They
 /// never post, so unlike [`books::SLIM_OPEN_ITEM_KIND`] nothing refuses a
 /// later edit of them.
 pub const SLIM_CONTRACT_KIND: &str = "import_slim_contract";
@@ -83,6 +88,8 @@ pub enum SlimError {
     Replica(#[from] StoreError),
     #[error("money: {0}")]
     Money(#[from] MoneyError),
+    #[error("sales order: {0}")]
+    SalesOrder(#[from] qbo_local::sales_orders::SalesOrderError),
 }
 
 /// One row of QBO's `AgedReceivables` or `AgedPayables` summary, the CSV
@@ -302,15 +309,11 @@ pub fn import_slim(
     let terms = read_terms(replica, realm, &mut report.warnings)?;
     import_contacts(ledger, replica, realm, company, &terms, now, &mut report)?;
     import_items(ledger, replica, realm, company, &ctx, now, &mut report)?;
-    report.warnings.push(
-        "QBO sales orders are not mirrored in the replica (no SalesOrder entity), so open sales \
-         orders are not imported; re-enter them in the ledger or carry them as estimates"
-            .to_string(),
-    );
 
     // --- 2. open documents --------------------------------------------------
     let ar_ap = ar_ap_accounts(replica, realm)?;
-    let docs = read_documents(replica, realm, &ctx, &ar_ap, as_of, &mut report.warnings)?;
+    let mut docs = read_documents(replica, realm, &ctx, &ar_ap, as_of, &mut report.warnings)?;
+    let feed = read_sales_orders(replica, realm, &ctx, as_of, &mut docs, &mut report)?;
     let plan = plan_open_documents(&docs, as_of, &mut report)?;
     save_open_documents(ledger, company, &plan, as_of, now, &mut report)?;
 
@@ -363,6 +366,18 @@ pub fn import_slim(
     }
 
     // --- 4. numbering -------------------------------------------------------
+    let highest_so = replica
+        .list_sales_orders(realm, false)?
+        .iter()
+        .filter_map(|so| numeric(so.doc_number.as_deref()?))
+        .max();
+    let next = books::ensure_next_number(
+        ledger,
+        company,
+        DocKind::SalesOrder,
+        highest_so.map_or(books::FIRST_NUMBER, |n| n + 1),
+    )?;
+    report.next_numbers.push((DocKind::SalesOrder, next));
     for (kind, entity) in [
         (DocKind::Estimate, EntityType::Estimate),
         (DocKind::Invoice, EntityType::Invoice),
@@ -382,6 +397,7 @@ pub fn import_slim(
     }
 
     // --- 5. checks ----------------------------------------------------------
+    report.checks.push(feed);
     run_checks(ledger, company, options, &docs, &plan, qbo_net, &mut report)?;
     Ok(report)
 }
@@ -655,7 +671,8 @@ struct Documents {
     /// Bills, vendor credits, bill payments, and the AP items of journal
     /// entries and deposits.
     payable: Vec<LedgerDocument>,
-    /// Open estimates and purchase orders dated on or before the as-of date.
+    /// Open estimates, purchase orders and sales orders dated on or before
+    /// the as-of date.
     contracts: Vec<LedgerDocument>,
     /// `document_id` to QBO's own open balance for the balance-field check:
     /// signed like an open item, by contact and due date.
@@ -1309,9 +1326,199 @@ fn highest_doc_number(
     Ok(entities(replica, realm, entity_type)?
         .iter()
         .filter_map(|entity| text(&entity.raw_json, "DocNumber"))
-        .filter(|n| !n.is_empty() && n.len() < 18 && n.bytes().all(|b| b.is_ascii_digit()))
-        .filter_map(|n| n.parse::<i64>().ok())
+        .filter_map(|n| numeric(&n))
         .max())
+}
+
+fn numeric(n: &str) -> Option<i64> {
+    if n.is_empty() || n.len() >= 18 || !n.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    n.parse().ok()
+}
+
+// ---------------------------------------------------------------------------
+// Sales orders (D42)
+// ---------------------------------------------------------------------------
+
+/// QBO's sales orders open on the as-of date, from the replica's
+/// sales-order feed, onto `docs.contracts` as [`DocKind::SalesOrder`]
+/// documents carrying only what was still to be invoiced then. Returns the
+/// feed check: the run fails without a complete feed, since an open sales
+/// order would otherwise be lost without a word.
+fn read_sales_orders(
+    replica: &Store,
+    realm: &RealmId,
+    ctx: &TranslateContext,
+    as_of: NaiveDate,
+    docs: &mut Documents,
+    report: &mut SlimReport,
+) -> Result<Check, SlimError> {
+    let name = "QBO sales orders mirrored (a complete sales-order feed is in the replica)";
+    let Some(snapshot) = replica.sales_order_snapshot(realm)? else {
+        return Ok(Check {
+            name: name.into(),
+            passed: false,
+            details: vec![
+                "no sales-order feed has been applied to the replica, so no open sales order \
+                 can be carried; run `qbo-local sync-sales-orders` (docs/CUTOVER.md) and re-run"
+                    .into(),
+            ],
+        });
+    };
+    let mut details = Vec::new();
+    if !snapshot.complete {
+        details.push(format!(
+            "the feed captured {} is partial; an order it lacks would be lost",
+            snapshot.captured_at.to_rfc3339()
+        ));
+    }
+    if snapshot.captured_at.date_naive() <= as_of {
+        report.warnings.push(format!(
+            "the sales-order feed was captured {}, on or before the as-of date; an order \
+             entered or invoiced after that is not reflected — sync again after {as_of}",
+            snapshot.captured_at.to_rfc3339()
+        ));
+    }
+
+    // Invoice dates, so an order invoiced after the as-of date counts as
+    // open on it.
+    let invoice_dates: HashMap<String, NaiveDate> = docs
+        .receivable
+        .iter()
+        .filter(|doc| doc.kind == DocKind::Invoice)
+        .filter_map(|doc| {
+            doc.document_id
+                .strip_prefix("qbo:Invoice:")
+                .map(|id| (id.to_string(), doc.txn_date))
+        })
+        .collect();
+
+    for so in replica.list_sales_orders(realm, false)? {
+        if let Some(doc) = sales_order_document(&so, ctx, as_of, &invoice_dates, report)? {
+            docs.contracts.push(doc);
+        }
+    }
+    Ok(Check {
+        name: name.into(),
+        passed: details.is_empty(),
+        details,
+    })
+}
+
+/// One mirrored sales order as the [`DocKind::SalesOrder`] document the
+/// ledger carries, or `None` when nothing was open on it on `as_of`.
+fn sales_order_document(
+    so: &SalesOrder,
+    ctx: &TranslateContext,
+    as_of: NaiveDate,
+    invoice_dates: &HashMap<String, NaiveDate>,
+    report: &mut SlimReport,
+) -> Result<Option<LedgerDocument>, SlimError> {
+    let open = so.open_lines_as_of(as_of, invoice_dates)?;
+    if open.is_empty() {
+        return Ok(None);
+    }
+    let label = format!(
+        "sales order {} ({})",
+        so.doc_number.as_deref().unwrap_or("(no number)"),
+        so.qbo_id
+    );
+    let Some(customer) = &so.customer_id else {
+        report
+            .warnings
+            .push(format!("{label}: no customer id in the feed; not carried"));
+        return Ok(None);
+    };
+    let mut lines = Vec::with_capacity(open.len());
+    for (line, qty, amount) in open {
+        let kind = match line.item_id.as_deref() {
+            None => {
+                report.warnings.push(format!(
+                    "{label} line {}: {} open with no item; carried as a description, \
+                     re-enter it when invoicing",
+                    line.line_no,
+                    format_money(amount)
+                ));
+                LineKind::Description
+            }
+            Some(id) => match ctx.items.get(id) {
+                None => {
+                    report.warnings.push(format!(
+                        "{label} line {}: item {id} is not in the replica; carried as a \
+                         description",
+                        line.line_no
+                    ));
+                    LineKind::Description
+                }
+                Some(item) => {
+                    let name = item.item.name.to_lowercase();
+                    let sku = item.item.sku.as_deref().unwrap_or_default().to_lowercase();
+                    if name.contains("shipping") || sku.contains("shipping") {
+                        LineKind::Shipping
+                    } else {
+                        LineKind::Item
+                    }
+                }
+            },
+        };
+        let is_description = kind == LineKind::Description;
+        lines.push(DocLine {
+            line_no: lines.len() as i64 + 1,
+            kind,
+            amount: if is_description { Money::ZERO } else { amount },
+            class: None,
+            item_id: if is_description {
+                None
+            } else {
+                line.item_id.clone()
+            },
+            account: None,
+            is_taxable: line.is_taxable && !is_description,
+            qty,
+            unit_cost: None,
+            description: if is_description {
+                Some(format!(
+                    "{} (open {})",
+                    line.description.clone().unwrap_or_default(),
+                    format_money(amount)
+                ))
+            } else {
+                line.description.clone()
+            },
+            posting: None,
+            entity: None,
+        });
+    }
+    let memo = [
+        so.po_number.as_ref().map(|po| format!("PO {po}")),
+        so.memo.clone(),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>()
+    .join(" / ");
+    Ok(Some(LedgerDocument {
+        document_id: qbo_document_id(DocKind::SalesOrder, &so.qbo_id),
+        kind: DocKind::SalesOrder,
+        number: so.doc_number.clone(),
+        txn_date: so.txn_date,
+        due_date: so.due_date,
+        contact: Some(ContactRef {
+            kind: ContactKind::Customer,
+            id: customer.clone(),
+        }),
+        header_class: None,
+        lines,
+        tax: None,
+        deposit_to: None,
+        pay_from: None,
+        applications: Vec::new(),
+        unapplied: Money::ZERO,
+        is_voided: false,
+        source_ref: Some(so.qbo_id.clone()),
+        memo: (!memo.is_empty()).then_some(memo),
+    }))
 }
 
 // ---------------------------------------------------------------------------
