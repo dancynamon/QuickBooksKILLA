@@ -808,9 +808,12 @@ fn read_documents(
         }
     }
 
-    // AR and AP lines that journal entries and deposits carry for a named
-    // customer or vendor are open items in QBO too.
-    for entity_type in [EntityType::JournalEntry, EntityType::Deposit] {
+    // AR and AP lines that journal entries, deposits and purchases carry for
+    // a named customer or vendor are open items in QBO too. A purchase does it
+    // when an expense line is coded to AP with the vendor as payee: QBO ages
+    // that as a vendor credit (practice run, 17 Oct 2026: four vendors,
+    // 1,827.32, missing from the 6/30 aging).
+    for entity_type in [EntityType::JournalEntry, EntityType::Deposit, EntityType::Purchase] {
         for entity in entities(replica, realm, entity_type)? {
             let items = control_lines(&entity, ar_ap, warnings);
             let Some(date) = text(&entity.raw_json, "TxnDate")
@@ -833,10 +836,10 @@ fn read_documents(
                     continue;
                 }
                 let base = qbo_document_id(
-                    if entity_type == EntityType::Deposit {
-                        DocKind::Deposit
-                    } else {
-                        DocKind::JournalEntry
+                    match entity_type {
+                        EntityType::Deposit => DocKind::Deposit,
+                        EntityType::Purchase => DocKind::Purchase,
+                        _ => DocKind::JournalEntry,
                     },
                     &entity.qbo_id,
                 );
@@ -855,10 +858,10 @@ fn read_documents(
                     (Book::Payable, false) => DocKind::Bill,
                 };
                 let amount = if positive { net } else { net.checked_neg()? };
-                let what = if entity_type == EntityType::Deposit {
-                    "Deposit"
-                } else {
-                    "Journal entry"
+                let what = match entity_type {
+                    EntityType::Deposit => "Deposit",
+                    EntityType::Purchase => "Purchase",
+                    _ => "Journal entry",
                 };
                 let number = text(&entity.raw_json, "DocNumber");
                 let doc = LedgerDocument {
@@ -937,8 +940,9 @@ fn read_documents(
     Ok(docs)
 }
 
-/// Per (book, contact) the signed net a journal entry or deposit puts on AR
-/// or AP: AR debit-positive, AP debit-positive as well (a vendor credit).
+/// Per (book, contact) the signed net a journal entry, deposit or purchase
+/// puts on AR or AP: AR debit-positive, AP debit-positive as well (a vendor
+/// credit).
 fn control_lines(
     entity: &MirroredEntity,
     ar_ap: &ArApAccounts,
@@ -949,9 +953,13 @@ fn control_lines(
         return nets;
     };
     let is_deposit = entity.entity_type == EntityType::Deposit;
+    let is_purchase = entity.entity_type == EntityType::Purchase;
+    let is_credit = entity.raw_json.get("Credit").and_then(Value::as_bool) == Some(true);
     for line in lines {
         let detail = if is_deposit {
             line.get("DepositLineDetail")
+        } else if is_purchase {
+            line.get("AccountBasedExpenseLineDetail")
         } else {
             line.get("JournalEntryLineDetail")
         };
@@ -969,9 +977,13 @@ fn control_lines(
         let Some(amount) = money(line.get("Amount")) else {
             continue;
         };
-        let signed = if is_deposit {
-            // A deposit line is always a credit to the account it names.
+        let signed = if is_deposit || (is_purchase && is_credit) {
+            // A deposit line is always a credit to the account it names, and
+            // so is a card credit's line.
             amount.checked_neg().unwrap_or(amount)
+        } else if is_purchase {
+            // A purchase's line is a debit to the account it names.
+            amount
         } else {
             match text(detail, "PostingType").as_deref() {
                 Some("Debit") => amount,
@@ -985,15 +997,25 @@ fn control_lines(
                 entity_node.and_then(|e| text(e, "type")),
                 entity_node.and_then(|e| text(e, "value")),
             )
+        } else if is_purchase {
+            // The payee is the purchase's own, on the header.
+            let payee = entity.raw_json.get("EntityRef");
+            (
+                payee.and_then(|e| text(e, "type")),
+                payee.and_then(|e| text(e, "value")),
+            )
         } else {
             (
                 entity_node.and_then(|e| text(e, "Type")),
                 entity_node.and_then(|e| reference(e, "EntityRef")),
             )
         };
-        let contact_kind = match contact_type.as_deref() {
-            Some("Customer") => ContactKind::Customer,
-            Some("Vendor") => ContactKind::Vendor,
+        // A deposit line says "CUSTOMER"/"VENDOR"; everything else says
+        // "Customer"/"Vendor" (practice run, 17 Oct 2026: every deposit AR
+        // line was in nobody's aging, 1,160.27 for one customer at 6/30).
+        let contact_kind = match contact_type.map(|t| t.to_ascii_lowercase()).as_deref() {
+            Some("customer") => ContactKind::Customer,
+            Some("vendor") => ContactKind::Vendor,
             _ => {
                 warnings.push(format!(
                     "{} {}: an {} line names no customer or vendor; it is in the opening entry \
@@ -1086,6 +1108,8 @@ fn plan_open_documents(
             "journal entry line"
         } else if original.document_id.starts_with("qbo:Deposit:") {
             "deposit line"
+        } else if original.document_id.starts_with("qbo:Purchase:") {
+            "purchase line"
         } else {
             original.kind.as_str()
         };
@@ -1512,6 +1536,7 @@ fn buckets_from_balances(
     for item in open.iter().filter(|item| {
         item.document_id.starts_with("qbo:JournalEntry:")
             || item.document_id.starts_with("qbo:Deposit:")
+            || item.document_id.starts_with("qbo:Purchase:")
             || item.kind == DocKind::BillPayment
     }) {
         add_bucket(

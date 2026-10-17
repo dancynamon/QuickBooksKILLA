@@ -421,7 +421,20 @@ pub fn translate(
         ctx,
         &mut warnings,
     );
-    let unapplied = json_money(raw, "UnappliedAmt", &qbo_id)?.unwrap_or(Money::ZERO);
+    let mut unapplied = json_money(raw, "UnappliedAmt", &qbo_id)?.unwrap_or(Money::ZERO);
+    // A Payment states its unapplied amount; a BillPayment has no such field,
+    // so whatever its lines do not apply is the remainder, still owed back
+    // by the vendor (practice run, 17 Oct 2026: a bill payment with no lines
+    // at all posted nothing and was in nobody's aging).
+    if doc_kind == DocKind::BillPayment && raw.get("UnappliedAmt").is_none() {
+        if let Some(total) = json_money(raw, "TotalAmt", &qbo_id)? {
+            let applied = Money::checked_sum(applications.iter().map(|a| a.amount))?;
+            let remainder = total.checked_sub(applied)?;
+            if !remainder.is_negative() {
+                unapplied = remainder;
+            }
+        }
+    }
 
     // D37: the three QBO entities with no line form of their own.
     match entity.entity_type {
@@ -718,9 +731,14 @@ fn resolve_line_class(
 
 fn deposit_line_entity(detail: &Value) -> Option<ContactRef> {
     let id = json_reference(detail, "Entity")?;
-    let kind = match json_nested_text(detail, "Entity", "type")?.as_str() {
-        "Customer" => ContactKind::Customer,
-        "Vendor" => ContactKind::Vendor,
+    // QBO writes a deposit line's entity type in capitals ("CUSTOMER",
+    // "VENDOR") where every other entity reference says "Customer".
+    let kind = match json_nested_text(detail, "Entity", "type")?
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "customer" => ContactKind::Customer,
+        "vendor" => ContactKind::Vendor,
         _ => return None,
     };
     Some(ContactRef { kind, id })
@@ -956,7 +974,9 @@ fn application_is_credit(
         // A deposit that credited AR for this customer, now applied to the
         // customer's invoices inside a $0 payment.
         (DocKind::Payment, DocKind::CreditMemo | DocKind::Deposit) => true,
-        (DocKind::BillPayment, DocKind::VendorCredit) => true,
+        // A purchase coded to AP for this vendor is a vendor credit in QBO,
+        // offset against a bill or journal entry inside a $0 bill payment.
+        (DocKind::BillPayment, DocKind::VendorCredit | DocKind::Purchase) => true,
         (DocKind::Payment, DocKind::JournalEntry) => journal_side() == Some(Side::Credit),
         (DocKind::BillPayment, DocKind::JournalEntry) => journal_side() == Some(Side::Debit),
         _ => false,

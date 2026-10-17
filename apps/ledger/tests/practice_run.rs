@@ -244,3 +244,56 @@ fn a_bill_line_for_an_item_named_shipping_is_a_cost_not_a_shipping_charge() {
     assert_eq!(balance_of(&tb, "AP1"), Money::from_minor(-13_366));
     assert_eq!(balance_of(&tb, "EXP2"), Money::from_minor(13_366));
 }
+
+#[test]
+fn a_bill_payment_with_nothing_applied_posts_its_total_as_an_ap_debit() {
+    let store = Store::open_in_memory().unwrap();
+    store.register_realm(&realm(), "Aquamentor", now()).unwrap();
+    seed(
+        &store,
+        EntityType::Vendor,
+        "78",
+        json!({ "Id": "78", "DisplayName": "Old Vendor", "Active": true }),
+    );
+    seed(
+        &store,
+        EntityType::Account,
+        "BANK1",
+        json!({ "Id": "BANK1", "Name": "Checking", "AccountType": "Bank", "Active": true }),
+    );
+    seed(
+        &store,
+        EntityType::Account,
+        "AP1",
+        json!({ "Id": "AP1", "Name": "Accounts Payable", "AccountType": "Accounts Payable", "Active": true }),
+    );
+    // QBO's own shape: no UnappliedAmt field on a BillPayment, and no lines.
+    seed(
+        &store,
+        EntityType::BillPayment,
+        "801",
+        json!({ "Id": "801", "TxnDate": "2026-07-20", "TotalAmt": 154.40, "PayType": "Check",
+                "VendorRef": { "value": "78" },
+                "CheckPayment": { "BankAccountRef": { "value": "BANK1" } }, "Line": [] }),
+    );
+
+    let ledger = Ledger::open_in_memory().unwrap();
+    ledger
+        .create_company("aquamentor", "Aquamentor", Some(realm().as_str()), now())
+        .unwrap();
+    let report = import_replica(
+        &ledger,
+        &store,
+        &realm(),
+        "aquamentor",
+        &ImportOptions::with_d28_fallback(None, None),
+        now(),
+    )
+    .unwrap();
+    assert!(report.rejected.is_empty(), "{:?}", report.rejected);
+
+    let tb = report::trial_balance(&ledger, "aquamentor", NaiveDate::from_ymd_opt(2026, 7, 31).unwrap())
+        .unwrap();
+    assert_eq!(balance_of(&tb, "BANK1"), Money::from_minor(-15_440));
+    assert_eq!(balance_of(&tb, "AP1"), Money::from_minor(15_440));
+}
