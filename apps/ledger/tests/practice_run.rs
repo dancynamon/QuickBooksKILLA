@@ -107,3 +107,74 @@ fn a_card_credit_debits_the_card_and_credits_the_expense() {
     assert_eq!(balance_of(&tb, "CARD1"), Money::from_minor(-7_000));
     assert_eq!(balance_of(&tb, "EXP1"), Money::from_minor(7_000));
 }
+
+#[test]
+fn a_deposit_line_linked_to_a_payment_sweeps_undeposited_funds() {
+    let store = Store::open_in_memory().unwrap();
+    store.register_realm(&realm(), "Aquamentor", now()).unwrap();
+    seed(
+        &store,
+        EntityType::Customer,
+        "31",
+        json!({ "Id": "31", "DisplayName": "Swim Club", "Active": true }),
+    );
+    seed(
+        &store,
+        EntityType::Account,
+        "BANK1",
+        json!({ "Id": "BANK1", "Name": "Checking", "AccountType": "Bank", "Active": true }),
+    );
+    seed(
+        &store,
+        EntityType::Account,
+        "UDF1",
+        json!({ "Id": "UDF1", "Name": "Undeposited Funds", "AccountType": "Other Current Asset",
+                "AccountSubType": "UndepositedFunds", "Active": true }),
+    );
+    seed(
+        &store,
+        EntityType::Payment,
+        "601",
+        json!({
+            "Id": "601", "TxnDate": "2026-07-20", "TotalAmt": 2500.00, "UnappliedAmt": 2500.00,
+            "CustomerRef": { "value": "31" },
+            "DepositToAccountRef": { "value": "UDF1" },
+            "Line": []
+        }),
+    );
+    // QBO's own shape: the line names the payment it sweeps, and no account.
+    seed(
+        &store,
+        EntityType::Deposit,
+        "602",
+        json!({
+            "Id": "602", "TxnDate": "2026-07-21", "TotalAmt": 2500.00,
+            "DepositToAccountRef": { "value": "BANK1" },
+            "Line": [{
+                "Id": "1", "Amount": 2500.00,
+                "DepositLineDetail": { "PaymentMethodRef": { "value": "52" } },
+                "LinkedTxn": [{ "TxnId": "601", "TxnLineId": "0", "TxnType": "Payment" }]
+            }]
+        }),
+    );
+
+    let ledger = Ledger::open_in_memory().unwrap();
+    ledger
+        .create_company("aquamentor", "Aquamentor", Some(realm().as_str()), now())
+        .unwrap();
+    let report = import_replica(
+        &ledger,
+        &store,
+        &realm(),
+        "aquamentor",
+        &ImportOptions::with_d28_fallback(None, None),
+        now(),
+    )
+    .unwrap();
+    assert!(report.rejected.is_empty(), "{:?}", report.rejected);
+
+    let tb = report::trial_balance(&ledger, "aquamentor", NaiveDate::from_ymd_opt(2026, 7, 31).unwrap())
+        .unwrap();
+    assert_eq!(balance_of(&tb, "UDF1"), Money::ZERO);
+    assert_eq!(balance_of(&tb, "BANK1"), Money::from_minor(250_000));
+}

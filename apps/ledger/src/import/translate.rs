@@ -209,8 +209,21 @@ pub fn translate(
                     .is_some_and(|sku| sku.to_lowercase().contains("shipping"))
         });
 
+        // A deposit line that sweeps a payment or sales receipt out of
+        // undeposited funds names the payment, not an account, and QBO sends
+        // it with no `DetailType` (§1: "Cr 1150 per grouped payment").
+        // Practice run, 17 Oct 2026: 33 such lines, 54,472.68, posted nothing.
+        let sweeps_undeposited = doc_kind == DocKind::Deposit
+            && detail.and_then(|d| json_reference(d, "AccountRef")).is_none()
+            && raw_line
+                .get("LinkedTxn")
+                .and_then(Value::as_array)
+                .is_some_and(|links| !links.is_empty());
+
         let kind = if let Some(kind) = pseudo_item {
             kind
+        } else if sweeps_undeposited {
+            LineKind::Account
         } else if detail_type.as_deref() == Some("ShippingLineDetail") || is_shipping_item {
             LineKind::Shipping
         } else {
@@ -231,6 +244,9 @@ pub fn translate(
             LineKind::Account | LineKind::Journal => {
                 let account_ref = detail.and_then(|d| json_reference(d, "AccountRef"));
                 match account_ref {
+                    None if sweeps_undeposited => {
+                        Some(AccountId(chart::UNDEPOSITED_FUNDS.to_string()))
+                    }
                     Some(id) => match ctx.accounts.by_source_ref(&id) {
                         Some(mapped) => Some(mapped.ledger_number.clone()),
                         None => {
