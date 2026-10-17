@@ -739,6 +739,52 @@ fn report_only_sends_the_params_that_are_given() {
     }
 }
 
+fn captured_report_query(name: ReportName, params: &ReportParams) -> HashMap<String, String> {
+    let captured: Arc<Mutex<Option<HashMap<String, String>>>> = Arc::new(Mutex::new(None));
+    let state = Arc::clone(&captured);
+    let server = support::start(move |request: &FakeRequest| {
+        *state.lock().unwrap() = Some(request.query.clone());
+        FakeResponse::json(200, trial_balance_response(&[]))
+    });
+    let directory = tempfile::tempdir().unwrap();
+    let mut client = fresh_client(&server, directory.path());
+    client.report(&realm(), name, params).unwrap();
+    let query = captured.lock().unwrap().clone().unwrap();
+    query
+}
+
+/// QBO answers a `TrialBalance` with only `end_date` as "this month-to-date"
+/// ending today (practice run, 17 Oct 2026), so a start date always goes
+/// with it.
+#[test]
+fn a_trial_balance_as_of_a_date_sends_that_date_as_start_and_end() {
+    let params = ReportParams {
+        end_date: Some(NaiveDate::from_ymd_opt(2026, 6, 30).unwrap()),
+        accounting_method: Some("Accrual".to_string()),
+        ..ReportParams::default()
+    };
+    let query = captured_report_query(ReportName::TrialBalance, &params);
+    assert_eq!(query.get("start_date").map(String::as_str), Some("2026-06-30"));
+    assert_eq!(query.get("end_date").map(String::as_str), Some("2026-06-30"));
+}
+
+/// An aging report's as-of date is `report_date`; QBO ignores `end_date`
+/// there and ages as of today.
+#[test]
+fn an_aging_report_sends_its_as_of_date_as_report_date() {
+    for name in [ReportName::AgedReceivables, ReportName::AgedPayables] {
+        let params = ReportParams {
+            end_date: Some(NaiveDate::from_ymd_opt(2026, 7, 31).unwrap()),
+            aging_method: Some("Report_Date".to_string()),
+            ..ReportParams::default()
+        };
+        let query = captured_report_query(name, &params);
+        assert_eq!(query.get("report_date").map(String::as_str), Some("2026-07-31"));
+        assert!(!query.contains_key("end_date"), "{query:?}");
+        assert!(!query.contains_key("start_date"), "{query:?}");
+    }
+}
+
 #[test]
 fn a_report_fault_maps_the_same_way_as_every_other_call() {
     let server = support::start(|_: &FakeRequest| FakeResponse::json(500, json!({})));

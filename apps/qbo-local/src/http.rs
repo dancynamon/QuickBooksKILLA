@@ -648,7 +648,19 @@ impl QboClient for HttpQboClient {
 
     /// `GET /v3/company/<realm>/reports/<name>`, spending from the
     /// `Reports` bucket rather than `General` (`LEDGER-DESIGN.md` §6, §7).
-    /// Only the `Some` fields of `params` go on the wire.
+    /// Only the `Some` fields of `params` go on the wire, under the names
+    /// QBO reads, which are not the same for every report:
+    ///
+    /// - An aging report's as-of date is `report_date`. QBO ignores
+    ///   `end_date` there and ages as of today.
+    /// - A `TrialBalance` with `end_date` and no `start_date` is answered
+    ///   as "this month-to-date", ending today, whatever `end_date` says.
+    ///   Any start date makes it honour `end_date`, and the balances do not
+    ///   depend on which (balance sheet cumulative, income and expense
+    ///   fiscal year to date), so the end date is sent as the start too.
+    ///
+    /// Both found on the practice run, 17 Oct 2026: five trial balances and
+    /// eight aging reports for different dates came back byte-identical.
     fn report(
         &mut self,
         realm: &RealmId,
@@ -656,12 +668,18 @@ impl QboClient for HttpQboClient {
         params: &ReportParams,
     ) -> Result<Value, QboError> {
         let path = format!("/v3/company/{}/reports/{}", realm.as_str(), name.as_str());
+        let is_aging = matches!(name, ReportName::AgedReceivables | ReportName::AgedPayables);
+        let start_date = match (name, params.start_date, params.end_date) {
+            (ReportName::TrialBalance, None, Some(end)) => Some(end),
+            (_, start, _) => start,
+        };
         let mut query = vec![self.minorversion_param()];
-        if let Some(start) = params.start_date {
+        if let Some(start) = start_date {
             query.push(("start_date".to_string(), start.to_string()));
         }
         if let Some(end) = params.end_date {
-            query.push(("end_date".to_string(), end.to_string()));
+            let key = if is_aging { "report_date" } else { "end_date" };
+            query.push((key.to_string(), end.to_string()));
         }
         if let Some(method) = &params.accounting_method {
             query.push(("accounting_method".to_string(), method.clone()));

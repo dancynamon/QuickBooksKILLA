@@ -200,7 +200,20 @@ pub fn translate(
             parsed_line.item_id.clone()
         };
         let item = item_id.as_deref().and_then(|id| ctx.items.get(id));
-        let is_shipping_item = item.is_some_and(|context| {
+        // A shipping charge to a customer, recognised by its item's name. Only
+        // on a document that charges a customer: on a bill or purchase an
+        // item called "shipping supplies" is a cost like any other, and a
+        // shipping line there posts nothing (practice run, 17 Oct 2026: one
+        // bill posted 133.66 short of its total).
+        let charges_customer = matches!(
+            doc_kind,
+            DocKind::Estimate
+                | DocKind::Invoice
+                | DocKind::SalesReceipt
+                | DocKind::CreditMemo
+                | DocKind::RefundReceipt
+        );
+        let is_shipping_item = charges_customer && item.is_some_and(|context| {
             context.item.name.to_lowercase().contains("shipping")
                 || context
                     .item
@@ -209,8 +222,21 @@ pub fn translate(
                     .is_some_and(|sku| sku.to_lowercase().contains("shipping"))
         });
 
+        // A deposit line that sweeps a payment or sales receipt out of
+        // undeposited funds names the payment, not an account, and QBO sends
+        // it with no `DetailType` (§1: "Cr 1150 per grouped payment").
+        // Practice run, 17 Oct 2026: 33 such lines, 54,472.68, posted nothing.
+        let sweeps_undeposited = doc_kind == DocKind::Deposit
+            && detail.and_then(|d| json_reference(d, "AccountRef")).is_none()
+            && raw_line
+                .get("LinkedTxn")
+                .and_then(Value::as_array)
+                .is_some_and(|links| !links.is_empty());
+
         let kind = if let Some(kind) = pseudo_item {
             kind
+        } else if sweeps_undeposited {
+            LineKind::Account
         } else if detail_type.as_deref() == Some("ShippingLineDetail") || is_shipping_item {
             LineKind::Shipping
         } else {
@@ -231,6 +257,9 @@ pub fn translate(
             LineKind::Account | LineKind::Journal => {
                 let account_ref = detail.and_then(|d| json_reference(d, "AccountRef"));
                 match account_ref {
+                    None if sweeps_undeposited => {
+                        Some(AccountId(chart::UNDEPOSITED_FUNDS.to_string()))
+                    }
                     Some(id) => match ctx.accounts.by_source_ref(&id) {
                         Some(mapped) => Some(mapped.ledger_number.clone()),
                         None => {
@@ -415,6 +444,16 @@ pub fn translate(
                 entity: None,
             }];
             class_sources.clear();
+        }
+    }
+    // A card credit (a refund onto the card) is a `Purchase` with `Credit:
+    // true` and positive line amounts. It runs the other way from a charge:
+    // the card is debited and each line's account credited, so its lines go
+    // in negative and `post` turns them over (practice run, 17 Oct 2026: one
+    // 23,590.98 credit posted as a charge).
+    if doc_kind == DocKind::Purchase && raw.get("Credit").and_then(Value::as_bool) == Some(true) {
+        for line in &mut doc_lines {
+            line.amount = line.amount.checked_neg()?;
         }
     }
     let is_voided = entity.is_deleted || json_text(raw, "TxnStatus").as_deref() == Some("Voided");

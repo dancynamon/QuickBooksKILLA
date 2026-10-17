@@ -794,3 +794,177 @@ income, and reversing that would need a second plug per document.
 *Rejected: unapplied payments as negative AR items.* It would make the
 imported book disagree with the ledger's own rule for every payment entered
 after cutover.
+
+## D32 — Practice parallel run, Q3 2026: what it found
+
+17 Oct 2026, Claude Code session on Dan's Mac, read-only against the live
+replica (ROADMAP §E). D30 and D31 are taken on other branches; this entry and
+D33–D36 follow them. Write-up, commands and the per-month tables:
+`docs/PRACTICE-RUN.md`.
+
+**Shape.** D29's Q1 2027 run moved back two quarters: one opening-balance
+entry from QBO's `TrialBalance` at 6/30/26, then 1,925 documents dated
+7/1–10/16/26 replayed under the full posting gate (D28's fallback class only
+before 7/1), into a scratch ledger. Trial balance diffed at 7/31, 8/31, 9/30
+and 10/16; AR and AP aging against QBO's. A diagnostic second run let the
+fallback class cover the window too, to see what is left once class is out of
+the way.
+
+**Four bugs, fixed, each with a test** (commits on
+`claude/practice-parallel-run-0bdb38`):
+
+1. *qbo-local reports ignored their as-of date.* QBO answers a
+   `TrialBalance` with `end_date` and no `start_date` as "this
+   month-to-date" ending today, and ages `AgedReceivables`/`AgedPayables`
+   by `report_date`, not `end_date`. Every as-of report was today's.
+   D27's baseline was unaffected only because it was taken for the day it
+   ran; `ledger nightly` (as of yesterday), `ledger opening` and
+   `qbo-local snapshots` for the boundary walk were all wrong.
+2. *A card credit posted as a charge* (`Purchase` with `Credit: true`).
+   One in the window, 23,590.98; 47,181.96 on one card in July.
+3. *A deposit that sweeps a payment out of undeposited funds posted
+   nothing.* QBO sends that line with a `LinkedTxn`, no `AccountRef` and no
+   `DetailType`. 33 lines, 54,472.68: undeposited funds never drained and
+   checking was short by the same amount.
+4. *An item named "shipping…" on a bill vanished.* The translator's
+   shipping-item name rule ran on every document type, and a shipping line on
+   a bill posts nothing. One bill, 133.66, posted short of its total.
+
+**After the fixes, with class out of the way**, AR (1200+2300), AP
+(2000+2050) and undeposited funds tie to QBO to the cent on all four dates.
+What is left:
+
+| Must-tier line, 10/16 | Delta | Cause |
+|---|---|---|
+| Checking (1100) | 133,702.37 | Not mirrored: 135,758.35 of `CreditCardPayment` and a net 2,055.98 of `Transfer` |
+| Credit cards (in skip rows) | −135,758.35 | The same card payments, the other side |
+| Total equity | −1,000.00 | One `Transfer` to shareholder distributions, not mirrored |
+| Total income | −10,322.98 | D34: items whose QBO "income" account is an expense or a liability |
+| Sales tax payable (2200) | −405.32 | D35: QBO keeps NJ tax in its agency account; the mapping lands it elsewhere |
+
+**Not policy, still to build:** qbo-local does not mirror `Transfer`,
+`CreditCardPayment` or `InventoryAdjustment` (one 100.00 shrinkage in the
+window), so the bank and card lines can never tie until it does. And the
+ledger's own AR/AP aging misses every payment application: applications
+target the bare QBO id while documents are keyed `qbo:<Type>:<id>` (0 of 349
+window applications match; the slim-import branch already changes the
+target to `qbo:<Type>:<id>`). Aging is to be re-checked after that merges.
+
+Under the full gate, **1,323 of 1,925 documents (881,948.94) were
+rejected, every one for no class**; D33. Code comments in
+`import/translate.rs` cite "D29" and "D30" for decisions recorded under
+other numbers; they predate this run and are left for whoever next edits it.
+
+## D33 — Class in Q1 2027: QBO lines carry none
+
+17 Oct 2026. **Question for Dan and Joel.** D29 holds Q1 2027 to the full
+posting gate, so every income, COGS and class-consuming expense line needs a
+class. On the practice window not one line has one: QBO's only classes are
+"Store 1", "Store 2" and "Store 3", unused, and none of the 3,473 items has a
+default class. Rejected: every invoice (188, 250,338.92), every sales receipt
+(188, 42,052.47), 650 of 692 purchases (258,653.68), 181 of 192 bills
+(184,316.53), 105 of 133 deposits (141,919.61, the channel payouts credited
+straight to channel sales accounts), all 6 journal entries, both vendor
+credits, both refund receipts, the one credit memo. Examples: invoices
+18748 and 18749; purchase 326288; bill 00383608.
+
+Meanwhile payments and bill payments post (they need no class), so the gated
+run's AR goes negative and AP positive (10/16: AR −163,407.66 against
+86,283.51; AP 151,068.76 against −30,867.79). A Q1 2027 night with unclassed
+documents is red on every must-tier line, not only on the rejection count.
+
+Options:
+
+1. **Class in QBO from 1 January 2027.** Create the W15 classes in QBO
+   (`foam`, `sign`, `chair`, `drop`, `cnc`, `uv`), turn on "warn if no class"
+   and set a default class on each item there. Honest, and it is how the books
+   should look after cutover anyway; it changes Dan's daily QBO entry for one
+   quarter, and history before 1/1/27 is unaffected (D28).
+2. **Item default classes in the ledger only** (W16's fallback, which today
+   never fires because QBO items carry none): a one-off item→class map for
+   the items sold in Q1. Expense-account lines (purchases, bills on
+   accounts, deposits) still need a rule.
+3. **Extend D28's fallback class through Q1 2027.** Every Q1 line would
+   carry `unclassified` and class reporting starts at cutover. Simplest; it
+   gives up per-class margin for the one quarter the parallel run covers.
+
+*Leaning:* 1 for items, with 3 as the backstop for account-only lines, but it
+is Dan's daily workflow and Joel's call on whether an unclassified quarter is
+acceptable.
+
+## D34 — Items whose QBO account is not an income account
+
+17 Oct 2026. **Question for Joel.** The posting rules (§1) credit every
+item line on an invoice or sales receipt to 4100 and every shipping line to
+4300, whatever account the QBO item points at. In QBO several items point at
+accounts that are not income, so QBO and the ledger disagree on total income
+(must tier) by **−10,322.98 at 10/16** (−1,835.95, −5,605.68, −7,909.30 at
+the three month ends), and the whole difference is these items:
+
+| QBO item's account | Window | Ledger posts | Example invoice |
+|---|---|---|---|
+| Shipping expense accounts (UPS, FedEx, common carrier) | 8,202.01 | 4100 income | 18748, 18752, 18751 |
+| Amazon sales tax payable (a liability) | 1,708.22 | 4100 income | sales receipt 113-9627800-1294647 |
+| Advertising and promotion | 331.55 | 4100 income | sales receipt 113-0085564-0209871 |
+| Purchasing (a cost account), net of a discount item booked to an expense | 81.20 | 4100 income | 18782, 18761 |
+
+The questions:
+
+1. **Shipping charged to a customer** (W6). QBO nets it against freight
+   expense; the ledger books it as income. W6 already leans income. Does Joel
+   agree, and if so is the parallel-run variance "explained" under W6 rather
+   than a must-tier failure, or should Dan repoint the shipping items in QBO
+   to an income account for Q1?
+2. **Marketplace-collected sales tax on Amazon orders.** The tax Amazon
+   collects and remits shows up as an item line pointed at a liability. The
+   ledger books it as revenue, which is wrong under either reading. Should
+   the ledger post an item line to the item's own account when that account
+   is a liability (and only then), or should Amazon receipts arrive without
+   that line?
+3. **Discount and purchasing items** on invoices: contra income (W9, 4900)
+   or follow the item's account?
+
+## D35 — The chart mapping lands QBO accounts on the wrong seed accounts
+
+17 Oct 2026. **Question for Joel** (part of D28's "185 `needs_mapping`
+accounts resolved"). The automatic mapping puts a QBO account on a seeded §2
+account by number or type, first come first served. On this run that put:
+
+- **2300 customer deposits ← QBO "Loan Payable"** (its QBO account number is
+  2300). AR is tested as 1200+2300, so a loan balance would land in the AR
+  test. Today it holds 146.51 of unapplied customer payments (W8) and the
+  loan is at zero, so it ties by luck.
+- **5000 cost of goods sold ← QBO "Merchant Account Fees"**, so the §7 COGS
+  line compares the ledger's COGS (23,409.43) with QBO's merchant fees
+  (654.23). Same for **4100 sales income ← QBO "EBAY SALES"**.
+- **2200 sales tax payable ← QBO "Sales Tax Payable"** (number 2200, zero
+  balance), while QBO actually keeps NJ tax in "New Jersey Division of
+  Taxation Payable". Sales tax must-tier: −405.32 at 10/16, exactly the tax
+  posted in the window; the two accounts together tie.
+- **QBO "Discounts given" is not joined to 4900** (155.56), and QBO's
+  surcharge income (987.97) and its three product sales accounts collapse into
+  4100. Inside total income, so may tier.
+
+The question: does Joel want the mapping as an explicit table he signs off
+(QBO account → §2 account, one row each, the 185 included), rather than the
+importer's number-and-type guess? The recommendation is yes; the tbdiff
+groups are only as good as this table.
+
+## D36 — Inventory relief: which account, at what cost
+
+17 Oct 2026. **Question for Joel** (W12, W22). QBO relieves an inventory item
+on sale into that item's own expense account (here spread across "Cost of
+Goods Sold", "Purchasing", "Aegis Raw Materials" and "Purchases") at FIFO.
+The ledger relieves every item into 5000 at the item's purchase cost (W12
+moving average, not yet maintained by the import). Over the window the cost
+accounts and inventory net to the same total within 596.00, and that 596.00
+is the "Purchasing" item of D34; inside it, the ledger relieved 1,763.01 more
+inventory than QBO, and QBO posted a 100.00 shrinkage adjustment the replica
+does not carry (D32). Credit memos and refund receipts debit 4950 (W10),
+2,287.75, where QBO debits the original income account. Examples: invoice
+18725 (inventory relief), credit memo 18626 and refund receipt 6122-R (W10).
+
+The question: are these the "explained, may-differ" variances §7 allows,
+under W10, W12 and W22, so they do not count against the four-week bar? Or
+should COGS follow the item's own expense account, so the may-tier split
+compares like with like?
