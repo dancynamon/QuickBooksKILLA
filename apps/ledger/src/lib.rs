@@ -33,6 +33,8 @@
 //!   [`post`] and [`store`]
 //! - [`verify`]   — §4, §5: an invariants sweep recomputed independently of
 //!   the schema's own triggers and foreign keys
+//! - [`payroll`]  — §12: the SurePayroll pay-run journal, one flagged
+//!   entry per run, wages by class
 //! - [`nightly`]  — ROADMAP.md §E: the parallel-run command — import, diff
 //!   against a QBO trial balance CSV, write the §7 report, and the launchd
 //!   plist that schedules it
@@ -46,6 +48,7 @@ pub mod import;
 pub mod mcp;
 pub mod mfg;
 pub mod nightly;
+pub mod payroll;
 pub mod pipeline;
 pub mod post;
 pub mod report;

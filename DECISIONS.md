@@ -1181,3 +1181,89 @@ keychain prompt, D26):**
 posts the same entry. New variants would spread into every exhaustive
 `DocKind` match, the desktop app's included, and buy nothing until the own
 books need their own transfer form.
+
+## D38 — The pay-run journal: what SurePayroll gives, and what posts
+
+17 Oct 2026. §12 says payroll stays in SurePayroll and the book journals each
+run's summary. From cutover (4/1/27) nothing else brings payroll into the
+own book, so the import has to exist before then.
+
+**What SurePayroll exposes, checked read-only on 17 Oct 2026.** The
+`surepayroll` MCP server can read the open pay period (period, check date,
+approval deadline) and nothing else: it has no amounts. The figures live in
+the portal under Reports → **Payroll Summary**, chosen by year and check
+date. The selector's value is SurePayroll's id for the run. For each
+employee the report has four column groups, each with PERIOD and YTD
+amounts:
+
+- EARNINGS: REGULAR, SALARY, O/TIME, BONUS$, VACTION, and a non-cash item
+  that the footnote excludes from net pay;
+- EMPLOYEE TAXES & DEDUCTIONS: FED WTH, FICA, MEDFICA, STATE-NJ, NJ SUI EE,
+  DISAB-NJ, NJ FLI, NJWFEE, NJSWF;
+- EMPLOYER TAXES & DEDUCTIONS: CO FICA, CO MEDC, FUTA, CO UNEM-NJ,
+  ER SDI-NJ, NJWFER;
+- NET PAY, with the payment method.
+
+The company-level summary adds the run's `FEES` to the employer side, plus a
+cash requirements block (direct deposit, employee taxes, employer taxes,
+deductions, amount transmitted). There is no department column on this
+report. PDF, Excel and CSV exports exist, but each one is a rendering of the
+page layout rather than a data file. No export was downloaded and no
+payroll figure was recorded.
+
+**What was built.** `ledger::payroll`, `ledger payroll import`, and the
+`import_payroll` MCP tool. The input is a flat pay-run lines CSV, one row
+per (employee, item, period amount) with a `section` naming its column group
+(`docs/PAYROLL.md`); the same rows are accepted as JSON. Each run posts one
+flagged `JournalEntry` on its check date:
+
+- Dr wages, by class: the employee's mapping account, 5400 by default.
+- Dr employer taxes and employer deductions: the same class, on the wages
+  account unless the mapping says otherwise.
+- Cr 2400, one line per SurePayroll item.
+- Cr 1100 for net pay.
+
+The dedupe key is `payroll:<check date>:<run id>`. A run already posted with
+identical figures is skipped. If the figures differ, the import is refused
+until the old entry is reversed. A batch is all or nothing.
+
+**Choices, each one reversible.**
+
+1. *Class comes from a mapping in `.local/config.toml`, not from the report.*
+   The report carries no department, so `[payroll.employees]` (keyed by
+   SurePayroll employee id or by name) comes first and
+   `[payroll.departments]` is the fallback. An unmapped person refuses the
+   whole run. This is §3's "class or reject" rule applied to payroll.
+2. *Employer taxes follow the wage.* They land on the same account and class
+   as the wages they were levied on, so the cost of a foam hour includes its
+   FICA. A mapping can send them elsewhere instead.
+3. *Non-cash earnings are not posted.* They are taxable but not paid by the
+   run; the expense they stand for is booked where it was paid. They are
+   read, totalled, and reported.
+4. *`FEES` is not part of the pay-run journal.* SurePayroll invoices its
+   service fee separately, and that invoice is entered as a bill. A `fees`
+   section is rejected by the parser rather than guessed at.
+5. *The one arithmetic check is the stated net pay.* Wherever the file gives
+   `net_pay`, it must equal earnings less withholdings and deductions to the
+   cent. Nothing recomputes a tax.
+6. *No names in the book.* The document and the entry carry totals by
+   account and class, and SurePayroll item codes. The mapping file holds
+   names or ids and stays out of git.
+
+**Open (Dan):**
+
+- Fill in `[payroll.employees]` before the first post-cutover run.
+- Decide whether office or admin wages go to 5400 like shop labour, or to a
+  6xxx account. No dedicated wages expense account exists in the §2 chart,
+  so 6900 is the only expense option today. Adding a "Salaries and wages"
+  account is a chart change for Joel (W14).
+- Turning the Payroll Summary into the lines CSV is still manual: either
+  transcribe it, or reshape the CSV export. A read-only
+  `surepayroll_payroll_summary` tool on the MCP server would remove that
+  step. It is a follow-up and was not built here.
+
+*Rejected: parsing SurePayroll's CSV export directly.* That export is a
+report-viewer rendering of the page, it was not downloaded for this work,
+and a parser written against a guessed layout would quietly misread it. The
+flat file is explicit, can be checked by eye, and the net-pay check guards
+it.

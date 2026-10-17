@@ -41,3 +41,25 @@ name = "Aquamentor, Inc."
 # needed. Both already live under the gitignored .local/ tree.
 # tokens_dir = ".local/tokens"
 # rotation_log = ".local/rotation-log.jsonl"
+
+# SurePayroll pay-run journal (docs/PAYROLL.md, D38). Who maps to which §3
+# class. An import refuses any employee or department not listed here, so
+# this must name everyone on the payroll before the first run is journaled.
+# Keys are whatever the pay-run CSV's `employee` column carries: SurePayroll
+# employee id is better than a name (it survives a name change). Classes:
+# foam, sign, chair, drop, cnc, uv. Accounts default as shown.
+[payroll]
+# bank_account = "1100"          # net pay leaves from here
+# liabilities_account = "2400"   # withholdings and employer taxes owed
+# wages_account = "5400"         # default wages account (direct labour)
+# employer_tax_account = ""      # unset: each person's wages account
+
+[payroll.employees]
+# "EMP-0001" = { class = "foam" }
+# "EMP-0002" = { class = "sign" }
+# An office wage onto an expense account rather than direct labour:
+# "EMP-0003" = { class = "drop", wages_account = "6900" }
+
+[payroll.departments]
+# Fallback for anyone not listed above, by SurePayroll department.
+# "Shop" = { class = "foam" }
