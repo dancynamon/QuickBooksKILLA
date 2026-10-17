@@ -59,6 +59,7 @@ pub use mcp_stdio::{ToolError, ToolSpec};
 use crate::accountant::{self, AccountantError};
 use crate::authnet::link::{self, HostedPaymentClient, LinkError};
 use crate::books::{self, Book, BooksError, Contact, Item};
+use crate::payroll::{self, PayrollError};
 use crate::post::{self, PostError, Posting};
 use crate::report;
 use crate::store::{AdjustmentState, CommandMeta, Ledger, LedgerError};
@@ -313,6 +314,7 @@ impl<'a> LedgerToolSet<'a> {
             "close_period" => self.close_period(&args),
             "payment_link" => self.payment_link(&args),
             "reopen_period" => self.reopen_period(&args),
+            "import_payroll" => self.import_payroll(&mut args),
 
             other => Err(ToolError::new(format!("unknown tool: {other}"))),
         }
@@ -850,6 +852,97 @@ impl<'a> LedgerToolSet<'a> {
             .reopen_period(&self.company, period_end, actor, note, now)
             .map_err(ledger_err)?;
         self.with_locked_through(json!({ "period_end": period_end.to_string(), "reopened": true }))
+    }
+
+    /// §12, D38: one SurePayroll run in, one flagged journal entry out
+    /// (`crate::payroll`). Exactly one of `path`, `csv` or `runs` names the
+    /// input; `config_path` overrides where `[payroll]` is read from
+    /// (default `LEDGER_PAYROLL_CONFIG`, else `.local/config.toml`).
+    /// `dry_run` builds and returns the entries without writing anything.
+    fn import_payroll(&mut self, args: &mut Value) -> Result<Value, ToolError> {
+        self.refuse_if_replaying()?;
+        let actor = required_str(args, "actor")?.to_string();
+        let dry_run = args
+            .get("dry_run")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let config_path = args
+            .get("config_path")
+            .and_then(Value::as_str)
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(payroll::default_config_path);
+        let config = payroll::PayrollConfig::load(&config_path).map_err(payroll_err)?;
+
+        let runs_value = args.get_mut("runs").map(Value::take);
+        let path = args.get("path").and_then(Value::as_str);
+        let csv = args.get("csv").and_then(Value::as_str);
+        let runs = match (path, csv, runs_value) {
+            (Some(path), None, None) => {
+                let text = std::fs::read_to_string(path)
+                    .map_err(|err| ToolError::new(format!("{path}: {err}")))?;
+                payroll::parse_csv(&text).map_err(payroll_err)?
+            }
+            (None, Some(csv), None) => payroll::parse_csv(csv).map_err(payroll_err)?,
+            (None, None, Some(mut runs)) => {
+                normalize_money_fields(&mut runs);
+                serde_json::from_value::<Vec<payroll::PayRun>>(runs)
+                    .map_err(|err| ToolError::new(format!("invalid \"runs\": {err}")))?
+            }
+            _ => {
+                return Err(ToolError::new(
+                    "give exactly one of \"path\", \"csv\" or \"runs\"",
+                ))
+            }
+        };
+
+        if dry_run {
+            let mut previews = Vec::with_capacity(runs.len());
+            for run in &runs {
+                let (doc, totals) = payroll::journal_document(run, &config).map_err(payroll_err)?;
+                let entry =
+                    match post::post(&doc, 1, &PostingContext::default()).map_err(post_err)? {
+                        Posting::Entry(entry) => journal_entry_json(&entry),
+                        Posting::NonPosting => Value::Null,
+                    };
+                previews.push(json!({
+                    "run_id": run.run_id,
+                    "pay_date": run.pay_date.to_string(),
+                    "document_id": doc.document_id,
+                    "status": "dry_run",
+                    "totals": payroll_totals_json(&totals),
+                    "entry": entry,
+                }));
+            }
+            return self
+                .with_locked_through(json!({ "dry_run": true, "runs": previews, "actor": actor }));
+        }
+
+        let outcomes = payroll::import_runs(
+            self.ledger,
+            &self.company,
+            &runs,
+            &config,
+            &actor,
+            Utc::now(),
+        )
+        .map_err(payroll_err)?;
+        let mut results = Vec::with_capacity(outcomes.len());
+        for outcome in &outcomes {
+            let (entry, _) = self
+                .ledger
+                .entry(&self.company, &outcome.entry_id)
+                .map_err(ledger_err)?;
+            results.push(json!({
+                "run_id": outcome.run_id,
+                "pay_date": outcome.pay_date.to_string(),
+                "document_id": outcome.document_id,
+                "status": outcome.status.as_str(),
+                "entry_id": outcome.entry_id,
+                "totals": payroll_totals_json(&outcome.totals),
+                "entry": journal_entry_json(&entry),
+            }));
+        }
+        self.with_locked_through(json!({ "dry_run": false, "runs": results, "actor": actor }))
     }
 }
 
@@ -1402,6 +1495,53 @@ pub fn tools() -> Vec<ToolSpec> {
                     "note": { "type": "string", "description": "Why. Defaults to empty." },
                 }),
                 &["period_end", "actor"],
+            ),
+        },
+        ToolSpec {
+            name: "import_payroll",
+            description: "Journal one or more SurePayroll pay runs (LEDGER-DESIGN.md §12, \
+                D38, docs/PAYROLL.md). Each run becomes one JournalEntry document \
+                `payroll:<pay_date>:<run_id>` and one flagged entry on the check date: Dr wages \
+                by class (5400 unless the mapping says otherwise), Dr employer taxes and \
+                employer deductions, Cr 2400 for every withholding, deduction and employer tax, \
+                Cr 1100 (or the configured bank) for net pay. Employee → class comes from \
+                [payroll] in the config; any unmapped employee or department refuses the whole \
+                import, as does a stated net pay that does not match to the cent, or a check \
+                date in a closed period. All or nothing across runs. Idempotent: a run already \
+                posted with the same figures comes back `already_imported`; with different \
+                figures it is refused until that entry is reversed. `dry_run` returns the \
+                entries without writing. Refused while an import replay is in progress.",
+            input_schema: tool_schema(
+                json!({
+                    "actor": { "type": "string", "description": "Who is importing." },
+                    "path": {
+                        "type": "string",
+                        "description": "A pay-run lines CSV on disk (docs/PAYROLL.md).",
+                    },
+                    "csv": {
+                        "type": "string",
+                        "description": "The same CSV as text, instead of `path`.",
+                    },
+                    "runs": {
+                        "type": "array",
+                        "description": "Runs as JSON instead of a CSV: [{run_id, pay_date, \
+                            period_start?, period_end?, lines: [{employee, department?, \
+                            section, item, amount}]}]. Sections: earning, noncash_earning, \
+                            employee_tax, employee_deduction, employer_tax, \
+                            employer_deduction, net_pay.",
+                        "items": { "type": "object" },
+                    },
+                    "dry_run": {
+                        "type": "boolean",
+                        "description": "Build and return the entries; write nothing.",
+                    },
+                    "config_path": {
+                        "type": "string",
+                        "description": "Config holding [payroll]; default \
+                            $LEDGER_PAYROLL_CONFIG or .local/config.toml.",
+                    },
+                }),
+                &["actor"],
             ),
         },
     ]
@@ -2090,6 +2230,20 @@ fn link_err(err: LinkError) -> ToolError {
     ToolError::new(err.to_string())
 }
 
+fn payroll_err(err: PayrollError) -> ToolError {
+    ToolError::new(err.to_string())
+}
+
+fn payroll_totals_json(totals: &payroll::RunTotals) -> Value {
+    json!({
+        "gross": money_str(totals.gross),
+        "employer_costs": money_str(totals.employer_costs),
+        "liabilities": money_str(totals.liabilities),
+        "net_pay": money_str(totals.net_pay),
+        "noncash_not_posted": money_str(totals.noncash),
+    })
+}
+
 fn post_err(err: PostError) -> ToolError {
     ToolError::new(err.to_string())
 }
@@ -2250,6 +2404,7 @@ mod tests {
             "close_period",
             "reopen_period",
             "payment_link",
+            "import_payroll",
         ];
         assert_eq!(listed.len(), expected.len());
         for name in expected {
@@ -2260,6 +2415,91 @@ mod tests {
             assert!(tool["description"].as_str().is_some_and(|d| !d.is_empty()));
             assert_eq!(tool["inputSchema"]["type"], json!("object"));
         }
+    }
+
+    /// Invented run, invented ids: one mapped employee, one not.
+    #[test]
+    fn import_payroll_dry_runs_posts_once_and_refuses_the_unmapped() {
+        let ledger = seed_ledger();
+        let mut server = new_server(&ledger, COMPANY.to_string());
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config.toml");
+        std::fs::write(
+            &config,
+            "[payroll.employees]\n\"E-1\" = { class = \"cnc\" }\n",
+        )
+        .unwrap();
+        let config = config.to_str().unwrap();
+        let line = |employee: &str, section: &str, item: &str, amount: &str| json!({ "employee": employee, "section": section, "item": item, "amount": amount });
+        let runs = json!([{
+            "run_id": "MCP-1",
+            "pay_date": "2027-05-07",
+            "lines": [
+                line("E-1", "earning", "REGULAR", "600.00"),
+                line("E-1", "employee_tax", "FED WTH", "50.00"),
+                line("E-1", "employer_tax", "CO FICA", "37.20"),
+                line("E-1", "net_pay", "NET PAY", "550.00"),
+            ],
+        }]);
+
+        let dry = call_tool(
+            &mut server,
+            1,
+            "import_payroll",
+            json!({ "actor": "test", "runs": runs, "dry_run": true, "config_path": config }),
+        );
+        assert_ne!(dry["result"]["isError"], json!(true), "{dry}");
+        let preview = &dry["result"]["structuredContent"]["runs"][0];
+        assert_eq!(preview["status"], json!("dry_run"));
+        assert_eq!(preview["entry"]["is_flagged"], json!(true));
+        assert_eq!(ledger.oplog_len(COMPANY).unwrap(), 0);
+
+        let posted = call_tool(
+            &mut server,
+            2,
+            "import_payroll",
+            json!({ "actor": "test", "runs": runs, "config_path": config }),
+        );
+        assert_ne!(posted["result"]["isError"], json!(true), "{posted}");
+        let run = &posted["result"]["structuredContent"]["runs"][0];
+        assert_eq!(run["status"], json!("posted"));
+        assert_eq!(run["document_id"], json!("payroll:2027-05-07:MCP-1"));
+        assert_eq!(run["totals"]["net_pay"], json!("550.00"));
+        assert_eq!(run["totals"]["liabilities"], json!("87.20"));
+        assert!(posted["result"]["structuredContent"]
+            .as_object()
+            .unwrap()
+            .contains_key("locked_through"));
+
+        let again = call_tool(
+            &mut server,
+            3,
+            "import_payroll",
+            json!({ "actor": "test", "runs": runs, "config_path": config }),
+        );
+        assert_eq!(
+            again["result"]["structuredContent"]["runs"][0]["status"],
+            json!("already_imported")
+        );
+
+        let csv = "run_id,pay_date,employee,section,item,amount\nMCP-2,2027-05-21,E-2,earning,REGULAR,10.00\n";
+        let refused = call_tool(
+            &mut server,
+            4,
+            "import_payroll",
+            json!({ "actor": "test", "csv": csv, "config_path": config }),
+        );
+        assert_eq!(refused["result"]["isError"], json!(true));
+        let text = refused["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("E-2"), "{text}");
+
+        let both = call_tool(
+            &mut server,
+            5,
+            "import_payroll",
+            json!({ "actor": "test", "csv": csv, "runs": [], "config_path": config }),
+        );
+        assert_eq!(both["result"]["isError"], json!(true));
     }
 
     #[test]

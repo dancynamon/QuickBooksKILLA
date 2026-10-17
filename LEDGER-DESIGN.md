@@ -1141,7 +1141,7 @@ to make that arithmetic something Dan reads rather than something he derives.
 |---|---|
 | 1099-NEC | Out of scope entirely (D17). The vendor flag stays as a column, `vendors.is_1099`, and nothing is generated. FY2026 1099s come from QBO, which holds the 2026 books (ROADMAP §F). |
 | Multi-currency | Both entities are USD. `Money` carries no currency tag (`DESIGN.md` §1) and adding one touches every signature to buy nothing. |
-| Payroll | SurePayroll stays. One journal per pay run from its summary: Dr 5400 and 6xxx for gross by class, Cr 2400 for the liabilities, Cr 1100 for the net paid. Nothing computes a paycheck here. |
+| Payroll | SurePayroll stays. One journal per pay run from its summary: Dr 5400 and 6xxx for gross by class, Cr 2400 for the liabilities, Cr 1100 for the net paid. Nothing computes a paycheck here. Built: `ledger payroll import` and the `import_payroll` tool (D38, `docs/PAYROLL.md`). |
 | Inventory quantities | Quantities are not tracked until manufacturing costing lands (§11, after cutover). Until then 1300 and 1310 are value accounts fed by documents, and physical counts come in as inventory adjustments. QBO's inventory tracking is not used for foam today either. |
 | Budgets | No budget table, no budget versus actual report. |
 | Time tracking, e-invoicing, ACH origination, a web or mobile client, any hosted service | Kickoff §12. No abstraction layers are added for any of them. |

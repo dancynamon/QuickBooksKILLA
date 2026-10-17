@@ -24,6 +24,7 @@ use ledger::mfg::report::{self as mfg_report};
 use ledger::mfg::sheet::{self as mfg_sheet, NewBuildSheet};
 use ledger::mfg::NewMaterial;
 use ledger::nightly;
+use ledger::payroll::{self, PayrollConfig};
 use ledger::pipeline;
 use ledger::report::{self, BalanceSheet, Pnl, QboTbRow, SalesTaxLines, TierRules, TrialBalance};
 use ledger::slim;
@@ -232,6 +233,13 @@ enum Command {
         company: String,
         statement: String,
     },
+    PayrollImport {
+        db: PathBuf,
+        company: String,
+        file: PathBuf,
+        config: Option<PathBuf>,
+        dry_run: bool,
+    },
     AuthnetImport {
         db: PathBuf,
         company: String,
@@ -391,6 +399,8 @@ USAGE:
     ledger authnet link --db PATH --company ID --document ID
                    [--config PATH] [--out FILE.html]
     ledger authnet credentials --environment sandbox|production
+    ledger payroll import --db PATH --company ID FILE
+                   [--config PATH] [--dry-run]
     ledger opening --db PATH --company ID --as-of YYYY-MM-DD --qbo-csv PATH
     ledger boundary --db PATH --company ID --replica PATH --realm ID
                    --snapshots DIR
@@ -501,6 +511,14 @@ SUBCOMMANDS:
     authnet credentials  Read the API Login ID and Transaction Key from
                     stdin (one per line) into the macOS login keychain for
                     the given environment. Never written to a file.
+    payroll import  Journal SurePayroll pay runs from a pay-run lines CSV
+                    (§12, D38, `docs/PAYROLL.md`): one flagged entry per run
+                    on its check date, wages by class from [payroll] in
+                    --config (default $LEDGER_PAYROLL_CONFIG or
+                    .local/config.toml). Refuses the whole file on any
+                    unmapped employee, a net pay that does not tie, or a
+                    closed period. Re-running the same file posts nothing.
+                    --dry-run prints the entries and writes nothing.
     opening   Apply (or idempotently skip/replace) the §6 opening balance
               entry as of a date, from a QBO trial balance CSV of the same
               shape tbdiff reads.
@@ -766,6 +784,7 @@ fn parse(args: &[String]) -> Result<Command, UsageError> {
         "reclass" => parse_reclass(args),
         "bank" => parse_bank(args),
         "authnet" => parse_authnet(args),
+        "payroll" => parse_payroll(args),
         "opening" => parse_opening(args),
         "boundary" => parse_boundary(args),
         "verify" => parse_verify(args),
@@ -1186,6 +1205,44 @@ fn parse_authnet_import(mut args: Args<'_>) -> Result<Command, UsageError> {
         undeposited: undeposited.unwrap_or_else(|| DEFAULT_AUTHNET_UNDEPOSITED.to_string()),
         refund_class: refund_class.unwrap_or_else(|| DEFAULT_AUTHNET_REFUND_CLASS.to_string()),
         fee_class: fee_class.unwrap_or_else(|| DEFAULT_AUTHNET_FEE_CLASS.to_string()),
+    })
+}
+
+fn parse_payroll(mut args: Args<'_>) -> Result<Command, UsageError> {
+    let Some(sub) = args.next() else {
+        return Err(UsageError::new("payroll requires a subcommand (import)"));
+    };
+    match sub.as_str() {
+        "import" => parse_payroll_import(args),
+        other => Err(UsageError::unknown_subcommand(&format!("payroll {other}"))),
+    }
+}
+
+fn parse_payroll_import(mut args: Args<'_>) -> Result<Command, UsageError> {
+    let mut db = None;
+    let mut company = None;
+    let mut file = None;
+    let mut config = None;
+    let mut dry_run = false;
+    while let Some(flag) = args.next() {
+        match flag.as_str() {
+            "--db" => db = Some(PathBuf::from(next_value(&mut args, "--db")?)),
+            "--company" => company = Some(next_value(&mut args, "--company")?),
+            "--file" => file = Some(PathBuf::from(next_value(&mut args, "--file")?)),
+            "--config" => config = Some(PathBuf::from(next_value(&mut args, "--config")?)),
+            "--dry-run" => dry_run = true,
+            other if !other.starts_with("--") && file.is_none() => {
+                file = Some(PathBuf::from(other));
+            }
+            other => return Err(UsageError::unknown_flag(other)),
+        }
+    }
+    Ok(Command::PayrollImport {
+        db: db.ok_or_else(|| UsageError::missing_flag("--db"))?,
+        company: company.ok_or_else(|| UsageError::missing_flag("--company"))?,
+        file: file.ok_or_else(|| UsageError::missing_flag("--file"))?,
+        config,
+        dry_run,
     })
 }
 
@@ -1955,6 +2012,13 @@ fn execute(command: Command) -> Result<ExitCode, CommandError> {
             &fee_class,
         )
         .map(ok),
+        Command::PayrollImport {
+            db,
+            company,
+            file,
+            config,
+            dry_run,
+        } => run_payroll_import(&db, &company, &file, config, dry_run).map(ok),
         Command::AuthnetLink {
             db,
             company,
@@ -2967,6 +3031,77 @@ fn run_authnet_import(
     println!("rejected           : {}", report.rejected.len());
     for reason in &report.rejected {
         println!("  - {reason}");
+    }
+    Ok(())
+}
+
+// -- payroll ------------------------------------------------------------------
+
+/// `ledger payroll import`: parse the pay-run lines CSV, build one journal
+/// per run, and post them all or none (`ledger::payroll::import_runs`).
+/// Prints totals only — never an employee or a paycheck.
+fn run_payroll_import(
+    db: &std::path::Path,
+    company: &str,
+    file: &std::path::Path,
+    config: Option<PathBuf>,
+    dry_run: bool,
+) -> Result<(), CommandError> {
+    let config_path = config.unwrap_or_else(payroll::default_config_path);
+    let config = PayrollConfig::load(&config_path).map_err(runtime)?;
+    let text = fs::read_to_string(file).map_err(|e| runtime(format!("{}: {e}", file.display())))?;
+    let runs = payroll::parse_csv(&text).map_err(runtime)?;
+    let money = |m: ledger_core::Money| {
+        let minor = m.minor();
+        let sign = if minor < 0 { "-" } else { "" };
+        format!(
+            "{sign}{}.{:02}",
+            minor.unsigned_abs() / 100,
+            minor.unsigned_abs() % 100
+        )
+    };
+    let print_totals = |totals: &payroll::RunTotals| {
+        println!("  gross wages        : {}", money(totals.gross));
+        println!("  employer costs     : {}", money(totals.employer_costs));
+        println!("  to payroll liab.   : {}", money(totals.liabilities));
+        println!("  net pay            : {}", money(totals.net_pay));
+        if !totals.noncash.is_zero() {
+            println!("  non-cash, not posted: {}", money(totals.noncash));
+        }
+    };
+
+    if dry_run {
+        for run in &runs {
+            let (doc, totals) = payroll::journal_document(run, &config).map_err(runtime)?;
+            println!("{} (dry run, nothing written)", doc.document_id);
+            print_totals(&totals);
+            for line in &doc.lines {
+                let side = match line.posting {
+                    Some(Side::Debit) => "Dr",
+                    _ => "Cr",
+                };
+                let account = line.account.as_ref().map_or("", |a| a.0.as_str());
+                let class = line.class.as_ref().map_or("", |c| c.0.as_str());
+                println!(
+                    "  {side} {account:<5} {class:<6} {:>12}",
+                    money(line.amount)
+                );
+            }
+        }
+        return Ok(());
+    }
+
+    let ledger = Ledger::open(db).map_err(runtime)?;
+    let outcomes = payroll::import_runs(&ledger, company, &runs, &config, &actor(), Utc::now())
+        .map_err(runtime)?;
+    for outcome in &outcomes {
+        println!(
+            "{} {} entry {}",
+            outcome.document_id,
+            outcome.status.as_str(),
+            outcome.entry_id
+        );
+        print_totals(&outcome.totals);
     }
     Ok(())
 }

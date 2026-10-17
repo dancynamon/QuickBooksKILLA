@@ -277,6 +277,9 @@ Transaction Key come from `AUTHNET_API_LOGIN_ID` / `AUTHNET_TRANSACTION_KEY`
 in the server's `env`, else the macOS keychain (`docs/AUTHNET.md`, "Payment
 link") — never from the config file.
 
+`import_payroll` reads `[payroll]` from `LEDGER_PAYROLL_CONFIG` (default
+`.local/config.toml`), unless a call passes `config_path`.
+
 ## The write gate
 
 Two rules apply to every write tool below, uniformly, so a skill never has
@@ -666,6 +669,44 @@ says — there is no quiet way to relock a period back to where it was.
   "arguments": { "period_end": "2026-08-31", "actor": "dan", "note": "August close" }
 }
 ```
+
+### `import_payroll`
+
+Journals SurePayroll pay runs (`LEDGER-DESIGN.md` §12, D38,
+`docs/PAYROLL.md`). Each run becomes one `JournalEntry` document,
+`payroll:<pay_date>:<run_id>`, and one **flagged** entry (§4) on the check
+date: Dr wages by class (5400 unless the mapping names another account), Dr
+employer taxes and employer deductions on the same class, Cr 2400 for every
+withholding, deduction and employer tax, Cr 1100 (or `[payroll]
+bank_account`) for net pay.
+
+Exactly one input: `path` (a pay-run lines CSV on disk), `csv` (the same
+text) or `runs` (JSON, the same rows grouped per run). `config_path`
+overrides where `[payroll]` is read (default `LEDGER_PAYROLL_CONFIG`, else
+`.local/config.toml`). `dry_run: true` returns the entries and writes
+nothing.
+
+Refused with `isError`, and nothing written, when any employee or department
+has no mapping (the message names every one), when a stated net pay does not
+equal earnings less withholdings and deductions to the cent, when a check
+date is on or before `locked_through`, or when a class or account in the
+mapping does not exist. All runs in one call post together or not at all.
+Idempotent: a run already posted with the same figures comes back
+`"status": "already_imported"` with its existing `entry_id`; with different
+figures it is refused until that entry is reversed (`reverse_entry`), after
+which the import saves a new version and posts it.
+
+```json
+{
+  "name": "import_payroll",
+  "arguments": { "actor": "dan", "path": "/Users/dan/Downloads/run-2027-04-09.csv" }
+}
+```
+
+Returns `{ dry_run, runs: [{ run_id, pay_date, document_id, status,
+entry_id, totals: { gross, employer_costs, liabilities, net_pay,
+noncash_not_posted }, entry }], locked_through }`. Totals only: no employee
+appears in the result, the document or the entry.
 
 ## Payment tool
 
