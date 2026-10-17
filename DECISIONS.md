@@ -1181,3 +1181,73 @@ keychain prompt, D26):**
 posts the same entry. New variants would spread into every exhaustive
 `DocKind` match, the desktop app's included, and buy nothing until the own
 books need their own transfer form.
+
+## D39 — Customer documents render from the own book, in a hand-written PDF
+
+17 Oct 2026. After cutover (D24/D29) QBO no longer renders or emails
+customer documents, so the own book must. `apps/ledger/src/render.rs`
+builds invoice, estimate, sales receipt, credit memo and purchase order PDFs
+and a customer statement; `render_document` / `render_statement` on
+`ledger-mcp` and `ledger render document|statement` expose them
+(`docs/MCP.md`, "Document tools"). Sending stays a separate, gated step.
+(D38 is the pay-run journal on its own branch.)
+
+**Decided.**
+
+1. **A small PDF writer of our own (`render/pdf.rs`, under 1,000 lines with its tests), not a crate.**
+   The documents need text, rules, boxes, one raster logo and a link
+   annotation on US Letter — nothing a layout engine buys. So: the
+   standard-14 Helvetica faces (no font embedding), WinAnsi encoding (a
+   character outside it prints `?`), Adobe's published widths for
+   right-aligned money and word wrap, uncompressed content streams,
+   deterministic bytes (no creation date or id). The one dependency added
+   is `miniz_oxide`, already in the lock file through `ureq`'s `flate2`, to
+   inflate the logo PNG and deflate it into the file.
+   *Rejected:* `printpdf` / `genpdf` — dozens of transitive crates (font
+   parsing, image codecs) for features not used, and `genpdf` wants a TTF on
+   disk. HTML→PDF — no dependency-free path; every option shells out to a
+   browser or wkhtmltopdf.
+2. **Tests read the bytes back.** `pdf::extract_text` reads the shown
+   strings out of the content streams, so the tests assert number, totals,
+   balance due and VOID from the file itself, and the statement's buckets
+   against `books::aging`'s own row for the customer.
+3. **Look: the `branded-invoice` skill's renderer**, read from Dan's skills
+   folder (not copied): Letter, 0.8in margins, Helvetica, navy `#1B3A5B`, no
+   heavy fills, title and meta top right, BILL TO / SHIP TO, a ruled line
+   table, a right-aligned totals stack, NOTES, an italic footer. Added:
+   a SKU column, pagination with the table header repeated and "Page x of
+   y", and the VOID watermark.
+4. **Everything printed comes from the book.** Lines from the newest
+   document version, SKU and description from the item (the line's own
+   description first), addresses and terms from the contact, amount paid
+   and balance due from `open_documents`' rule. Company identity (name,
+   legal name, address, phone, email, logo, footer) from
+   `[documents.company.<id>]` in the gitignored `.local/config.toml`, else
+   the ledger's `companies.display_name` alone. Nothing about Aquamentor is
+   in code.
+5. **A voided document** keeps its lines and totals, shows `Status: VOID`,
+   a balance due of 0.00 and VOID across every page; its file name ends
+   ` (VOID)`.
+6. **The pay link (D30) goes beside the PDF, not in it.** For an open
+   invoice with an Authorize.net client configured, rendering calls
+   `link::payment_link`, writes the self-submitting page as
+   `<name>.pay.html`, and adds a PAY ONLINE box. The 15-minute token is
+   never printed. The box links `[documents] pay_url` when set — the
+   durable mint-on-click page D30 left open — and otherwise says to use the
+   link sent with the invoice, so the email step should render right before
+   sending. Missing credentials or config: no box, `not_configured`. A
+   gateway or network failure: no box, `failed` plus a warning; the PDF
+   still renders.
+7. **Output outside the repository.** `LEDGER_DOCUMENTS_DIR`, else
+   `[documents] output_dir`, else `~/Documents/Ledger Documents`, plus the
+   company id. A directory inside any git work tree is refused unless under
+   its ignored `target/` or `.local/`, checked before anything is created.
+
+**Open.**
+
+- The durable pay page (`pay_url`) still needs building and hosting (D30).
+- Statements omit unapplied customer payments (2300, not AR, so `aging`
+  omits them too) and have no activity section.
+- The look should be checked against a real printed QBO invoice before
+  go/no-go; `cargo run -p ledger --example render_sample -- --logo PATH`
+  renders one of each from a synthetic book into `target/render-sample/`.

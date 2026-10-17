@@ -60,6 +60,7 @@ use crate::accountant::{self, AccountantError};
 use crate::authnet::link::{self, HostedPaymentClient, LinkError};
 use crate::books::{self, Book, BooksError, Contact, Item};
 use crate::post::{self, PostError, Posting};
+use crate::render::{self, PayLinkMode, PayLinkOutcome, RenderConfig, RenderError};
 use crate::report;
 use crate::store::{AdjustmentState, CommandMeta, Ledger, LedgerError};
 use crate::types::{
@@ -90,6 +91,19 @@ pub struct LedgerToolSet<'a> {
     /// The Authorize.net client `payment_link` asks for a hosted page.
     /// `None`: the tool says it is not configured.
     payments: Option<Box<dyn HostedPaymentClient + 'a>>,
+    /// What `render_document` and `render_statement` print and where they
+    /// write it. `None`: read `[documents]` from
+    /// [`render::default_config_path`] on each call.
+    documents: Option<DocumentsSetup>,
+}
+
+/// The render tools' config, fixed for the server's life instead of read
+/// per call: `ledger-mcp` leaves it to the config file, tests pin it.
+#[derive(Clone, Debug, Default)]
+pub struct DocumentsSetup {
+    pub config: RenderConfig,
+    /// Written into as is; `None` means [`render::output_dir`]'s default.
+    pub out_dir: Option<std::path::PathBuf>,
 }
 
 impl<'a> ToolSet for LedgerToolSet<'a> {
@@ -117,6 +131,7 @@ pub fn new_server(ledger: &Ledger, company: String) -> Server<'_> {
             ledger,
             company,
             payments: None,
+            documents: None,
         },
         info,
     )
@@ -139,6 +154,31 @@ pub fn new_server_with_payments<'a>(
             ledger,
             company,
             payments: Some(payments),
+            documents: None,
+        },
+        info,
+    )
+}
+
+/// The server with both optional pieces given explicitly: the Authorize.net
+/// client behind `payment_link` and the render tools' pay link, and the
+/// render tools' config and output directory.
+pub fn new_server_with_documents<'a>(
+    ledger: &'a Ledger,
+    company: String,
+    payments: Option<Box<dyn HostedPaymentClient + 'a>>,
+    documents: DocumentsSetup,
+) -> Server<'a> {
+    let info = ServerInfo {
+        name: "ledger",
+        version: env!("CARGO_PKG_VERSION"),
+    };
+    mcp_stdio::Server::new(
+        LedgerToolSet {
+            ledger,
+            company,
+            payments,
+            documents: Some(documents),
         },
         info,
     )
@@ -285,6 +325,8 @@ impl<'a> LedgerToolSet<'a> {
                     .map_err(ledger_err)?;
                 document_json(&doc, version)
             }
+            "render_document" => self.render_document(&args),
+            "render_statement" => self.render_statement(&args),
             "aging" => {
                 let book = parse_book(&args)?;
                 let as_of = parse_date(&args, "as_of")?;
@@ -649,6 +691,107 @@ impl<'a> LedgerToolSet<'a> {
             "token": minted.token,
             "expires_at": minted.expires_at.to_rfc3339(),
             "html": minted.html(),
+        }))
+    }
+
+    /// The render tools' config and output directory (D39).
+    fn documents(&self) -> Result<(RenderConfig, std::path::PathBuf), ToolError> {
+        let (config, explicit) = match &self.documents {
+            Some(setup) => (setup.config.clone(), setup.out_dir.clone()),
+            None => (
+                RenderConfig::load(&render::default_config_path()).map_err(render_err)?,
+                None,
+            ),
+        };
+        let dir =
+            render::output_dir(&config, &self.company, explicit.as_deref()).map_err(render_err)?;
+        Ok((config, dir))
+    }
+
+    /// One saved document as a PDF (D39). Writes a file outside the
+    /// repository and nothing to the ledger; refused during a replay, whose
+    /// half-imported payments would print a wrong balance.
+    fn render_document(&mut self, args: &Value) -> Result<Value, ToolError> {
+        self.refuse_if_replaying()?;
+        let document_id = required_str(args, "document_id")?.to_string();
+        let want_link = args
+            .get("pay_link")
+            .and_then(Value::as_bool)
+            .unwrap_or(true);
+        let (config, dir) = self.documents()?;
+        let mode = match (want_link, self.payments.as_mut()) {
+            (false, _) => PayLinkMode::Off,
+            (true, None) => PayLinkMode::Unconfigured,
+            (true, Some(client)) => PayLinkMode::Client(client.as_mut()),
+        };
+        let done = render::render_document(
+            self.ledger,
+            &self.company,
+            &document_id,
+            &config,
+            &dir,
+            mode,
+            Utc::now(),
+        )
+        .map_err(render_err)?;
+        let pay_link = match &done.pay_link {
+            PayLinkOutcome::NotApplicable => json!({ "status": "not_applicable" }),
+            PayLinkOutcome::Skipped => json!({ "status": "skipped" }),
+            PayLinkOutcome::NotConfigured(reason) => {
+                json!({ "status": "not_configured", "reason": reason })
+            }
+            PayLinkOutcome::Failed(reason) => json!({ "status": "failed", "reason": reason }),
+            PayLinkOutcome::Attached { link, page } => json!({
+                "status": "attached",
+                "amount": money_str(link.amount),
+                "environment": link.environment.as_str(),
+                "url": link.url,
+                "expires_at": link.expires_at.to_rfc3339(),
+                "page": page.display().to_string(),
+            }),
+        };
+        let figures = &done.figures;
+        Ok(json!({
+            "path": done.rendered.path.display().to_string(),
+            "page_count": done.rendered.page_count,
+            "document_id": done.document.document_id,
+            "kind": done.document.kind.as_str(),
+            "number": done.document.number,
+            "is_voided": done.document.is_voided,
+            "subtotal": money_str(figures.subtotal),
+            "tax": money_str(figures.tax),
+            "total": money_str(figures.total),
+            "amount_paid": money_str(figures.paid),
+            "balance_due": money_str(figures.balance),
+            "pay_link": pay_link,
+            "warnings": done.rendered.warnings,
+        }))
+    }
+
+    /// A customer statement as of a date (D39): the customer's open items
+    /// and the same aging buckets `aging` reports for them.
+    fn render_statement(&mut self, args: &Value) -> Result<Value, ToolError> {
+        self.refuse_if_replaying()?;
+        let contact_id = required_str(args, "contact_id")?.to_string();
+        let as_of = parse_date(args, "as_of")?;
+        let (config, dir) = self.documents()?;
+        let done = render::render_statement(
+            self.ledger,
+            &self.company,
+            &contact_id,
+            as_of,
+            &config,
+            &dir,
+        )
+        .map_err(render_err)?;
+        Ok(json!({
+            "path": done.rendered.path.display().to_string(),
+            "page_count": done.rendered.page_count,
+            "contact_id": contact_id,
+            "as_of": as_of.to_string(),
+            "open_items": done.open_items,
+            "aging": aging_row_json(&done.aging),
+            "warnings": done.rendered.warnings,
         }))
     }
 
@@ -1212,6 +1355,57 @@ pub fn tools() -> Vec<ToolSpec> {
                     },
                 }),
                 &["document_id"],
+            ),
+        },
+        ToolSpec {
+            name: "render_document",
+            description: "A PDF of one saved document, from the own book (D39, docs/MCP.md): \
+                Invoice, Estimate, SalesReceipt, CreditMemo or PurchaseOrder. Prints the \
+                company identity from `[documents]` in .local/config.toml, bill-to and ship-to \
+                from the contact (for a purchase order: the vendor, and ship to the company), \
+                number, dates, terms, lines (SKU, description, qty, rate, amount), subtotal, \
+                tax, total, amount paid and balance due, and the memo; a voided document is \
+                watermarked VOID. For an open invoice, when Authorize.net is configured and \
+                `pay_link` is not false, mints a payment link (as `payment_link` does), writes \
+                its self-submitting page beside the PDF and adds a PAY ONLINE box; otherwise \
+                the box is left off and `pay_link.status` says why (`not_applicable`, \
+                `skipped`, `not_configured`, `failed`). Writes the file into the configured \
+                output directory (outside the repository), overwriting an earlier render; \
+                writes nothing to the ledger and sends nothing. Refused while an import \
+                replay is in progress. Returns `path`, `page_count`, `document_id`, `kind`, \
+                `number`, `is_voided`, `subtotal`, `tax`, `total`, `amount_paid`, \
+                `balance_due`, `pay_link` and `warnings`.",
+            input_schema: tool_schema(
+                json!({
+                    "document_id": {
+                        "type": "string",
+                        "description": "The document's document_id (create_document returns it).",
+                    },
+                    "pay_link": {
+                        "type": "boolean",
+                        "description": "Mint an Authorize.net link for an open invoice. \
+                            Default true; a no-op when Authorize.net is not configured.",
+                    },
+                }),
+                &["document_id"],
+            ),
+        },
+        ToolSpec {
+            name: "render_statement",
+            description: "A PDF statement for one customer as of a date (D39): every open \
+                invoice and credit memo (date, number, due date, amount, open balance, days \
+                past due) and the aging buckets, which are exactly that customer's row of \
+                `aging` (receivable) on the same date. Writes the file into the configured \
+                output directory and nothing to the ledger; sends nothing. Refused for a \
+                vendor, an unknown contact, and while an import replay is in progress. \
+                Returns `path`, `page_count`, `contact_id`, `as_of`, `open_items`, `aging` \
+                and `warnings`.",
+            input_schema: tool_schema(
+                json!({
+                    "contact_id": { "type": "string", "description": "The customer's contact_id." },
+                    "as_of": date_prop("Statement date, YYYY-MM-DD. Open items and aging as of this day."),
+                }),
+                &["contact_id", "as_of"],
             ),
         },
         ToolSpec {
@@ -2078,6 +2272,10 @@ fn accountant_err(err: AccountantError) -> ToolError {
     ToolError::new(err.to_string())
 }
 
+fn render_err(err: RenderError) -> ToolError {
+    ToolError::new(err.to_string())
+}
+
 fn link_err(err: LinkError) -> ToolError {
     ToolError::new(err.to_string())
 }
@@ -2242,6 +2440,8 @@ mod tests {
             "close_period",
             "reopen_period",
             "payment_link",
+            "render_document",
+            "render_statement",
         ];
         assert_eq!(listed.len(), expected.len());
         for name in expected {

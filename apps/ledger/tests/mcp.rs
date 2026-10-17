@@ -84,7 +84,7 @@ fn the_real_binary_speaks_jsonrpc_over_stdio_and_writes_nothing_else_to_stdout()
 
     assert_eq!(responses[1]["id"], json!(2));
     let tools = responses[1]["result"]["tools"].as_array().unwrap();
-    assert_eq!(tools.len(), 29);
+    assert_eq!(tools.len(), 31);
     assert!(tools
         .iter()
         .any(|tool| tool["name"] == json!("save_and_post_document")));
