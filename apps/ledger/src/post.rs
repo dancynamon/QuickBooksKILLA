@@ -958,44 +958,68 @@ fn post_build(doc: &LedgerDocument) -> Result<Vec<Leg>, PostError> {
 
 /// §1, §11: Inventory adjustment. A count up debits the named inventory
 /// account (1300 or 1310) and credits 5150; a count down does the reverse.
-/// One signed `Account` line names the inventory account and carries the
-/// amount, positive for a count up. `doc.header_class` is required — §1:
-/// "required, from the item."
+/// Each signed `Account` line names the inventory account and carries the
+/// amount, positive for a count up; a QBO adjustment (D37) has one per item.
+/// Every line needs a class, its own or `doc.header_class` — §1: "required,
+/// from the item." A line that is not such an `Account` line (an item QBO
+/// left unvalued) refuses the whole document rather than posting part of it.
 fn post_inventory_adjustment(doc: &LedgerDocument) -> Result<Vec<Leg>, PostError> {
-    let class = doc
-        .header_class
-        .clone()
-        .ok_or(PostError::MissingClass { line_no: 1 })?;
-    let line = doc
-        .lines
-        .iter()
-        .find(|line| {
-            line.kind == LineKind::Account
-                && matches!(
-                    line.account.as_ref().map(|account| account.0.as_str()),
-                    Some(chart::INVENTORY_RAW) | Some(chart::INVENTORY_FINISHED)
-                )
-        })
-        .ok_or(PostError::MissingAccount { line_no: 0 })?;
-    let account = line.account.clone().expect("matched above");
-
-    let legs = if line.amount.is_negative() {
-        let shrink = line.amount.checked_neg()?;
-        vec![
-            debit(acct(chart::INVENTORY_ADJUSTMENT), shrink, Some(class), None),
-            credit(account, shrink, None, None),
-        ]
-    } else {
-        vec![
-            debit(account, line.amount, None, None),
-            credit(
+    let mut legs = Vec::new();
+    for line in &doc.lines {
+        if line.kind == LineKind::Description {
+            continue;
+        }
+        let account = line
+            .account
+            .clone()
+            .filter(|account| {
+                line.kind == LineKind::Account
+                    && matches!(
+                        account.0.as_str(),
+                        chart::INVENTORY_RAW | chart::INVENTORY_FINISHED
+                    )
+            })
+            .ok_or(PostError::MissingAccount {
+                line_no: line.line_no,
+            })?;
+        if line.amount.is_zero() {
+            continue;
+        }
+        let class = line
+            .class
+            .clone()
+            .or_else(|| doc.header_class.clone())
+            .ok_or(PostError::MissingClass {
+                line_no: line.line_no,
+            })?;
+        if line.amount.is_negative() {
+            let shrink = line.amount.checked_neg()?;
+            legs.push(debit(
+                acct(chart::INVENTORY_ADJUSTMENT),
+                shrink,
+                Some(class),
+                None,
+            ));
+            legs.push(credit(account, shrink, None, None));
+        } else {
+            legs.push(debit(account, line.amount, None, None));
+            legs.push(credit(
                 acct(chart::INVENTORY_ADJUSTMENT),
                 line.amount,
                 Some(class),
                 None,
-            ),
-        ]
-    };
+            ));
+        }
+    }
+    // No line at all is a malformed document; lines that all came to zero
+    // (an item at no cost) move nothing, which `post` reports as non-posting.
+    if doc
+        .lines
+        .iter()
+        .all(|line| line.kind == LineKind::Description)
+    {
+        return Err(PostError::MissingAccount { line_no: 0 });
+    }
     Ok(legs)
 }
 

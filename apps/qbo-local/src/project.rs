@@ -266,7 +266,16 @@ fn parse_document(
     // A total we could not read is not zero. Refusing here sends the row to
     // quarantine with its raw JSON intact, which is recoverable; writing a
     // wrong number into the projection is not.
-    let total = required_money(raw, "TotalAmt", entity)?;
+    let total = match doc_type {
+        // D37: these two state their one amount as `Amount`, not `TotalAmt`.
+        DocumentType::Transfer | DocumentType::CreditCardPayment => {
+            required_money(raw, "Amount", entity)?
+        }
+        // An inventory adjustment states quantities only; QBO values it
+        // itself and puts no amount anywhere on the payload.
+        DocumentType::InventoryAdjustment => Money::ZERO,
+        _ => required_money(raw, "TotalAmt", entity)?,
+    };
 
     let lines = parse_lines(raw)?;
     let links = parse_links(raw);
@@ -297,7 +306,8 @@ fn parse_document(
 ///
 /// `Purchase` is the awkward one: its `EntityRef` may be a vendor, a customer
 /// or an employee, so the payload's own `type` decides rather than the document
-/// type. `Deposit` and `JournalEntry` face nobody.
+/// type. `Deposit`, `JournalEntry`, `Transfer` and `InventoryAdjustment` face
+/// nobody; a `CreditCardPayment` may name the card's vendor.
 fn contact_of(raw: &Value, doc_type: DocumentType) -> (Option<ContactType>, Option<String>) {
     use DocumentType as D;
     match doc_type {
@@ -307,7 +317,7 @@ fn contact_of(raw: &Value, doc_type: DocumentType) -> (Option<ContactType>, Opti
         | D::CreditMemo
         | D::RefundReceipt
         | D::Payment => (Some(ContactType::Customer), reference(raw, "CustomerRef")),
-        D::PurchaseOrder | D::Bill | D::BillPayment | D::VendorCredit => {
+        D::PurchaseOrder | D::Bill | D::BillPayment | D::VendorCredit | D::CreditCardPayment => {
             (Some(ContactType::Vendor), reference(raw, "VendorRef"))
         }
         D::Purchase => {
@@ -320,7 +330,7 @@ fn contact_of(raw: &Value, doc_type: DocumentType) -> (Option<ContactType>, Opti
                 None => (None, None),
             }
         }
-        D::Deposit | D::JournalEntry => (None, None),
+        D::Deposit | D::JournalEntry | D::Transfer | D::InventoryAdjustment => (None, None),
     }
 }
 
@@ -344,10 +354,11 @@ fn parse_lines(raw: &Value) -> Result<Vec<ParsedLine>, ProjectError> {
             line_no: line_number(line, index),
             item_id: detail.and_then(|d| reference(d, "ItemRef")),
             description: text(line, "Description"),
-            qty: detail
-                .map(|d| optional_decimal(d, "Qty"))
-                .transpose()?
-                .flatten(),
+            // An inventory adjustment line's quantity is its signed `QtyDiff`.
+            qty: match detail {
+                Some(d) => optional_decimal(d, "Qty")?.or(optional_decimal(d, "QtyDiff")?),
+                None => None,
+            },
             unit_price: detail
                 .map(|d| optional_decimal(d, "UnitPrice"))
                 .transpose()?

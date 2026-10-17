@@ -42,6 +42,9 @@ const DOCUMENT_TYPE_ORDER: &[DocumentType] = &[
     DocumentType::Purchase,
     DocumentType::Deposit,
     DocumentType::JournalEntry,
+    DocumentType::Transfer,
+    DocumentType::CreditCardPayment,
+    DocumentType::InventoryAdjustment,
 ];
 
 #[derive(Clone, Debug, Default, PartialEq)]
