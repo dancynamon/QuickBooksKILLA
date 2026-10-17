@@ -178,3 +178,69 @@ fn a_deposit_line_linked_to_a_payment_sweeps_undeposited_funds() {
     assert_eq!(balance_of(&tb, "UDF1"), Money::ZERO);
     assert_eq!(balance_of(&tb, "BANK1"), Money::from_minor(250_000));
 }
+
+#[test]
+fn a_bill_line_for_an_item_named_shipping_is_a_cost_not_a_shipping_charge() {
+    let store = Store::open_in_memory().unwrap();
+    store.register_realm(&realm(), "Aquamentor", now()).unwrap();
+    seed(
+        &store,
+        EntityType::Vendor,
+        "77",
+        json!({ "Id": "77", "DisplayName": "Box Co", "Active": true }),
+    );
+    seed(
+        &store,
+        EntityType::Account,
+        "AP1",
+        json!({ "Id": "AP1", "Name": "Accounts Payable", "AccountType": "Accounts Payable", "Active": true }),
+    );
+    seed(
+        &store,
+        EntityType::Account,
+        "EXP2",
+        json!({ "Id": "EXP2", "Name": "Shipping supplies", "AccountType": "Expense", "Active": true }),
+    );
+    seed(
+        &store,
+        EntityType::Item,
+        "3471",
+        json!({ "Id": "3471", "Name": "SHIPPING SUPPLIES", "Type": "NonInventory", "Active": true,
+                "ExpenseAccountRef": { "value": "EXP2" } }),
+    );
+    seed(
+        &store,
+        EntityType::Bill,
+        "701",
+        json!({
+            "Id": "701", "TxnDate": "2026-08-10", "TotalAmt": 133.66,
+            "VendorRef": { "value": "77" },
+            "APAccountRef": { "value": "AP1" },
+            "Line": [{
+                "Id": "1", "Amount": 133.66,
+                "DetailType": "ItemBasedExpenseLineDetail",
+                "ItemBasedExpenseLineDetail": { "ItemRef": { "value": "3471" }, "Qty": 1, "UnitPrice": 133.66 }
+            }]
+        }),
+    );
+
+    let ledger = Ledger::open_in_memory().unwrap();
+    ledger
+        .create_company("aquamentor", "Aquamentor", Some(realm().as_str()), now())
+        .unwrap();
+    let report = import_replica(
+        &ledger,
+        &store,
+        &realm(),
+        "aquamentor",
+        &ImportOptions::with_d28_fallback(None, None),
+        now(),
+    )
+    .unwrap();
+    assert!(report.rejected.is_empty(), "{:?}", report.rejected);
+
+    let tb = report::trial_balance(&ledger, "aquamentor", NaiveDate::from_ymd_opt(2026, 8, 31).unwrap())
+        .unwrap();
+    assert_eq!(balance_of(&tb, "AP1"), Money::from_minor(-13_366));
+    assert_eq!(balance_of(&tb, "EXP2"), Money::from_minor(13_366));
+}

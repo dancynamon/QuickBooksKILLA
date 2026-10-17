@@ -200,7 +200,20 @@ pub fn translate(
             parsed_line.item_id.clone()
         };
         let item = item_id.as_deref().and_then(|id| ctx.items.get(id));
-        let is_shipping_item = item.is_some_and(|context| {
+        // A shipping charge to a customer, recognised by its item's name. Only
+        // on a document that charges a customer: on a bill or purchase an
+        // item called "shipping supplies" is a cost like any other, and a
+        // shipping line there posts nothing (practice run, 17 Oct 2026: one
+        // bill posted 133.66 short of its total).
+        let charges_customer = matches!(
+            doc_kind,
+            DocKind::Estimate
+                | DocKind::Invoice
+                | DocKind::SalesReceipt
+                | DocKind::CreditMemo
+                | DocKind::RefundReceipt
+        );
+        let is_shipping_item = charges_customer && item.is_some_and(|context| {
             context.item.name.to_lowercase().contains("shipping")
                 || context
                     .item
