@@ -16,6 +16,7 @@ use rust_decimal::Decimal;
 use ledger::accountant::{self, AdjustmentRequest, AuditRow, GlDetail};
 use ledger::authnet::{self, link, AuthnetConfig};
 use ledger::bank::{self, MatchRules, NewStatement};
+use ledger::handoff;
 use ledger::import::ImportOptions;
 use ledger::mfg::build::{self as mfg_build, NewAdjustment, NewBuild};
 use ledger::mfg::landed::{self, RawMaterialReceipt};
@@ -158,6 +159,15 @@ enum Command {
         company: String,
         as_of: NaiveDate,
         dir: PathBuf,
+    },
+    AccountantPack {
+        db: PathBuf,
+        company: String,
+        as_of: NaiveDate,
+        out: PathBuf,
+    },
+    AccountantOpen {
+        pack: PathBuf,
     },
     AdjustPropose {
         db: PathBuf,
@@ -359,6 +369,8 @@ USAGE:
                    [--account NUMBER]
     ledger audit   --db PATH --company ID [--since YYYY-MM-DD]
     ledger export  --db PATH --company ID --as-of YYYY-MM-DD --dir PATH
+    ledger accountant pack --db PATH --company ID --as-of YYYY-MM-DD --out DIR
+    ledger accountant open --pack DIR
     ledger adjust propose --db PATH --company ID --by NAME --desc \"...\"
                    --line ACCOUNT:dr|cr:AMOUNT[:CLASS] [--line ...]
     ledger adjust list    --db PATH --company ID [--state STATE]
@@ -436,6 +448,19 @@ SUBCOMMANDS:
               (§8), flagged entries first, with actor and timestamp.
     export    Write the year end handoff pack (trial balance, P&L, balance
               sheet, GL, close history) as CSV into --dir (§8).
+    accountant pack  W24's handoff to the CPA (docs/ACCOUNTANT.md): writes
+              DIR/<company>-<as-of>/ with a read-only SQLite snapshot of the
+              whole file (book.sqlite), every export CSV rendered from that
+              snapshot plus P&L by class, the audit trail since the last
+              close, the adjustment queue, AR and AP aging by contact and the
+              §9 tax lines for each ended quarter of the year, then
+              manifest.json and SHA256SUMS. Every file is left mode 0444.
+              Refuses if the folder already exists.
+    accountant open  Verify a pack (every SHA-256 against its manifest, the
+              snapshot's trial balance against the manifest's totals), open
+              the snapshot read-only and print a summary. tb, pnl, bs, tax,
+              gl, audit and adjust list accept --db DIR/book.sqlite and open
+              a write-protected file read-only; every write refuses.
     adjust    Manage the adjusting-entry request queue (§8):
               propose  — validate and queue a request (rejected immediately
                          if unbalanced or a line breaks the §3 class rule).
@@ -736,6 +761,7 @@ fn parse(args: &[String]) -> Result<Command, UsageError> {
         "gl" => parse_gl(args),
         "audit" => parse_audit(args),
         "export" => parse_export(args),
+        "accountant" => parse_accountant(args),
         "adjust" => parse_adjust(args),
         "reclass" => parse_reclass(args),
         "bank" => parse_bank(args),
@@ -1539,6 +1565,41 @@ fn parse_export(mut args: Args<'_>) -> Result<Command, UsageError> {
     })
 }
 
+fn parse_accountant(mut args: Args<'_>) -> Result<Command, UsageError> {
+    let Some(sub) = args.next() else {
+        return Err(UsageError::new("accountant requires pack or open"));
+    };
+    let mut db = None;
+    let mut company = None;
+    let mut as_of = None;
+    let mut out = None;
+    let mut pack = None;
+    while let Some(flag) = args.next() {
+        match flag.as_str() {
+            "--db" => db = Some(PathBuf::from(next_value(&mut args, "--db")?)),
+            "--company" => company = Some(next_value(&mut args, "--company")?),
+            "--as-of" => as_of = Some(parse_date(&next_value(&mut args, "--as-of")?, "--as-of")?),
+            "--out" => out = Some(PathBuf::from(next_value(&mut args, "--out")?)),
+            "--pack" => pack = Some(PathBuf::from(next_value(&mut args, "--pack")?)),
+            other => return Err(UsageError::unknown_flag(other)),
+        }
+    }
+    match sub.as_str() {
+        "pack" => Ok(Command::AccountantPack {
+            db: db.ok_or_else(|| UsageError::missing_flag("--db"))?,
+            company: company.ok_or_else(|| UsageError::missing_flag("--company"))?,
+            as_of: as_of.ok_or_else(|| UsageError::missing_flag("--as-of"))?,
+            out: out.ok_or_else(|| UsageError::missing_flag("--out"))?,
+        }),
+        "open" => Ok(Command::AccountantOpen {
+            pack: pack.ok_or_else(|| UsageError::missing_flag("--pack"))?,
+        }),
+        other => Err(UsageError::unknown_subcommand(&format!(
+            "accountant {other}"
+        ))),
+    }
+}
+
 /// `ACCOUNT:dr|cr:AMOUNT[:CLASS]`, one journal line for `adjust propose`.
 fn parse_line_spec(raw: &str, line_no: i64) -> Result<JournalLine, UsageError> {
     let parts: Vec<&str> = raw.split(':').collect();
@@ -1794,6 +1855,13 @@ fn execute(command: Command) -> Result<ExitCode, CommandError> {
             as_of,
             dir,
         } => run_export(&db, &company, as_of, &dir).map(ok),
+        Command::AccountantPack {
+            db,
+            company,
+            as_of,
+            out,
+        } => run_accountant_pack(&db, &company, as_of, &out).map(ok),
+        Command::AccountantOpen { pack } => run_accountant_open(&pack).map(ok),
         Command::AdjustPropose {
             db,
             company,
@@ -2121,7 +2189,7 @@ fn read_aging_csv(path: &std::path::Path) -> Result<Vec<slim::QboAgingRow>, Stri
 // -- tb ---------------------------------------------------------------------
 
 fn run_tb(db: &std::path::Path, company: &str, as_of: NaiveDate) -> Result<(), CommandError> {
-    let ledger = Ledger::open(db).map_err(runtime)?;
+    let ledger = handoff::open_book(db).map_err(runtime)?;
     let tb = report::trial_balance(&ledger, company, as_of).map_err(runtime)?;
     print!("{}", render_trial_balance(&tb, company, as_of));
     Ok(())
@@ -2175,7 +2243,7 @@ fn run_pnl(
     from: NaiveDate,
     to: NaiveDate,
 ) -> Result<(), CommandError> {
-    let ledger = Ledger::open(db).map_err(runtime)?;
+    let ledger = handoff::open_book(db).map_err(runtime)?;
     let pnl = report::profit_and_loss(&ledger, company, from, to).map_err(runtime)?;
     print!("{}", render_pnl(&pnl, company, from, to));
     Ok(())
@@ -2210,7 +2278,7 @@ fn render_pnl(pnl: &Pnl, company: &str, from: NaiveDate, to: NaiveDate) -> Strin
 // -- bs -----------------------------------------------------------------
 
 fn run_bs(db: &std::path::Path, company: &str, as_of: NaiveDate) -> Result<(), CommandError> {
-    let ledger = Ledger::open(db).map_err(runtime)?;
+    let ledger = handoff::open_book(db).map_err(runtime)?;
     let bs = report::balance_sheet(&ledger, company, as_of).map_err(runtime)?;
     print!("{}", render_bs(&bs, company, as_of));
     Ok(())
@@ -2274,7 +2342,7 @@ fn run_tax(
     quarter: u32,
     rate: Decimal,
 ) -> Result<(), CommandError> {
-    let ledger = Ledger::open(db).map_err(runtime)?;
+    let ledger = handoff::open_book(db).map_err(runtime)?;
     let lines =
         report::sales_tax_lines(&ledger, company, (year, quarter), rate).map_err(runtime)?;
     print!("{}", render_tax(&lines, company, year, quarter, rate));
@@ -2431,7 +2499,7 @@ fn run_gl(
     to: NaiveDate,
     account: Option<String>,
 ) -> Result<(), CommandError> {
-    let ledger = Ledger::open(db).map_err(runtime)?;
+    let ledger = handoff::open_book(db).map_err(runtime)?;
     let account_id = account.map(AccountId);
     let gl = accountant::general_ledger(&ledger, company, from, to, account_id.as_ref())
         .map_err(runtime)?;
@@ -2476,7 +2544,7 @@ fn run_audit(
     company: &str,
     since: Option<NaiveDate>,
 ) -> Result<(), CommandError> {
-    let ledger = Ledger::open(db).map_err(runtime)?;
+    let ledger = handoff::open_book(db).map_err(runtime)?;
     let rows = accountant::audit_trail(&ledger, company, since).map_err(runtime)?;
     print!("{}", render_audit(&rows, company));
     Ok(())
@@ -2514,6 +2582,73 @@ fn run_export(
     for path in paths {
         println!("wrote {}", path.display());
     }
+    Ok(())
+}
+
+// -- accountant pack / open ------------------------------------------------
+
+fn run_accountant_pack(
+    db: &std::path::Path,
+    company: &str,
+    as_of: NaiveDate,
+    out: &std::path::Path,
+) -> Result<(), CommandError> {
+    let ledger = Ledger::open(db).map_err(runtime)?;
+    let pack = handoff::write_pack(&ledger, company, as_of, out, Utc::now()).map_err(runtime)?;
+    println!("wrote {}", pack.dir.display());
+    for file in &pack.manifest.files {
+        println!("  {:<28} {}  {}", file.path, &file.sha256[..12], file.bytes);
+    }
+    println!("  {}", handoff::MANIFEST_FILE);
+    println!("  {}", handoff::SUMS_FILE);
+    println!(
+        "trial balance as of {as_of}: debits {} credits {}",
+        pack.manifest.trial_balance.total_debits, pack.manifest.trial_balance.total_credits
+    );
+    Ok(())
+}
+
+fn run_accountant_open(pack: &std::path::Path) -> Result<(), CommandError> {
+    let (manifest, snapshot) = handoff::verify_pack(pack).map_err(runtime)?;
+    let view = accountant::AccountantView::new(&snapshot, manifest.company.clone());
+    let tb = view.trial_balance(manifest.as_of).map_err(runtime)?;
+    let locked = snapshot
+        .locked_through(&manifest.company)
+        .map_err(runtime)?;
+    println!(
+        "ACCOUNTANT PACK   {}   as of {}   generated {}",
+        manifest.company,
+        manifest.as_of,
+        manifest.generated_at.to_rfc3339()
+    );
+    println!(
+        "{} files verified against manifest.json; snapshot opened read-only ({})",
+        manifest.files.len(),
+        if snapshot.is_read_only() {
+            "writes refused"
+        } else {
+            "WRITABLE"
+        },
+    );
+    println!(
+        "books closed through: {}",
+        locked
+            .map(|d| d.to_string())
+            .unwrap_or_else(|| "never".to_string())
+    );
+    println!();
+    print!(
+        "{}",
+        render_trial_balance(&tb, &manifest.company, manifest.as_of)
+    );
+    println!();
+    println!(
+        "every report reads the snapshot directly, e.g.\n  ledger gl --db {} --company {} --from {}-01-01 --to {}",
+        pack.join(handoff::SNAPSHOT_FILE).display(),
+        manifest.company,
+        manifest.as_of.format("%Y"),
+        manifest.as_of,
+    );
     Ok(())
 }
 
@@ -2558,7 +2693,7 @@ fn run_adjust_list(
     company: &str,
     state: Option<&str>,
 ) -> Result<(), CommandError> {
-    let ledger = Ledger::open(db).map_err(runtime)?;
+    let ledger = handoff::open_book(db).map_err(runtime)?;
     let state = state
         .map(|raw| {
             AdjustmentState::parse(raw).ok_or_else(|| runtime(format!("unknown state {raw:?}")))

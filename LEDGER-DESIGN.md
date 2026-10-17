@@ -800,6 +800,14 @@ read-only copy of the SQLite file for 2027.**
 | **Local install, read-only copy** (recommended) | One signed macOS or Windows build, plus a scripted export that produces a dated, read-only snapshot of the ledger and hands it over on request. Days of work, no running cost. | Joel is looking at an as-of copy, not live. Fine for year end work, wrong for a question about last week. Joel needs a machine that will run the build. |
 | Hosted read-only view | A server, an auth story, TLS, a security posture for a machine holding both companies' complete books, and a monthly bill forever. Weeks of work. | It is the first thing in this project that is not local first, and it is a new thing to keep running in the months before a cutover. |
 
+**Proposed, awaiting Joel** (built: `apps/ledger/src/handoff.rs`,
+`docs/ACCOUNTANT.md` "How Joel reaches this"): `ledger accountant pack` writes
+a dated folder holding a `VACUUM INTO` snapshot of the file, mode `0444` and
+opened `SQLITE_OPEN_READ_ONLY` with `PRAGMA query_only`, every export CSV
+rendered from that snapshot, AR/AP aging, the §9 lines per quarter and a
+SHA-256 manifest; `ledger accountant open` verifies it, and every read command
+and the MCP server read it with every write refused.
+
 Recommendation is the local install, because the year end handoff is a
 scheduled event rather than a conversation, and because the cheaper option is
 reversible: a hosted view can be built in 2028 over the same read-only role if
@@ -1171,7 +1179,7 @@ a fact to verify rather than a policy to choose.
 | W21 | 6 | The boundary year, and one opening balance entry for everything before it | Joel | Import scope, §7 start date |
 | W22 | 6 | Which import variances are accepted as explained rather than driven to zero | Joel | Import sign off, cutover bar |
 | W23 | 7 | The must-match-to-the-cent tier list | Joel | Nightly diff, go/no-go |
-| W24 | 8 | Accountant mode delivery: local read-only install (recommended) versus hosted | Joel | Joel's written acceptance, go/no-go |
+| W24 | 8 | Accountant mode delivery: local read-only install (recommended) versus hosted | Joel. **Proposed, awaiting Joel:** local install reading a dated read-only snapshot (`ledger accountant pack` / `open`, `docs/ACCOUNTANT.md`) | Joel's written acceptance, go/no-go |
 | W25 | 8 | Adjustments always through the request queue, corrections as reversal plus replacement | Joel | Accountant mode build |
 | W26 | 9 | NJ only, one rate at 6.625 percent, four lines are the whole filing | Dan | §9, line level tax fields |
 | W27 | 9 | Tolerance on the E minus C variance before filing | Dan | §5 close checklist item 5 |

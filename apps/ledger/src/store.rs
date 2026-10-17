@@ -48,6 +48,13 @@ pub enum LedgerError {
     AlreadyPosted,
     #[error("ledger schema version {found} is newer than this build supports ({supported})")]
     SchemaTooNew { found: i64, supported: i64 },
+    /// [`Ledger::open_read_only`] cannot migrate, so a snapshot made by an
+    /// older build is refused rather than read against the wrong schema.
+    #[error(
+        "read-only ledger is at schema version {found}; this build reads only {supported} \
+         and cannot migrate a read-only copy"
+    )]
+    SchemaMismatch { found: i64, supported: i64 },
     #[error("stored date {0:?} is not a valid date")]
     BadDate(String),
     #[error("stored timestamp {0:?} is not a valid RFC 3339 timestamp")]
@@ -813,6 +820,51 @@ impl Ledger {
         };
         ledger.migrate()?;
         Ok(ledger)
+    }
+
+    /// Opens a ledger file for reading only — the accountant handoff
+    /// snapshot (`crate::handoff`, W24). SQLite itself refuses every write
+    /// twice over: the connection is opened `SQLITE_OPEN_READ_ONLY`, and
+    /// `PRAGMA query_only` is set on top, so even a statement that would
+    /// only touch a temp table is refused. No migration runs (it would be a
+    /// write), so the file must already be at exactly this build's schema.
+    pub fn open_read_only(path: impl AsRef<std::path::Path>) -> Result<Self, LedgerError> {
+        let connection = Connection::open_with_flags(
+            path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        connection.execute_batch("PRAGMA query_only = ON;")?;
+        let found: i64 = connection.query_row(
+            "SELECT COALESCE(MAX(version), 0) FROM schema_version",
+            [],
+            |row| row.get(0),
+        )?;
+        if found != latest_version() {
+            return Err(LedgerError::SchemaMismatch {
+                found,
+                supported: latest_version(),
+            });
+        }
+        Ok(Ledger {
+            connection,
+            replay_marker: AtomicBool::new(false),
+        })
+    }
+
+    /// Whether this ledger was opened by [`Ledger::open_read_only`] (or the
+    /// file is otherwise unwritable). Write paths that want to refuse before
+    /// SQLite does — `crate::mcp`'s write gate — check this.
+    pub fn is_read_only(&self) -> bool {
+        let query_only = self
+            .connection
+            .query_row("PRAGMA query_only", [], |row| row.get::<_, i64>(0))
+            .map(|v| v != 0)
+            .unwrap_or(false);
+        query_only
+            || self
+                .connection
+                .is_readonly(rusqlite::MAIN_DB)
+                .unwrap_or(false)
     }
 
     /// In-memory, for tests. WAL does not apply to a memory database.

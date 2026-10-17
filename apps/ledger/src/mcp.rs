@@ -377,6 +377,14 @@ impl<'a> LedgerToolSet<'a> {
     // -----------------------------------------------------------------------
 
     fn refuse_if_replaying(&self) -> Result<(), ToolError> {
+        // W24: an accountant handoff snapshot is opened read-only; say so
+        // rather than surfacing SQLite's "attempt to write a readonly database".
+        if self.ledger.is_read_only() {
+            return Err(ToolError::new(
+                "this ledger is a read-only accountant snapshot; writes are refused — send \
+                 proposed adjustments to Dan to enter on the live book",
+            ));
+        }
         if self.ledger.is_replaying() {
             return Err(ToolError::new(
                 "the ledger is replaying an import; writes are refused until it finishes",

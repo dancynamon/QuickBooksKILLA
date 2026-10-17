@@ -20,6 +20,8 @@
 //!   replica in, posted entries out
 //! - [`accountant`] — §8: the accountant's read-only role, GL detail and
 //!   exports, and the adjusting-entry request queue
+//! - [`handoff`]  — §8 W24: the accountant handoff pack — a dated, read-only
+//!   SQLite snapshot plus every CSV and a hashed manifest
 //! - [`bank`]     — §10: statement import, matching, proposals, the
 //!   per-statement close
 //! - [`authnet`]  — D15, §1, §10: the Authorize.net settlement import and
@@ -42,6 +44,7 @@ pub mod authnet;
 pub mod bank;
 pub mod books;
 pub mod chart;
+pub mod handoff;
 pub mod import;
 pub mod mcp;
 pub mod mfg;
