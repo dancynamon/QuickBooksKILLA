@@ -417,6 +417,16 @@ pub fn translate(
             class_sources.clear();
         }
     }
+    // A card credit (a refund onto the card) is a `Purchase` with `Credit:
+    // true` and positive line amounts. It runs the other way from a charge:
+    // the card is debited and each line's account credited, so its lines go
+    // in negative and `post` turns them over (practice run, 17 Oct 2026: one
+    // 23,590.98 credit posted as a charge).
+    if doc_kind == DocKind::Purchase && raw.get("Credit").and_then(Value::as_bool) == Some(true) {
+        for line in &mut doc_lines {
+            line.amount = line.amount.checked_neg()?;
+        }
+    }
     let is_voided = entity.is_deleted || json_text(raw, "TxnStatus").as_deref() == Some("Voided");
     let document_id = format!("qbo:{}:{}", entity.entity_type.as_str(), qbo_id);
     let memo = doc
