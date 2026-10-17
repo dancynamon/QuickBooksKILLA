@@ -1079,13 +1079,9 @@ fn plan_open_documents(
         Ok(unapplied)
     };
 
-    let mut payable = docs.payable.clone();
-    for doc in payable
-        .iter_mut()
-        .filter(|d| d.kind == DocKind::BillPayment)
-    {
-        doc.unapplied = unapplied_on(doc)?;
-    }
+    // `books::open_items` itself counts a bill payment's applications to
+    // bills dated after `as_of` as still unapplied on that date.
+    let payable = docs.payable.clone();
 
     let open_ar = books::open_items(&docs.receivable, Book::Receivable, as_of, &names)?;
     let open_ap = books::open_items(&payable, Book::Payable, as_of, &names)?;
