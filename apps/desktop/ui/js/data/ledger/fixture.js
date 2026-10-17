@@ -63,6 +63,7 @@ const ACCOUNTS = [
   { number: "4100", name: "Sales income", classification: "Income", is_contra: false },
   { number: "4300", name: "Shipping income", classification: "Income", is_contra: false },
   { number: "4900", name: "Discounts given", classification: "Income", is_contra: true },
+  { number: "4950", name: "Returns and allowances", classification: "Income", is_contra: true },
   { number: "5000", name: "Cost of goods sold", classification: "COGS", is_contra: false },
   { number: "5300", name: "Parts and labour applied", classification: "COGS", is_contra: true },
   { number: "6100", name: "Shop supplies and packaging", classification: "Expense", is_contra: false },
@@ -181,9 +182,17 @@ function deriveEntryLines(document, items) {
   switch (document.kind) {
     case "Invoice":
     case "SalesReceipt": {
-      const debitAccount = document.kind === "SalesReceipt" ? "1150" : "1200";
+      const debitAccount = document.kind === "SalesReceipt" ? (document.deposit_to ?? "1150") : "1200";
       const lines = [{ account: debitAccount, debit: (lineTotalCents + taxCents) / 100, entity }, ...creditIncomeLines()];
       if (taxCents !== 0) lines.push({ account: "2200", credit: taxCents / 100 });
+      return lines;
+    }
+    case "CreditMemo": {
+      // `post.rs::returns_legs` + `post_credit_memo`: Dr 4950 per line, Dr
+      // 2200 for the tax reversed, Cr 1200 for the whole credit.
+      const lines = document.lines.map((l) => ({ account: "4950", class: lineClass(l), debit: Number(l.amount) }));
+      if (taxCents !== 0) lines.push({ account: "2200", debit: taxCents / 100 });
+      lines.push({ account: "1200", credit: (lineTotalCents + taxCents) / 100, entity });
       return lines;
     }
     case "Payment": {

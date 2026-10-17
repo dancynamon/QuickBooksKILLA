@@ -1,5 +1,6 @@
 // Document entry into the own book (D28, `docs/MCP.md` "create_document"):
-// invoice, estimate, purchase order, bill and receive payment, typed against
+// invoice, sales receipt, estimate, credit memo, receive payment, purchase
+// order, bill and pay bills, typed against
 // the book's own customers, vendors and items. The form sends only what a
 // person typed; the book fills the number, due date, header class and sales
 // tax and posts it, and the screen reports what came back — the number, the
@@ -16,6 +17,7 @@ import { todayIso } from "./shared.js";
 import {
   ENTRY_KINDS, buildDocument, effectiveAmount, lineForItem, previewTotals,
 } from "./entry.js";
+import { sessionHint } from "./masters.js";
 
 const ACTOR = "dan";
 
@@ -29,18 +31,13 @@ function blankLine() {
 function draftFor(kind) {
   if (!drafts.has(kind)) {
     drafts.set(kind, {
-      txnDate: todayIso(), contactId: "", number: "", memo: "", depositTo: "",
+      txnDate: todayIso(), contactId: "", number: "", memo: "",
+      bank: ENTRY_KINDS[kind].bank?.accounts[0].id ?? "",
       lines: [blankLine()], applications: [],
     });
   }
   return drafts.get(kind);
 }
-
-/** The accounts a payment can land in (W8: 1150 unless named). */
-const DEPOSIT_ACCOUNTS = [
-  { id: "", label: "1150 Undeposited funds" },
-  { id: "1100", label: "1100 Checking" },
-];
 
 function safeAmount(line) {
   try {
@@ -53,7 +50,15 @@ function safeAmount(line) {
 export async function renderNewDocument(main, kind) {
   const spec = ENTRY_KINDS[kind];
   const draft = draftFor(kind);
-  const notice = main.dataset.entryNotice ? JSON.parse(main.dataset.entryNotice) : null;
+  if (sessionHint.contactId) {
+    // "Invoice" / "Bill" from the contacts list: start this draft for them.
+    draft.contactId = sessionHint.contactId;
+    sessionHint.contactId = null;
+  }
+  const stored = main.dataset.entryNotice ? JSON.parse(main.dataset.entryNotice) : null;
+  // A notice belongs to the kind that raised it, not whatever kind the URL
+  // shows next.
+  const notice = stored?.kind === kind ? stored : null;
 
   await withState(
     main,
@@ -65,8 +70,8 @@ export async function renderNewDocument(main, kind) {
       ]);
       let open = [];
       if (!spec.lines && draft.contactId) {
-        open = (await ledgerProvider.openDocuments("receivable", draft.txnDate))
-          .filter((d) => d.contact_id === draft.contactId && d.kind === "Invoice");
+        open = (await ledgerProvider.openDocuments(spec.applies.book, draft.txnDate))
+          .filter((d) => d.contact_id === draft.contactId && d.kind === spec.applies.kind);
       }
       return { contacts, items, open };
     },
@@ -106,11 +111,12 @@ export async function renderNewDocument(main, kind) {
               </label>
               ${spec.lines ? `<label class="form-field"><span class="lbl">${spec.numbered ? "Number" : "Vendor's number"}</span>
                 <input class="form-input mono" name="number" value="${esc(draft.number)}" placeholder="${spec.numbered ? "next in sequence" : "from the bill"}">
-              </label>` : `<label class="form-field"><span class="lbl">Deposit to</span>
-                <select class="form-select" name="depositTo">
-                  ${DEPOSIT_ACCOUNTS.map((a) => `<option value="${a.id}" ${a.id === draft.depositTo ? "selected" : ""}>${esc(a.label)}</option>`).join("")}
+              </label>` : ""}
+              ${spec.bank ? `<label class="form-field"><span class="lbl">${esc(spec.bank.label)}</span>
+                <select class="form-select" name="bank">
+                  ${spec.bank.accounts.map((a) => `<option value="${a.id}" ${a.id === draft.bank ? "selected" : ""}>${esc(a.label)}</option>`).join("")}
                 </select>
-              </label>`}
+              </label>` : ""}
               <label class="form-field wide"><span class="lbl">Memo</span>
                 <input class="form-input" name="memo" value="${esc(draft.memo)}">
               </label>
@@ -118,7 +124,7 @@ export async function renderNewDocument(main, kind) {
             ${contact ? `<p class="form-note">${contactNote(contact, spec)}</p>` : ""}
           </div></div>
 
-          ${spec.lines ? linesHtml(kind, spec, draft, items, classHints) : applicationsHtml(draft, open, contact)}
+          ${spec.lines ? linesHtml(kind, spec, draft, items, classHints) : applicationsHtml(spec, draft, open, contact)}
 
           <div class="strip" id="entryTotals">${totalsHtml(kind, spec, draft, contact)}</div>
 
@@ -194,11 +200,12 @@ function defaultClassFor(line, items) {
   return item?.default_class ?? null;
 }
 
-function applicationsHtml(draft, open, contact) {
-  if (!contact) return `<div class="state-note">Choose a customer to see what they owe.</div>`;
+function applicationsHtml(spec, draft, open, contact) {
+  const customer = spec.contact === "customer";
+  if (!contact) return `<div class="state-note">Choose a ${spec.contact} to see ${customer ? "what they owe" : "what is owed to them"}.</div>`;
   if (open.length === 0) return `<div class="state-note">${esc(contact.display_name)} has nothing open as of ${esc(draft.txnDate)}.</div>`;
   return `<div class="grid-wrap"><div class="grid-scroll"><table>
-    <thead><tr><th>Invoice</th><th>Date</th><th>Due</th><th class="r">Total</th><th class="r">Open</th><th class="r">Apply</th></tr></thead>
+    <thead><tr><th>${esc(spec.applies.kind)}</th><th>Date</th><th>Due</th><th class="r">Total</th><th class="r">Open</th><th class="r">Apply</th></tr></thead>
     <tbody>${open.map((d, i) => `<tr>
       <td class="mono">${esc(d.number ?? d.document_id)}</td>
       <td class="dim">${esc(d.txn_date)}</td>
@@ -238,7 +245,7 @@ function wire(main, kind, spec, draft, contact, itemsById) {
     });
   });
 
-  for (const name of ["txnDate", "number", "memo", "depositTo"]) {
+  for (const name of ["txnDate", "number", "memo"]) {
     form.elements[name]?.addEventListener("input", (event) => {
       draft[name] = event.target.value;
     });
@@ -248,8 +255,8 @@ function wire(main, kind, spec, draft, contact, itemsById) {
     rerender();
   });
   if (!spec.lines) form.elements.txnDate.addEventListener("change", rerender);
-  form.elements.depositTo?.addEventListener("change", (event) => {
-    draft.depositTo = event.target.value;
+  form.elements.bank?.addEventListener("change", (event) => {
+    draft.bank = event.target.value;
   });
 
   main.querySelectorAll("[data-line]").forEach((el) => {
@@ -320,16 +327,16 @@ function wire(main, kind, spec, draft, contact, itemsById) {
     try {
       document = buildDocument(kind, draft);
     } catch (err) {
-      main.dataset.entryNotice = JSON.stringify({ ok: false, text: err.message });
+      main.dataset.entryNotice = JSON.stringify({ kind, ok: false, text: err.message });
       renderNewDocument(main, kind);
       return;
     }
     try {
       const result = await ledgerProvider.createDocument(document, ACTOR);
       drafts.delete(kind);
-      main.dataset.entryNotice = JSON.stringify({ ok: true, label: spec.label.toLowerCase(), result });
+      main.dataset.entryNotice = JSON.stringify({ kind, ok: true, label: spec.noun ?? spec.label.toLowerCase(), result });
     } catch (err) {
-      main.dataset.entryNotice = JSON.stringify({ ok: false, text: err.message });
+      main.dataset.entryNotice = JSON.stringify({ kind, ok: false, text: err.message });
     }
     renderNewDocument(main, kind);
   });

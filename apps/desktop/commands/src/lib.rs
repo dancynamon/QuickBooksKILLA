@@ -430,6 +430,66 @@ mod tests {
         let ap = ledger_query(&ledger, COMPANY, "aging",
             json!({ "book": "payable", "as_of": "2026-10-15" })).unwrap();
         assert_eq!(ap["totals"]["current"], json!("84.10"));
+
+        ledger_query(&ledger, COMPANY, "create_document", json!({ "actor": "dan", "document": {
+            "kind": "BillPayment", "txn_date": "2026-10-12",
+            "contact": { "kind": "Vendor", "id": "vend-spectra" },
+            "applications": [{ "target_document_id": bill["document_id"],
+                               "target_kind": "Bill", "amount": "84.10" }],
+            "pay_from": "1100"
+        }}))
+        .unwrap();
+        let ap = ledger_query(&ledger, COMPANY, "aging",
+            json!({ "book": "payable", "as_of": "2026-10-15" })).unwrap();
+        assert_eq!(ap["totals"]["total"], json!("0.00"));
+
+        let receipt = ledger_query(&ledger, COMPANY, "create_document", json!({ "actor": "dan", "document": {
+            "kind": "SalesReceipt", "txn_date": "2026-10-12",
+            "contact": { "kind": "Customer", "id": "cust-blue-harbor" },
+            "lines": [{ "kind": "Item", "amount": "19.95", "is_taxable": true, "item_id": "rt-50-red", "qty": "1" }],
+            "deposit_to": "1100"
+        }}))
+        .unwrap();
+        assert_eq!(receipt["total"], json!("21.27"));
+
+        let credit = ledger_query(&ledger, COMPANY, "create_document", json!({ "actor": "dan", "document": {
+            "kind": "CreditMemo", "txn_date": "2026-10-13",
+            "contact": { "kind": "Customer", "id": "cust-blue-harbor" },
+            "lines": [{ "kind": "Item", "amount": "19.95", "is_taxable": true, "item_id": "rt-50-red", "qty": "1" }]
+        }}))
+        .unwrap();
+        assert_eq!(credit["number"], json!("1001"));
+        let open = ledger_query(&ledger, COMPANY, "open_documents",
+            json!({ "book": "receivable", "as_of": "2026-10-15" })).unwrap();
+        assert_eq!(open[0]["open"], json!("-21.27"), "an unapplied credit memo sits open as a negative");
+    }
+
+    /// The editors' `contact` and `item` exactly as
+    /// `js/screens/ledger/masterData.js` builds them: every optional field
+    /// present, blanks as `null`.
+    #[test]
+    fn ledger_query_upserts_take_what_the_editors_send() {
+        let ledger = seeded_ledger();
+        let contact = ledger_query(&ledger, COMPANY, "upsert_contact", json!({ "contact": {
+            "contact_id": "cust-lakeside-y", "kind": "Customer", "display_name": "Lakeside Y",
+            "company_name": null, "email": null, "phone": null, "bill_address": null,
+            "ship_address": null, "terms_days": 15, "is_tax_exempt": false,
+            "default_class": null, "is_active": true, "source_ref": null
+        }}))
+        .unwrap();
+        assert_eq!(contact["contact"]["kind"], json!("customer"));
+        assert_eq!(contact["contact"]["terms_days"], json!(15));
+
+        let item = ledger_query(&ledger, COMPANY, "upsert_item", json!({ "item": {
+            "item_id": "item-eva-2", "sku": "EVA-2", "name": "EVA sheet", "description": null,
+            "item_type": "inventory", "income_account": "4100", "expense_account": "5000",
+            "asset_account": "1300", "default_class": null, "sales_price": "80.00",
+            "purchase_cost": null, "unit_cost": null, "is_taxable": true, "is_active": true,
+            "source_ref": null
+        }}))
+        .unwrap();
+        assert_eq!(item["item"]["sales_price"], json!("80.00"));
+        assert_eq!(item["item"]["asset_account"], json!("1300"));
     }
 
     #[test]

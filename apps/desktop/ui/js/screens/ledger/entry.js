@@ -9,19 +9,33 @@
 // own `total` and `tax`, as `create_document` returns them, are the ones the
 // screen reports once it is saved.
 
-/** The kinds D28 lists for standalone entry, in the order the screen offers
- * them. `contact` is which master list the counterparty comes from; `lines`
- * whether it has item/account lines (a payment has applications instead);
- * `taxed` whether the book adds NJ sales tax (`books.rs::is_taxed_sale`);
- * `numbered` whether the book allocates the number (`books.rs::is_numbered`
- * — a bill carries the vendor's own); `accountLines` whether a line may name
- * an account instead of an item. */
+/** The kinds the screen enters, in the order it offers them. `contact` is
+ * which master list the counterparty comes from; `lines` whether it has
+ * item/account lines (a payment has applications instead); `taxed` whether
+ * the book adds NJ sales tax (`books.rs::is_taxed_sale`); `numbered` whether
+ * the book allocates the number (`books.rs::is_numbered` — a bill carries
+ * the vendor's own); `accountLines` whether a line may name an account
+ * instead of an item; `bank` the money account the document names
+ * (`deposit_to` in, `pay_from` out) and the accounts offered for it, the
+ * first being what the book uses when none is named; `applies` the book a
+ * payment settles and the kind it applies to. */
+const DEPOSIT_TO = { field: "deposit_to", label: "Deposit to", accounts: [
+  { id: "", label: "1150 Undeposited funds" },
+  { id: "1100", label: "1100 Checking" },
+] };
+const PAY_FROM = { field: "pay_from", label: "Pay from", required: true, accounts: [
+  { id: "1100", label: "1100 Checking" },
+] };
+
 export const ENTRY_KINDS = Object.freeze({
   Invoice: { label: "Invoice", contact: "customer", lines: true, taxed: true, numbered: true, accountLines: false, posts: true },
+  SalesReceipt: { label: "Sales receipt", contact: "customer", lines: true, taxed: true, numbered: true, accountLines: false, posts: true, bank: DEPOSIT_TO },
   Estimate: { label: "Estimate", contact: "customer", lines: true, taxed: true, numbered: true, accountLines: false, posts: false },
+  CreditMemo: { label: "Credit memo", contact: "customer", lines: true, taxed: true, numbered: true, accountLines: false, posts: true },
+  Payment: { label: "Receive payment", noun: "payment", contact: "customer", lines: false, taxed: false, numbered: false, accountLines: false, posts: true, bank: DEPOSIT_TO, applies: { book: "receivable", kind: "Invoice" } },
   PurchaseOrder: { label: "Purchase order", contact: "vendor", lines: true, taxed: false, numbered: true, accountLines: false, posts: false },
   Bill: { label: "Bill", contact: "vendor", lines: true, taxed: false, numbered: false, accountLines: true, posts: true },
-  Payment: { label: "Receive payment", contact: "customer", lines: false, taxed: false, numbered: false, accountLines: false, posts: true },
+  BillPayment: { label: "Pay bills", noun: "bill payment", contact: "vendor", lines: false, taxed: false, numbered: false, accountLines: false, posts: true, bank: PAY_FROM, applies: { book: "payable", kind: "Bill" } },
 });
 
 export function isEntryKind(kind) {
@@ -135,7 +149,7 @@ const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
  *   txnDate: string, contactId: string, number?: string, memo?: string,
  *   lines?: { itemId?: string, account?: string, description?: string, qty?: string, rate?: string, amount?: string, cls?: string, taxable?: boolean }[],
  *   applications?: { documentId: string, kind?: string, amount?: string }[],
- *   depositTo?: string,
+ *   bank?: string,
  * }} draft
  */
 export function buildDocument(kind, draft) {
@@ -195,11 +209,15 @@ export function buildDocument(kind, draft) {
       }
       if (cents === 0) continue;
       if (cents < 0) throw new Error(`${a.number ?? a.documentId}: a payment applies a positive amount`);
-      applications.push({ target_document_id: a.documentId, target_kind: a.kind ?? "Invoice", amount: fromCents(cents) });
+      applications.push({ target_document_id: a.documentId, target_kind: a.kind ?? spec.applies.kind, amount: fromCents(cents) });
     }
-    if (applications.length === 0) throw new Error("apply the payment to at least one open invoice");
+    if (applications.length === 0) throw new Error(`apply the payment to at least one open ${spec.applies.kind === "Bill" ? "bill" : "invoice"}`);
     document.applications = applications;
-    if (draft.depositTo) document.deposit_to = draft.depositTo;
+  }
+  if (spec.bank) {
+    const account = draft.bank ?? spec.bank.accounts[0].id;
+    if (account) document[spec.bank.field] = account;
+    else if (spec.bank.required) throw new Error(`choose an account to ${spec.bank.label.toLowerCase()}`);
   }
   return document;
 }

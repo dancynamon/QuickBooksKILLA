@@ -87,23 +87,33 @@ rest, always with `locked_through` alongside).
 
 ## The ledger screens
 
-Twelve screens, one rail section ("Ledger"), reached from the rail, the
+Fifteen screens, one rail section ("Ledger"), reached from the rail, the
 command palette, and nowhere else — `LEDGER-DESIGN.md` §4: there is **no
 "new journal entry" button anywhere** in this UI. Every entry in the book
 is generated from a document or an accountant's decided adjustment, never
 hand-posted from a form.
 
-- **New document** (`#ledger-new/Invoice`, `/Estimate`, `/PurchaseOrder`,
-  `/Bill`, `/Payment`) — D28's standalone entry path over
+- **New document** (`#ledger-new/Invoice`, `/SalesReceipt`, `/Estimate`,
+  `/CreditMemo`, `/Payment`, `/PurchaseOrder`, `/Bill`, `/BillPayment`) —
+  D28's standalone entry path over
   `create_document`, against the book's own customers, vendors and items.
   The form sends only what was typed; the book fills the number, due date,
   header class and NJ sales tax and posts it, and the screen reports the
   number, total, tax, entry and `locked_through` that came back. A payment
-  lists the customer's open invoices to apply against. Keyboard-first:
+  lists the customer's open invoices to apply against, a bill payment the
+  vendor's open bills; a sales receipt or payment names where the money
+  lands (1150 unless chosen), a bill payment the account it leaves. Keyboard-first:
   Enter in a line's last cell adds a line, ⌘/Ctrl-Enter saves; a draft
   survives switching kinds until it is saved. The pure half (line
   arithmetic, totals preview, draft → `document`) is
   `js/screens/ledger/entry.js`.
+- **Customers / Vendors** (`#ledger-contacts/customer`, `/vendor`) and
+  **Products and services** (`#ledger-items`) — the book's master data
+  over `list_contacts`/`list_items`/`upsert_contact`/`upsert_item`: search,
+  a new or edit form above the list, what each contact owes or is owed,
+  and a one-click invoice or bill for them. Nothing is deleted; a record
+  is made inactive. The pure half (ids, field mapping) is
+  `js/screens/ledger/masterData.js`.
 - **Receivables / Payables** (`#ledger-open/receivable`, `/payable`) — the
   own book's aging by customer or vendor and its open documents as of a
   date, with a check that the aging ties to 1200 or 2000 on the trial
@@ -189,9 +199,10 @@ different Node version — the directory form may simply work there.)
   twenty-four tools.
 - `test/ledger-entry.test.js` — the entry form's pure half: quantity ×
   rate, the tax preview's half-to-even rounding and exemption, the exact
-  `document` each kind sends, and the drafts it refuses. The same payloads
-  go through the real `create_document` in
-  `commands/src/lib.rs::ledger_query_create_document_takes_what_the_entry_screen_sends`.
+  `document` each kind sends, and the drafts it refuses; and the editors'
+  `contact`/`item` mapping. The same payloads go through the real ledger in
+  `commands/src/lib.rs::ledger_query_create_document_takes_what_the_entry_screen_sends`
+  and `ledger_query_upserts_take_what_the_editors_send`.
 - `test/ledger-screens.test.js` — pure-function tests for
   `js/screens/ledger/shared.js`'s `st50Rows` (line 1 = A, line 2 = D, line
   3 = C) and `reconciliationDifference` (the bank screen's live

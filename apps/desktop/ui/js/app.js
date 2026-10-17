@@ -28,6 +28,7 @@ import { renderPeriodClose } from "./screens/ledger/periodClose.js";
 import { renderNewDocument } from "./screens/ledger/newDocument.js";
 import { renderOpenItems } from "./screens/ledger/openItems.js";
 import { isEntryKind } from "./screens/ledger/entry.js";
+import { renderContacts, renderItems } from "./screens/ledger/masters.js";
 
 const main = document.getElementById("main");
 
@@ -65,6 +66,9 @@ const LEDGER_NAV = [
   { view: "ledger-new", arg: "Invoice", label: "New document", glyph: "+" },
   { view: "ledger-open", arg: "receivable", label: "Receivables", glyph: "▨" },
   { view: "ledger-open", arg: "payable", label: "Payables", glyph: "▨" },
+  { view: "ledger-contacts", arg: "customer", label: "Customers", glyph: "◉" },
+  { view: "ledger-contacts", arg: "vendor", label: "Vendors", glyph: "◎" },
+  { view: "ledger-items", label: "Products and services", glyph: "▣" },
   { view: "ledger-tb", label: "Trial balance", glyph: "≡" },
   { view: "ledger-pnl", label: "Profit and loss", glyph: "▤" },
   { view: "ledger-bs", label: "Balance sheet", glyph: "▦" },
@@ -228,6 +232,10 @@ async function renderRoute(route) {
     await renderBank(main);
   } else if (route.view === "ledger-new") {
     await renderNewDocument(main, isEntryKind(route.arg) ? route.arg : "Invoice");
+  } else if (route.view === "ledger-contacts") {
+    await renderContacts(main, route.arg === "vendor" ? "vendor" : "customer");
+  } else if (route.view === "ledger-items") {
+    await renderItems(main);
   } else if (route.view === "ledger-open") {
     await renderOpenItems(main, route.arg === "payable" ? "payable" : "receivable");
   } else if (route.view === "ledger-close") {

@@ -243,9 +243,10 @@ five into the own book through `ledger-mcp`'s `create_document`, against the
 book's own customers, vendors and items; *Receivables* and *Payables* show the
 own aging, checked against 1200 and 2000. Proven against the fixture book and,
 for the exact payloads the form sends, against the real `create_document`
-(`apps/desktop/README.md`). Not yet: editing or voiding a saved document,
-credit memos, sales receipts, bill payments, and a contact/item editor screen
-(the `upsert_*` tools exist).
+(`apps/desktop/README.md`). Sales receipts, credit memos and bill payments
+too, and customer, vendor and item editors over the `upsert_*` tools. Not yet:
+editing or voiding a saved document, applying a credit memo to an invoice,
+and refund receipts.
 
 The change from the first draft: **a save commits to your own document store
 and posts to your own ledger**, then enqueues the outbox record that mirrors it
