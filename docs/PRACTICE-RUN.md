@@ -2,8 +2,12 @@
 
 `ROADMAP.md` §E: a run on 2026 data whose only job is to surface posting-policy
 differences while there is time to decide them with Joel before the real Q1
-2027 run. First run: 17 October 2026. Decisions it produced: `DECISIONS.md`
-D32 (what it found, four bug fixes) and D33–D36 (questions for Dan and Joel).
+2027 run. Two runs on 17 October 2026: the first replayed the window into a
+fresh book (below, "First run"); the second, after D37 and the slim import
+merged, ran the real D29 shape: `ledger import-slim` at 6/30, then `ledger
+nightly --from 2026-07-01` ("Second run"). Decisions: `DECISIONS.md` D32
+(what both found, ten bug fixes) and D33–D36, D40 (questions for Dan and
+Joel).
 
 ## What it mimics
 
@@ -82,7 +86,7 @@ keychain prompt (D26).
 
 A Q1 night will be the same order of size: the replay is not the constraint.
 
-## Numbers
+## First run
 
 ### The full-gate run (what Q1 2027 would look like today)
 
@@ -145,21 +149,102 @@ accounts and inventory together net to 596.00, the "Purchasing" item of D34.
 | Deposit sweeps undeposited funds | 1150: 54,472.68 to 0.00; checking by the same |
 | Shipping-item rule off bills | AP: 133.66 to 0.00 |
 
-### AR and AP aging
+### AR and AP aging, first run
 
 QBO's aging totals: AR 89,996.20, 94,703.49, 59,172.98, 86,283.51; AP
 46,786.45, 8,469.92, 35,585.33, 30,867.79 (7/31 → 10/16). The QBO AR totals
-equal its AR account on the trial balance.
+equal its AR account on the trial balance. The first run's own aging could
+not be compared: it carried no documents open at 6/30, and its applications
+targeted the bare QBO id. Both are fixed by the slim import; see the second
+run.
 
-The ledger's own aging (`books::aging`) does not tie and cannot yet: it sees
-none of the payment applications, because they target the bare QBO id and
-the documents are keyed `qbo:<Type>:<id>` (D32). Its 10/16 AR is 249,691.17
-against 86,283.51; the 176,411.08 of window payment applications it missed
-accounts for most of that, the rest is invoices open at 6/30 that the
-practice run does not carry (the slim import's open-item load does). The
-balances themselves tie: with classes out of the way the trial balance's
-AR and AP equal QBO's on every date. Re-run the aging after the slim-import
-branch merges.
+## Second run: the D29 shape, after D37
+
+### Commands
+
+```
+# D37's entity types were not in the replica yet (the live daemon is the
+# 14 Oct binary). Read read-only from QBO (the QuickBooks MCP server's
+# run_query: Transfer, CreditCardPayment, InventoryAdjustment dated 7/1 on),
+# saved as JSON, loaded into a copy of the morning's replica backup:
+cp "$S/replica.db" "$S/replica-d37.db"
+target/release/examples/load_replica_entities --replica "$S/replica-d37.db" \
+    --realm "$REALM" --file "$S/d37-entities.json"
+
+# QBO's aging as of 6/30 and each diff date, in qbo-local's aging CSV shape
+# (entity_id,name,current,1-30,31-60,61-90,over_90,total), from the MCP's
+# report_aged_receivables / report_aged_payables with report_date.
+
+ledger init --db "$S/ledger.db" --company aquamentor --name "Aquamentor, Inc." --realm "$REALM"
+ledger import-slim --db "$S/ledger.db" --company aquamentor \
+    --replica "$S/replica-d37.db" --realm "$REALM" --as-of 2026-06-30 \
+    --qbo-csv "$S/qbo/tb-2026-06-30.csv" \
+    --qbo-ar "$S/aging/ar-2026-06-30.csv" --qbo-ap "$S/aging/ap-2026-06-30.csv"
+for d in 2026-07-31 2026-08-31 2026-09-30 2026-10-16; do
+  ledger nightly --db "$S/ledger.db" --company aquamentor \
+      --replica "$S/replica-d37.db" --realm "$REALM" \
+      --qbo-csv "$S/qbo/tb-$d.csv" --out "$S/nightly" --from 2026-07-01 --as-of $d
+  target/release/examples/aging_csv --db "$S/ledger.db" --company aquamentor \
+      --as-of $d --out "$S/ledger-aging"
+done
+```
+
+`ledger nightly` applies D28's fallback class to anything dated before
+1/1/27, so in this window it is the first run's diagnostic mode: class is
+out of the way. The full-gate numbers above still stand for what an
+unclassed Q1 2027 would look like.
+
+Timings: slim import 5 s (10,128 customers, 1,280 vendors, 3,474 items, 585
+open documents); each nightly 1–2 s.
+
+### The slim import at 6/30
+
+On the merged code its checks failed: AR open items 623.02 over 1200, AP
+open items 2,555.19 over 2000, two customers and eight vendors off QBO's
+aging. Each difference traced to a QBO shape the import did not read (D32
+items 5–8). After the fixes every check passes: no 3950 plug, open items
+tie to 1200 and 2000, AR and AP aging match QBO's by contact and by bucket,
+and the trial balance matches on every must-tier line.
+
+### Trial balance, nightly
+
+0 rejected on every night. Must tier (ledger − QBO):
+
+| | 7/31 | 8/31 | 9/30 | 10/16 | Cause |
+|---|---:|---:|---:|---:|---|
+| Checking (1100) | 0.00 | 0.00 | 0.00 | 0.00 | D37 closed it (was 133,702.37 at 10/16) |
+| AR (1200+2300) | 0.00 | 0.00 | 0.00 | 0.00 | |
+| AP (2000+2050) | 0.00 | 0.00 | 0.00 | 0.00 | |
+| Sales tax payable (2200) | −4.64 | −4.64 | −150.32 | −405.32 | mapping (D35) |
+| Total income | −1,835.95 | −5,605.68 | −7,909.30 | −10,322.98 | items pointed at non-income accounts (D34) |
+| Total equity | 0.00 | 0.00 | 0.00 | 0.00 | D37 closed it (was −1,000.00) |
+
+Per account, every bank, card, loan and distribution account now ties to the
+cent on every date. The may tier and the income split are as in the first
+run's diagnostic table (D35, D36). The one valued inventory adjustment now
+posts; it lands in 5150 where QBO has its own "Inventory Shrinkage" (5151
+in the ledger), 100.00 each way (D35).
+
+### AR and AP aging by contact
+
+| | 7/31 | 8/31 | 9/30 | 10/16 |
+|---|---:|---:|---:|---:|
+| QBO AP aging | 46,786.45 | 8,469.92 | 35,585.33 | 30,867.79 |
+| Ledger AP aging | 46,786.45 | 8,469.92 | 35,585.33 | 30,867.79 |
+| Vendors with a balance / differing | 32 / 0 | 26 / 0 | 30 / 0 | 28 / 0 |
+| QBO AR aging | 89,996.20 | 94,703.49 | 59,172.98 | 86,283.51 |
+| Ledger AR aging | 94,838.51 | 99,545.80 | 64,390.80 | 91,201.41 |
+| Customers with a balance / differing | 68 / 12 | 69 / 12 | 74 / 15 | 78 / 14 |
+| Difference | 4,842.31 | 4,842.31 | 5,217.82 | 4,917.90 |
+
+**AP matches QBO for every vendor on every date.** Before D32 item 10 it was
+off 631.51 (one vendor) at 7/31 and 781.51 (two) at 8/31.
+
+**AR differs only by customer credits** the ledger holds in 2300 under W8,
+which its aging does not show (D40). That is 4,771.39 of payments unapplied
+at 6/30 (the slim import's reclass), the window's own unapplied payments,
+and at 9/30 one payment dated before its invoice (299.92). AR + 2300 ties
+to QBO's AR on every date.
 
 ## What is left to decide
 
@@ -169,20 +254,21 @@ branch merges.
 | D34 | Joel | Shipping charged (W6), Amazon-collected tax, discount items: follow the item's account or not |
 | D35 | Joel | An explicit, signed-off QBO→§2 mapping table instead of the importer's guess |
 | D36 | Joel | Inventory relief account and cost: explained may-differ under W10/W12/W22, or match QBO's split |
+| D40 | Dan, Joel | Should the own AR aging show unapplied customer money as a credit, as QBO does |
 
 ## What is left to build (not policy)
 
-- qbo-local mirrors `Transfer`, `CreditCardPayment` and `InventoryAdjustment`,
-  and the ledger posts them. Until then checking and the cards are red every
-  night.
-- The ledger's aging joins applications to documents (on the slim-import
-  branch).
-- Point `ledger nightly` at a window (`--from 2027-01-01`), as the slim-import
-  hand-over already notes.
+- A live `qbo-local` sync of D37's three types (Dan, at the keychain prompt).
+  This run loaded them by hand into a scratch copy; the live replica still
+  lacks them.
+- Valuing inventory adjustments. 27 of the 28 in the window were for items
+  with no purchase cost and posted nothing; QBO's shrinkage account moved by
+  only the one valued adjustment's 100.00, so it ties, but the ledger is
+  using the item's purchase cost where QBO uses its own (D37 open item 2).
 
 ## Running it again
 
-The same commands, a fresh `--db` and `--out`, and the date range moved
+The second run's commands, a fresh `--db` and `--out`, and the dates moved
 forward. A run that finds nothing new is the goal: every variance in it is
 either a D-entry Joel has accepted or a bug with a test. The scratch
 directory of the 17 Oct run is kept; nothing in it is tracked, because it

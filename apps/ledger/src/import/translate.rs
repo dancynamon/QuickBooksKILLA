@@ -428,9 +428,18 @@ pub fn translate(
         // payment that also used a credit) is its total less them.
         None if doc_kind == DocKind::BillPayment => {
             match json_money(raw, "TotalAmt", &qbo_id)? {
-                Some(total) => total.checked_sub(Money::checked_sum(
-                    applications.iter().map(|application| application.amount),
-                )?)?,
+                Some(total) => {
+                    let remainder = total.checked_sub(Money::checked_sum(
+                        applications.iter().map(|application| application.amount),
+                    )?)?;
+                    // Applications beyond the total are QBO's to explain, not
+                    // a negative prepayment.
+                    if remainder.is_negative() {
+                        Money::ZERO
+                    } else {
+                        remainder
+                    }
+                }
                 None => Money::ZERO,
             }
         }
@@ -971,7 +980,9 @@ fn application_is_credit(
         // A deposit that credited AR for this customer, now applied to the
         // customer's invoices inside a $0 payment.
         (DocKind::Payment, DocKind::CreditMemo | DocKind::Deposit) => true,
-        (DocKind::BillPayment, DocKind::VendorCredit) => true,
+        // A purchase coded to AP with the vendor as payee is a vendor credit
+        // in QBO's aging (practice run, 17 Oct 2026).
+        (DocKind::BillPayment, DocKind::VendorCredit | DocKind::Purchase) => true,
         (DocKind::Payment, DocKind::JournalEntry) => journal_side() == Some(Side::Credit),
         (DocKind::BillPayment, DocKind::JournalEntry) => journal_side() == Some(Side::Debit),
         _ => false,

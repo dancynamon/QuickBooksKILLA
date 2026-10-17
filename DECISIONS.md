@@ -1018,6 +1018,52 @@ rejected, every one for no class**; D33. Code comments in
 `import/translate.rs` cite "D29" and "D30" for decisions recorded under
 other numbers; they predate this run and are left for whoever next edits it.
 
+**Second run, same day, after D37 and the slim import merged.** The D29
+shape for real: `ledger import-slim` as of 6/30/26 (masters, one opening
+entry, the documents open on that date), then `ledger nightly --from
+2026-07-01` for each diff date. D37's three entity types were read from QBO
+read-only and loaded into a scratch replica copy (28 inventory adjustments,
+9 transfers, 8 credit-card payments), because a rebuilt `qbo-local` needs a
+person at the keychain prompt. `SELECT * FROM InventoryAdjustment` works,
+which settles D37's open item 1.
+
+The slim import's own checks failed at 6/30 (AR open items 623.02 over
+1200, AP 2,555.19 over 2000, eleven contacts off QBO's aging). Six more bugs
+fixed, each with a test:
+
+5. *A deposit line's customer or vendor was never read.* QBO writes the
+   type as `CUSTOMER`/`VENDOR` on deposit lines (all 1,303 in the replica)
+   and `Customer` everywhere else; translate and slim matched only the
+   latter. One customer: 1,160.27.
+6. *A `BillPayment` has no `UnappliedAmt`.* What its lines do not apply is
+   now its unapplied remainder. One with no lines posted nothing: 154.40.
+7. *A purchase coded to AP is a vendor credit in QBO.* Card or cash
+   purchases whose line is coded to Accounts Payable with the vendor as
+   payee; the slim import now ages them like JE and deposit lines. Four
+   vendors, 1,827.32.
+8. *Inside a $0 bill payment, a purchase leg is a credit,* like a vendor
+   credit's. Two vendors, offsets back to a 2022 year-end entry.
+9. *An inventory adjustment posted only to 1300/1310.* The import gives a
+   second QBO inventory account 1311, where sales already relieve the same
+   items. The one valued adjustment (QBO's 100.00 shrinkage) was rejected.
+10. *A bill payment dated before its bill* aged as applied. QBO ages it as
+    a vendor credit until the bill exists: 631.51 at 7/31 and 8/31, 150.00
+    at 8/31.
+
+After them: every slim check passes at 6/30. The nightly posts every
+document in the window (0 rejected, with D28's fallback class covering the
+window as `ledger nightly` does before 2027). D37 closes checking, both
+cards, the loans, the transfer to distributions and the shrinkage: those
+accounts now tie to the cent on all four dates. The must tier is down to
+total income (D34, −10,322.98 at 10/16) and sales tax (D35, −405.32),
+unchanged. **AP aging matches QBO's for every vendor on all four dates.**
+AR aging matches for every customer except customer credits the ledger
+holds in 2300 and its aging leaves out (D40): 4,842.31 at 7/31 and 8/31,
+5,217.82 at 9/30, 4,917.90 at 10/16. AR + 2300 ties to QBO's AR on every
+date. One more mapping collision for D35: 5150 holds QBO's "Inventory
+Adjustment Expense", so QBO's "Inventory Shrinkage" lands in 5151 (100.00
+each way).
+
 ## D33 — Class in Q1 2027: QBO lines carry none
 
 17 Oct 2026. **Question for Dan and Joel.** D29 holds Q1 2027 to the full
@@ -1272,3 +1318,38 @@ report-viewer rendering of the page, it was not downloaded for this work,
 and a parser written against a guessed layout would quietly misread it. The
 flat file is explicit, can be checked by eye, and the net-pay check guards
 it.
+
+## D40 — The ledger's AR aging leaves out customer credits held in 2300
+
+17 Oct 2026, practice run (D32, second run). **Question for Dan and Joel.**
+W8 parks a customer's unapplied money in 2300 rather than AR, and the
+ledger's AR aging (`books::aging`, the desktop's aging screen, the MCP tool)
+reads open invoices and credit memos only, so it ties to 1200 and shows no
+customer credit. QBO's aging nets each customer's unapplied payments
+against what they owe. On the practice window that is the whole AR aging
+difference:
+
+| | 7/31 | 8/31 | 9/30 | 10/16 |
+|---|---:|---:|---:|---:|
+| Ledger AR aging | 94,838.51 | 99,545.80 | 64,390.80 | 91,201.41 |
+| QBO AR aging | 89,996.20 | 94,703.49 | 59,172.98 | 86,283.51 |
+| Difference | 4,842.31 | 4,842.31 | 5,217.82 | 4,917.90 |
+| Ledger 2300 | −4,842.31 | −4,842.31 | −4,917.90 | −4,917.90 |
+
+Most of it, 4,771.39, is payments that were unapplied at 6/30. The slim
+import carries those across as open payment documents and reclasses the
+amount to 2300 in one line with no customer on it. One more is a payment
+dated before the invoice it pays (299.92 at 9/30 only). QBO ages that as a
+credit until the invoice exists. AP already does the same (D32 item 10).
+Examples: QBO payments 91008 and 91296 (one customer, 2,000.00 and
+1,380.06 unapplied since January and February 2026).
+
+The question: should the own AR aging show a customer's unapplied money as a
+credit on that customer's row, the way QBO does and the way the slim
+import's own aging check already adds it? The recommendation is yes, for
+collections: chasing a customer who has 2,000.00 sitting unapplied is the
+mistake the aging exists to prevent. The ledger would keep the money in
+2300 (W8). The aging would then tie to 1200 + 2300, which is §7's AR test
+already. If no, the parallel run's aging check compares against QBO's
+aging less unapplied payments, and the difference is explained by W8.
+

@@ -933,13 +933,23 @@ fn contact_names(ledger: &Ledger, company: &str) -> Result<HashMap<String, Strin
 
 /// Every document with something still open on `book` as of `as_of`, oldest
 /// first. See [`open_items`] for what "open" means.
+/// Later than any document date, and still a four-digit year, so it compares
+/// correctly against `txn_date` as text.
+const END_OF_TIME: NaiveDate = match NaiveDate::from_ymd_opt(9999, 12, 31) {
+    Some(date) => date,
+    None => panic!("9999-12-31 is a date"),
+};
+
 pub fn open_documents(
     ledger: &Ledger,
     company: &str,
     book: Book,
     as_of: NaiveDate,
 ) -> Result<Vec<OpenDocument>, BooksError> {
-    let docs = latest_documents(ledger, company, book.doc_types(), as_of)?;
+    // Every document, not only those dated by `as_of`: `open_items` keeps to
+    // the window itself, and needs the later ones' dates to tell a payment
+    // applied to a bill that does not exist yet on `as_of`.
+    let docs = latest_documents(ledger, company, book.doc_types(), END_OF_TIME)?;
     let names = contact_names(ledger, company)?;
     Ok(open_items(&docs, book, as_of, &names)?)
 }
@@ -971,6 +981,10 @@ pub fn open_items(
     names: &HashMap<String, String>,
 ) -> Result<Vec<OpenDocument>, ledger_core::MoneyError> {
     let in_window = |doc: &&LedgerDocument| doc.txn_date <= as_of && !doc.is_voided;
+    let dates: HashMap<&str, NaiveDate> = docs
+        .iter()
+        .map(|doc| (doc.document_id.as_str(), doc.txn_date))
+        .collect();
     // Applications from settling documents, by target, signed as recorded.
     let mut paid: HashMap<&str, Money> = HashMap::new();
     // A credit's own applications, by the credit itself.
@@ -1013,8 +1027,21 @@ pub fn open_items(
             .unwrap_or_else(|| contact_id.clone());
 
         if book == Book::Payable && doc.kind == DocKind::BillPayment {
-            if !doc.unapplied.is_zero() {
-                let prepaid = doc.unapplied.checked_neg()?;
+            // A payment applied to a bill dated after `as_of` was not applied
+            // to anything yet on that date: QBO ages it as a vendor credit
+            // until the bill exists (practice run, 17 Oct 2026: a bill
+            // payment dated 7/16 against a bill dated 9/2).
+            let mut not_yet_applied = doc.unapplied;
+            for application in doc.applications.iter().filter(moves_money) {
+                if dates
+                    .get(application.target_document_id.as_str())
+                    .is_some_and(|date| *date > as_of)
+                {
+                    not_yet_applied = not_yet_applied.checked_add(application.amount)?;
+                }
+            }
+            if !not_yet_applied.is_zero() {
+                let prepaid = not_yet_applied.checked_neg()?;
                 open.push(OpenDocument {
                     document_id: doc.document_id.clone(),
                     kind: doc.kind,

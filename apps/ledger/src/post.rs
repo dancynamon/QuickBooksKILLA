@@ -973,11 +973,10 @@ fn post_inventory_adjustment(doc: &LedgerDocument) -> Result<Vec<Leg>, PostError
             .account
             .clone()
             .filter(|account| {
-                line.kind == LineKind::Account
-                    && matches!(
-                        account.0.as_str(),
-                        chart::INVENTORY_RAW | chart::INVENTORY_FINISHED
-                    )
+                // Any inventory asset, not only 1300 and 1310: an item whose
+                // QBO account was mapped to 1311 is relieved there on every
+                // sale, so it is counted there too (practice run, 17 Oct 2026).
+                line.kind == LineKind::Account && chart::is_inventory_asset(&account.0)
             })
             .ok_or(PostError::MissingAccount {
                 line_no: line.line_no,

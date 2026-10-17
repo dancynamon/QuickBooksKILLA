@@ -268,10 +268,11 @@ QBO is the entry point throughout; the own books are derived from it.
 is to surface posting-policy differences early (ROADMAP risk 4), while there is
 still time to decide them with Joel before the real run starts. Variances found
 here become `DECISIONS.md` entries, not code patches to force a match.
-First run 17 Oct 2026 (`docs/PRACTICE-RUN.md`, D32–D36): four posting and
-report bugs fixed; what is left is class (D33), item accounts (D34), the chart
-mapping (D35), inventory relief (D36), and three QBO entities qbo-local does
-not mirror yet.
+Run twice on 17 Oct 2026 (`docs/PRACTICE-RUN.md`, D32–D36, D40), the second time
+in D29's shape (slim import at 6/30, nightly from 7/1). Ten bugs fixed. Bank,
+cards, AR, AP and equity tie, AP aging matches QBO for every vendor. What is
+left is policy: class (D33), item accounts (D34), the chart mapping (D35),
+inventory relief (D36), and whether the aging shows customer credits (D40).
 
 **Real run, January–March 2027:**
 
