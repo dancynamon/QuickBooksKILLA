@@ -139,6 +139,14 @@ pub struct ItemRow {
 /// A SKU page: price, cost and where it has actually been used. The
 /// prototype's own words: "a SKU page that cannot answer 'where has this been
 /// used' is not worth opening."
+/// One item's sales over a window: [`Store::item_sales`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ItemSales {
+    pub item_id: String,
+    pub lines: u64,
+    pub amount: Money,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct ItemDetail {
     pub item: ItemRow,
@@ -618,6 +626,44 @@ impl Store {
                 page.sql_offset()
             ],
             document_row,
+        )?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// Per item, the Invoice and SalesReceipt lines dated in `[from, to]`
+    /// that carry a non-zero amount: how many, and their total. Credit memos
+    /// and refund receipts are not netted out — this answers "what sells",
+    /// for the D33 class worksheet (`ledger classes suggest`), not revenue.
+    pub fn item_sales(
+        &self,
+        realm: &RealmId,
+        from: NaiveDate,
+        to: NaiveDate,
+    ) -> Result<Vec<ItemSales>, StoreError> {
+        let mut statement = self.connection.prepare(
+            "SELECT l.item_id, COUNT(*), SUM(l.amount_minor)
+             FROM document_lines l
+             JOIN documents d ON d.realm_id = l.realm_id AND d.qbo_id = l.doc_qbo_id
+             WHERE l.realm_id = ?1 AND d.is_deleted = 0
+               AND d.doc_type IN ('Invoice', 'SalesReceipt')
+               AND d.txn_date >= ?2 AND d.txn_date <= ?3
+               AND l.item_id IS NOT NULL AND l.amount_minor <> 0
+             GROUP BY l.item_id
+             ORDER BY l.item_id",
+        )?;
+        let rows = statement.query_map(
+            params![
+                realm.as_str(),
+                from.format("%Y-%m-%d").to_string(),
+                to.format("%Y-%m-%d").to_string()
+            ],
+            |row| {
+                Ok(ItemSales {
+                    item_id: row.get(0)?,
+                    lines: row.get::<_, i64>(1)? as u64,
+                    amount: Money::from_minor(row.get(2)?),
+                })
+            },
         )?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
