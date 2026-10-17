@@ -59,12 +59,10 @@ Built and tested:
   conflicts, `RequestId` replay, and the Customer/Item idempotency gap
 - The drain worker: per-entity ordering, dependency resolution, local-id
   rewriting, query-before-create adoption, convergence property test
-
 - HTTP client behind the trait: request building, Intuit fault mapping,
   one reactive token refresh on 401; real transport behind the `live` feature
 - OAuth: authorize URL, loopback callback with state check, code exchange,
   refresh with generation fallback and persist-before-use
-
 - Reconciliation sweep (§7): missing/stale healed, extras quarantined never
   deleted, orphaned-line check
 
