@@ -107,31 +107,18 @@ pub fn run(
     options: &ImportOptions,
     sink: &mut dyn FnMut(Translated) -> Result<(), Box<dyn std::error::Error>>,
 ) -> Result<ImportReport, ImportError> {
-    let replica_accounts = parsed_accounts(store, realm)?;
-    let journal_ar_ap_sides = build_journal_ar_ap_sides(store, realm, &replica_accounts)?;
-    let accounts = map_accounts(&replica_accounts);
-    let classes = map_classes(&parsed_classes(store, realm)?, company);
-    let items = build_item_contexts(store, realm, &classes)?;
-    let customers_exempt = build_exempt_customers(store, realm)?;
+    let ctx = translate_context(store, realm, company, options.class_fallback.clone())?;
 
     let mut report = ImportReport {
-        unmatched_classes: classes.unmatched.clone(),
-        accounts_needing_mapping: accounts
+        unmatched_classes: ctx.classes.unmatched.clone(),
+        accounts_needing_mapping: ctx
+            .accounts
             .mapped
             .iter()
             .filter(|mapped| mapped.needs_mapping)
             .map(|mapped| mapped.source_ref.clone())
             .collect(),
         ..ImportReport::default()
-    };
-
-    let ctx = TranslateContext {
-        accounts,
-        classes,
-        items,
-        customers_exempt,
-        class_fallback: options.class_fallback.clone(),
-        journal_ar_ap_sides,
     };
 
     let mut ordered: Vec<(NaiveDate, String, Translated)> = Vec::new();
@@ -175,6 +162,32 @@ pub fn run(
     }
 
     Ok(report)
+}
+
+/// The masters every document translates against — chart and class
+/// mappings, items, exempt customers, the AR/AP side of every journal entry —
+/// read fresh from the replica. [`run`] and the slim cutover import
+/// (`crate::slim`) both translate through this.
+pub(crate) fn translate_context(
+    store: &Store,
+    realm: &RealmId,
+    company: &CompanyId,
+    class_fallback: Option<ClassFallback>,
+) -> Result<TranslateContext, ImportError> {
+    let replica_accounts = parsed_accounts(store, realm)?;
+    let journal_ar_ap_sides = build_journal_ar_ap_sides(store, realm, &replica_accounts)?;
+    let accounts = map_accounts(&replica_accounts);
+    let classes = map_classes(&parsed_classes(store, realm)?, company);
+    let items = build_item_contexts(store, realm, &classes)?;
+    let customers_exempt = build_exempt_customers(store, realm)?;
+    Ok(TranslateContext {
+        accounts,
+        classes,
+        items,
+        customers_exempt,
+        class_fallback,
+        journal_ar_ap_sides,
+    })
 }
 
 pub(crate) fn parsed_accounts(

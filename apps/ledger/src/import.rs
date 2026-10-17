@@ -28,7 +28,7 @@ pub use classes::{map_classes, ClassMapping, MappedClass};
 pub use driver::{run, ImportError, ImportOptions, ImportReport};
 pub use opening::{boundary_year, opening_balance_entry, TbAgreement};
 pub use translate::{
-    translate, ClassFallback, ClassSource, ItemContext, TranslateContext, TranslateError,
+    qbo_document_id, translate, ClassFallback, ClassSource, ItemContext, TranslateContext, TranslateError,
     Translated,
 };
 
@@ -46,4 +46,5 @@ pub use crate::report::QboTbRow;
 /// [`driver`].
 pub(crate) use driver::{
     build_exempt_customers, build_item_contexts, parsed_accounts, parsed_classes,
+    translate_context,
 };
