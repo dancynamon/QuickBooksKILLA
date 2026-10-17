@@ -129,6 +129,10 @@ hand-posted from a form.
   PDF** (`render_document`, D39), and each customer has **Statement**
   (`render_statement`, as of today). Both only write a file; emailing it is
   a separate, gated step.
+  Receivables also lists **open sales orders** (D42, `open_sales_orders`)
+  with **Convert to invoice** for one not yet invoiced (`convert_to_invoice`,
+  dated today); a sales order is entered from New document like an estimate
+  and posts nothing until it is invoiced.
 - **Edit a document** (`#ledger-edit/<document_id>`) — the New document
   form over `get_document`/`update_document`: the saved document read back
   into a draft (a line's rate recovered when quantity × rate gives back

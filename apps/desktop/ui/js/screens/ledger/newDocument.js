@@ -248,7 +248,7 @@ function noticeHtml(notice) {
   return `<div class="form-ok">${parts.join(" · ")}</div>`;
 }
 
-const PRINTABLE = new Set(["Invoice", "Estimate", "SalesReceipt", "CreditMemo", "PurchaseOrder"]);
+const PRINTABLE = new Set(["Invoice", "Estimate", "SalesOrder", "SalesReceipt", "CreditMemo", "PurchaseOrder"]);
 
 /** D39: write this document's PDF and say where it went. Sends nothing. */
 function pdfButtonHtml(saved) {

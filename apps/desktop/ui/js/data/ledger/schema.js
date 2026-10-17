@@ -267,6 +267,15 @@ export const SCHEMA = {
     result: "object",
     top: ["path", "page_count", "contact_id", "as_of", "open_items"],
   },
+  // `mcp.rs::sales_order_json`
+  open_sales_orders: {
+    result: "array",
+    row: ["document_id", "number", "contact_id", "contact_name", "txn_date", "subtotal", "invoiced", "open", "invoice_ids", "memo", "source_ref"],
+  },
+  convert_to_invoice: {
+    result: "object",
+    top: ["document_id", "version", "number", "due_date", "total", "tax", "entry_id", "entry", "sales_order_id", "sales_order_open", ...WITH_LOCKED_THROUGH],
+  },
   save_and_post_document: {
     result: "object",
     top: ["document_id", "version", "entry_id", "entry", ...WITH_LOCKED_THROUGH],

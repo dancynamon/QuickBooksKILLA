@@ -548,6 +548,42 @@ mod tests {
         assert_eq!(ar["totals"]["total"], json!("0.00"));
     }
 
+    /// A sales order as the entry screen sends it, listed and converted the
+    /// way Receivables does it (D42), through the real ledger.
+    #[test]
+    fn ledger_query_sales_order_lists_and_converts_like_the_receivables_screen() {
+        let ledger = seeded_ledger();
+        for (tool, args) in [
+            ("upsert_contact", json!({ "contact": { "contact_id": "cust-blue-harbor", "kind": "Customer",
+                "display_name": "Blue Harbor Swim Club", "terms_days": 30, "default_class": "foam" } })),
+            ("upsert_item", json!({ "item": { "item_id": "rt-50-red", "name": "Rescue tube",
+                "item_type": "non_inventory", "income_account": "4100", "expense_account": "5000",
+                "default_class": "foam", "is_taxable": true } })),
+        ] {
+            ledger_query(&ledger, COMPANY, tool, args).unwrap();
+        }
+        let so = ledger_query(&ledger, COMPANY, "create_document", json!({ "actor": "dan", "document": {
+            "kind": "SalesOrder", "txn_date": "2026-10-01",
+            "contact": { "kind": "Customer", "id": "cust-blue-harbor" },
+            "lines": [{ "kind": "Item", "amount": "199.50", "is_taxable": true,
+                        "item_id": "rt-50-red", "qty": "10" }]
+        }}))
+        .unwrap();
+        assert!(so["entry_id"].is_null(), "a sales order posts nothing");
+
+        let open = ledger_query(&ledger, COMPANY, "open_sales_orders", json!({ "as_of": "2026-10-15" })).unwrap();
+        assert_eq!(open[0]["open"], json!("199.50"));
+
+        let invoice = ledger_query(&ledger, COMPANY, "convert_to_invoice", json!({
+            "sales_order_id": so["document_id"], "txn_date": "2026-10-10", "actor": "dan"
+        }))
+        .unwrap();
+        assert_eq!(invoice["total"], json!("212.72"));
+        assert!(!invoice["entry_id"].is_null());
+        let open = ledger_query(&ledger, COMPANY, "open_sales_orders", json!({ "as_of": "2026-10-15" })).unwrap();
+        assert_eq!(open, json!([]));
+    }
+
     /// The editors' `contact` and `item` exactly as
     /// `js/screens/ledger/masterData.js` builds them: every optional field
     /// present, blanks as `null`.

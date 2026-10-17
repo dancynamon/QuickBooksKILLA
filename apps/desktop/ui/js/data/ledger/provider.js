@@ -42,6 +42,8 @@ export const TOOL = Object.freeze({
   applyCredit: "apply_credit",
   paymentLink: "payment_link",
   renderDocument: "render_document",
+  openSalesOrders: "open_sales_orders",
+  convertToInvoice: "convert_to_invoice",
   renderStatement: "render_statement",
   saveAndPostDocument: "save_and_post_document",
   reverseEntry: "reverse_entry",
@@ -170,6 +172,15 @@ export function createProvider(callTool) {
     /** D39: a customer statement PDF as of a date; returns its path. */
     renderStatement(contactId, asOf) {
       return callTool(TOOL.renderStatement, { contact_id: contactId, as_of: asOf });
+    },
+    /** D42: sales orders with something left to invoice (`all` true: every
+     * one), oldest first. */
+    openSalesOrders(asOf, all) {
+      return callTool(TOOL.openSalesOrders, args({ as_of: asOf, all }));
+    },
+    /** D42: invoice a whole sales order, dated `txnDate`. */
+    convertToInvoice(salesOrderId, txnDate, actor) {
+      return callTool(TOOL.convertToInvoice, { sales_order_id: salesOrderId, txn_date: txnDate, actor });
     },
     saveAndPostDocument(document, actor, items) {
       return callTool(TOOL.saveAndPostDocument, args({ document, actor, items }));

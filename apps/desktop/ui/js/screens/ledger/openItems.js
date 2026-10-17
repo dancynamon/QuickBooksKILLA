@@ -65,6 +65,25 @@ function applyCellHtml(open, d) {
   </span>`;
 }
 
+/** D42: what is still to be invoiced. Sales orders post nothing, so they
+ * sit beside the aging rather than in it. */
+function salesOrdersHtml(orders) {
+  if (orders.length === 0) return "";
+  return `<h2 class="lbl" style="margin:18px 0 8px">Open sales orders</h2>
+  <div class="grid-wrap"><div class="grid-scroll"><table>
+    <thead><tr><th>No.</th><th>Customer</th><th>Date</th><th class="r">Subtotal</th><th class="r">Invoiced</th><th class="r">To invoice</th><th></th></tr></thead>
+    <tbody>${orders.map((o) => `<tr>
+      <td class="mono"><a class="doc-link" href="#ledger-edit/${encodeURIComponent(o.document_id)}">${esc(o.number ?? o.document_id)}</a></td>
+      <td>${esc(o.contact_name)}</td>
+      <td class="dim">${esc(o.txn_date)}</td>
+      <td class="r num dim">${plain(o.subtotal)}</td>
+      <td class="r num dim">${plain(o.invoiced, { dashForZero: true })}</td>
+      <td class="r num" style="font-weight:500">${plain(o.open)}</td>
+      <td>${Number(o.invoiced) === 0 ? `<button class="btn" type="button" data-convert="${esc(o.document_id)}" title="Invoice every line, dated today">Convert to invoice</button>` : '<span class="hint" style="margin:0">partly invoiced — invoice the rest by line</span>'}</td>
+    </tr>`).join("")}</tbody>
+  </table></div></div>`;
+}
+
 export async function renderOpenItems(main, book) {
   const spec = BOOKS[book] ?? BOOKS.receivable;
   if (!BOOKS[book]) book = "receivable";
@@ -79,8 +98,9 @@ export async function renderOpenItems(main, book) {
       ledgerProvider.aging(book, asOf),
       ledgerProvider.openDocuments(book, asOf),
       ledgerProvider.trialBalance(asOf),
+      book === "receivable" ? ledgerProvider.openSalesOrders(asOf) : Promise.resolve([]),
     ]),
-    ([aging, open, tb]) => {
+    ([aging, open, tb, orders]) => {
       const controlRow = tb.rows.find((r) => r.account_id === spec.control || r.number === spec.control);
       const diff = controlDifference(book, aging.totals.total, controlRow?.balance);
       const ties = diff === 0;
@@ -127,6 +147,7 @@ export async function renderOpenItems(main, book) {
             <td>${applyCellHtml(open, d)}</td>
           </tr>`).join("")}</tbody>
         </table></div></div>
+        ${salesOrdersHtml(orders)}
         <p class="hint">Derived from the saved documents and the payments and credits applied to them; nothing here is stored. Open a number to edit or void it. ${ties ? "" : `The aging and ${spec.control} disagree: an entry is touching ${spec.control} without a document behind it, or a document posted somewhere else.`}</p>
       </div>`;
 
@@ -148,6 +169,21 @@ export async function renderOpenItems(main, book) {
             main.dataset.openNotice = JSON.stringify({
               ok: true,
               text: `Applied ${credit.kind === "CreditMemo" ? "credit memo" : "vendor credit"} ${label(creditId)} to ${label(target)}: ${result.applied} now on it`,
+            });
+          } catch (err) {
+            main.dataset.openNotice = JSON.stringify({ ok: false, text: err.message });
+          }
+          renderOpenItems(main, book);
+        });
+      });
+      main.querySelectorAll("[data-convert]").forEach((btn) => {
+        btn.addEventListener("click", async () => {
+          const order = orders.find((o) => o.document_id === btn.dataset.convert);
+          try {
+            const r = await ledgerProvider.convertToInvoice(order.document_id, todayIso(), ACTOR);
+            main.dataset.openNotice = JSON.stringify({
+              ok: true,
+              text: `Invoiced sales order ${order.number}: invoice ${r.number}, ${plain(r.total)}${r.due_date ? `, due ${r.due_date}` : ""}`,
             });
           } catch (err) {
             main.dataset.openNotice = JSON.stringify({ ok: false, text: err.message });

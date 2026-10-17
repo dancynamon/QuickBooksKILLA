@@ -538,3 +538,28 @@ test("render_document and render_statement return the real tools' shapes and ref
   assert.equal(statement.open_items, 2);
   await assert.rejects(ledger.renderDocument("pmt-4001"), /no printed form/);
 });
+
+test("a sales order posts nothing, lists as open, and converts whole into an invoice", async () => {
+  const ledger = createFixtureProvider();
+  const so = await ledger.createDocument({
+    kind: "SalesOrder", txn_date: "2026-10-01", contact: { kind: "Customer", id: "cust-blue-harbor" },
+    lines: [{ kind: "Item", item_id: "rt-50-red", qty: "10", amount: "199.50", is_taxable: true }],
+  }, "dan");
+  assert.equal(so.entry_id, null, "a sales order posts nothing");
+  assert.equal(so.number, "1001");
+
+  let orders = await ledger.openSalesOrders("2026-10-15");
+  for (const o of orders) assertRow(o, SCHEMA.open_sales_orders.row, "open_sales_orders[]");
+  assert.deepEqual(orders.map((o) => [o.number, o.open]), [["1001", "199.50"]]);
+
+  const invoice = await ledger.convertToInvoice(so.document_id, "2026-10-10", "dan");
+  assertWithLockedThrough(invoice, SCHEMA.convert_to_invoice, "convert_to_invoice");
+  assert.equal(invoice.total, "212.72");
+  assert.ok(invoice.entry_id, "the invoice posts");
+
+  orders = await ledger.openSalesOrders("2026-10-15");
+  assert.equal(orders.length, 0, "nothing left to invoice");
+  const all = await ledger.openSalesOrders("2026-10-15", true);
+  assert.equal(all[0].invoiced, "199.50");
+  await assert.rejects(ledger.convertToInvoice(so.document_id, "2026-10-11", "dan"), /nothing left/);
+});

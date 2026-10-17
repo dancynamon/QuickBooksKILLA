@@ -31,6 +31,7 @@ export const ENTRY_KINDS = Object.freeze({
   Invoice: { label: "Invoice", contact: "customer", lines: true, taxed: true, numbered: true, accountLines: false, posts: true },
   SalesReceipt: { label: "Sales receipt", contact: "customer", lines: true, taxed: true, numbered: true, accountLines: false, posts: true, bank: DEPOSIT_TO },
   Estimate: { label: "Estimate", contact: "customer", lines: true, taxed: true, numbered: true, accountLines: false, posts: false },
+  SalesOrder: { label: "Sales order", contact: "customer", lines: true, taxed: true, numbered: true, accountLines: false, posts: false },
   CreditMemo: { label: "Credit memo", contact: "customer", lines: true, taxed: true, numbered: true, accountLines: false, posts: true },
   Payment: { label: "Receive payment", noun: "payment", contact: "customer", lines: false, taxed: false, numbered: false, accountLines: false, posts: true, bank: DEPOSIT_TO, applies: { book: "receivable", kind: "Invoice" } },
   PurchaseOrder: { label: "Purchase order", contact: "vendor", lines: true, taxed: false, numbered: true, accountLines: false, posts: false },

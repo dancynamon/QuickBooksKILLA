@@ -464,14 +464,14 @@ function seedDocuments() {
 
 /** `books.rs::contact_kind_for`. */
 const CONTACT_KIND_FOR = {
-  Estimate: "customer", Invoice: "customer", SalesReceipt: "customer", CreditMemo: "customer",
+  Estimate: "customer", SalesOrder: "customer", Invoice: "customer", SalesReceipt: "customer", CreditMemo: "customer",
   RefundReceipt: "customer", Payment: "customer",
   PurchaseOrder: "vendor", Bill: "vendor", BillPayment: "vendor", VendorCredit: "vendor",
 };
 /** `books.rs::is_numbered`. */
-const NUMBERED = new Set(["Estimate", "Invoice", "SalesReceipt", "CreditMemo", "RefundReceipt", "PurchaseOrder"]);
+const NUMBERED = new Set(["Estimate", "SalesOrder", "Invoice", "SalesReceipt", "CreditMemo", "RefundReceipt", "PurchaseOrder"]);
 /** `books.rs::is_taxed_sale`. */
-const TAXED_SALE = new Set(["Estimate", "Invoice", "SalesReceipt", "CreditMemo", "RefundReceipt"]);
+const TAXED_SALE = new Set(["Estimate", "SalesOrder", "Invoice", "SalesReceipt", "CreditMemo", "RefundReceipt"]);
 /** `books.rs::FIRST_NUMBER`. */
 const FIRST_NUMBER = 1001;
 /** `PostingConfig::default().sales_tax_rate`, as a fraction over 100000. */
@@ -921,7 +921,7 @@ function createBook() {
 
     const version = (documentVersions.get(documentId) ?? 0) + 1;
 
-    if (kind === "Estimate" || kind === "PurchaseOrder") {
+    if (kind === "Estimate" || kind === "SalesOrder" || kind === "PurchaseOrder") {
       documentVersions.set(documentId, version);
       recordDocument(document);
       return withLockedThrough({ document_id: documentId, version, entry_id: null, entry: null });
@@ -1434,7 +1434,7 @@ function createBook() {
   function renderDocument(documentId) {
     const doc = documents.get(documentId);
     if (!doc) throw new LedgerFixtureError(`unknown document ${documentId}`);
-    const printable = ["Invoice", "Estimate", "SalesReceipt", "CreditMemo", "PurchaseOrder"];
+    const printable = ["Invoice", "Estimate", "SalesOrder", "SalesReceipt", "CreditMemo", "PurchaseOrder"];
     if (!printable.includes(doc.kind)) throw new LedgerFixtureError(`a ${doc.kind} has no printed form`);
     const open = doc.kind === "Invoice"
       ? openDocuments("receivable", "9999-12-31").find((d) => d.document_id === documentId)
@@ -1467,6 +1467,53 @@ function createBook() {
       as_of: asOf,
       open_items: open.length,
     };
+  }
+
+  /** `sales_orders.rs::sales_orders`: each order's subtotal, what invoices
+   * made from it took (before tax), and what is still to invoice. */
+  function openSalesOrders(asOf, all) {
+    const taken = new Map();
+    for (const d of documents.values()) {
+      const from = d.payload?.from_sales_order;
+      if (d.kind !== "Invoice" || d.is_voided || !from) continue;
+      if (asOf && d.txn_date > asOf) continue;
+      const t = taken.get(from) ?? { cents: 0, ids: [] };
+      t.cents += linesCents(d.payload.lines ?? []);
+      t.ids.push(d.document_id);
+      taken.set(from, t);
+    }
+    return [...documents.values()]
+      .filter((d) => d.kind === "SalesOrder" && !d.is_voided && (!asOf || d.txn_date <= asOf))
+      .sort((a, b) => a.txn_date.localeCompare(b.txn_date) || a.document_id.localeCompare(b.document_id))
+      .map((d) => {
+        const subtotal = linesCents(d.payload?.lines ?? []);
+        const t = taken.get(d.document_id) ?? { cents: 0, ids: [] };
+        return {
+          document_id: d.document_id, number: d.number, contact_id: d.contact?.id ?? "",
+          contact_name: contactName(d.contact), txn_date: d.txn_date,
+          subtotal: fromCents(subtotal), invoiced: fromCents(t.cents), open: fromCents(subtotal - t.cents),
+          invoice_ids: t.ids, memo: d.payload?.memo ?? null, source_ref: null,
+        };
+      })
+      .filter((o) => all || toCents(o.open) > 0);
+  }
+
+  /** `convert_to_invoice` for a whole order: the invoice takes every line. */
+  function convertToInvoice(salesOrderId, txnDate, actor) {
+    const order = documents.get(salesOrderId);
+    if (!order || order.kind !== "SalesOrder") throw new LedgerFixtureError(`${salesOrderId} is not a sales order`);
+    if (order.is_voided) throw new LedgerFixtureError(`sales order ${order.number ?? salesOrderId} is voided`);
+    const status = openSalesOrders(undefined, true).find((o) => o.document_id === salesOrderId);
+    if (toCents(status.open) <= 0) throw new LedgerFixtureError(`sales order ${order.number} has nothing left to invoice`);
+    if (toCents(status.invoiced) > 0) {
+      throw new LedgerFixtureError(`sales order ${order.number} is already partly invoiced; name the lines to invoice so nothing is invoiced twice`);
+    }
+    const created = createDocument({
+      kind: "Invoice", txn_date: txnDate, contact: order.contact,
+      lines: order.payload.lines.map(({ line_no, ...rest }) => rest),
+      memo: `From sales order ${order.number}`, from_sales_order: salesOrderId,
+    }, actor);
+    return { ...created, sales_order_id: salesOrderId, sales_order_open: "0.00" };
   }
 
   /** `mcp.rs::apply_credit` over `books.rs::apply_credit`. */
@@ -1741,6 +1788,10 @@ function createBook() {
         return updateDocument(args.document, args.actor);
       case "void_document":
         return voidDocument(args.document_id, args.reason, args.actor);
+      case "open_sales_orders":
+        return openSalesOrders(args.as_of, Boolean(args.all));
+      case "convert_to_invoice":
+        return convertToInvoice(args.sales_order_id, args.txn_date, args.actor);
       case "render_document":
         return renderDocument(args.document_id);
       case "render_statement":
