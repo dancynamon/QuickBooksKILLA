@@ -105,7 +105,8 @@ mod live {
     use std::time::{Duration, Instant};
 
     use chrono::Utc;
-    use qbo_local::auth::FileTokenStore;
+    use qbo_local::auth::{FileTokenStore, TokenStore};
+    use qbo_local::keychain::KeychainTokenStore;
     use qbo_local::domain::{EntityType, RealmId};
     use qbo_local::driver::{SyncDriver, SyncError, SyncOptions};
     use qbo_local::http::live::UreqTransport;
@@ -170,8 +171,17 @@ mod live {
         })
     }
 
-    fn tokens(home: &std::path::Path) -> Result<TokenManager<UreqTransport, FileTokenStore>, Error> {
-        Ok(TokenManager::new(UreqTransport::default(), FileTokenStore::new(home), credentials()?)
+    type Tokens = TokenManager<UreqTransport, Box<dyn TokenStore>>;
+
+    /// Keychain on macOS (`DESIGN.md` §5.1). `--file-tokens`, or any other
+    /// platform, uses the 0700 app home instead — development only.
+    fn tokens(home: &std::path::Path, args: &[String]) -> Result<Tokens, Error> {
+        let store: Box<dyn TokenStore> = if cfg!(target_os = "macos") && !flag(args, "--file-tokens") {
+            Box::new(KeychainTokenStore::new())
+        } else {
+            Box::new(FileTokenStore::new(home))
+        };
+        Ok(TokenManager::new(UreqTransport::default(), store, credentials()?)
             .with_rotation_log(home.join("rotation-log.jsonl")))
     }
 
@@ -190,15 +200,15 @@ mod live {
         let callback = await_callback(&listener, &state)?;
         let mut transport = UreqTransport::default();
         let set = exchange_code(&mut transport, &credentials, &callback.code, &redirect_uri, Utc::now())?;
-        let mut manager = tokens(&home)?;
+        let mut manager = tokens(&home, args)?;
         manager.install(&callback.realm_id, set)?;
 
         println!("authorised realm {}", callback.realm_id);
-        println!("tokens saved under {}", home.display());
+        println!("tokens saved to {}", if cfg!(target_os = "macos") && !flag(args, "--file-tokens") { "the login keychain (service qbo-local)".to_string() } else { home.display().to_string() });
         Ok(())
     }
 
-    type LiveDriver = SyncDriver<HttpQboClient<UreqTransport, TokenManager<UreqTransport, FileTokenStore>>>;
+    type LiveDriver = SyncDriver<HttpQboClient<UreqTransport, Tokens>>;
 
     /// Store and driver for `--realm`, shared by `sync` and `reconcile`.
     fn open(args: &[String]) -> Result<(RealmId, Store, LiveDriver), Error> {
@@ -217,7 +227,7 @@ mod live {
         };
         let store = Store::open(&db)?;
         store.register_realm(&realm, realm.as_str(), Utc::now())?;
-        let client = HttpQboClient::new(UreqTransport::default(), tokens(&home)?, config);
+        let client = HttpQboClient::new(UreqTransport::default(), tokens(&home, args)?, config);
         let driver = SyncDriver::new(client, SyncOptions::default(), Utc::now());
         Ok((realm, store, driver))
     }

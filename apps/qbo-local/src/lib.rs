@@ -16,6 +16,7 @@
 //! - [`outbox`]   — §6: the write queue and its state machine
 //! - [`client`]   — the QBO API boundary, plus an in-memory double
 //! - [`http`]     — the HTTP implementation of that boundary
+//! - [`keychain`] — §5.1: the macOS keychain token backend
 //! - [`oauth`]    — §5: authorisation, refresh, rotation against Intuit
 //! - [`worker`]   — §6.3-6.5: draining the outbox, dependency resolution
 
@@ -24,6 +25,7 @@ pub mod client;
 pub mod domain;
 pub mod driver;
 pub mod http;
+pub mod keychain;
 pub mod oauth;
 pub mod outbox;
 pub mod project;

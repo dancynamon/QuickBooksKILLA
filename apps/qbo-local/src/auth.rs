@@ -157,6 +157,18 @@ pub trait TokenStore {
     fn save(&self, generations: &TokenGenerations) -> Result<(), AuthError>;
 }
 
+/// So the backend can be chosen at runtime — keychain on the Mac, file in
+/// development — without making every caller generic over it.
+impl<T: TokenStore + ?Sized> TokenStore for Box<T> {
+    fn load(&self, realm: &RealmId) -> Result<Option<TokenGenerations>, AuthError> {
+        (**self).load(realm)
+    }
+
+    fn save(&self, generations: &TokenGenerations) -> Result<(), AuthError> {
+        (**self).save(generations)
+    }
+}
+
 /// File-backed store using [`atomic_write`]. Used in tests and development.
 pub struct FileTokenStore {
     directory: PathBuf,

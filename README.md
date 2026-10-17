@@ -31,7 +31,7 @@ than engineering judgement.
 ## Build
 
 ```sh
-cargo test          # 222 tests, all offline
+cargo test          # 228 tests, all offline
 cargo clippy --all-targets
 cargo run --bin qbo-local
 
@@ -66,7 +66,9 @@ Built and tested:
 - Reconciliation sweep (§7): missing/stale healed, extras quarantined never
   deleted, orphaned-line check
 
-Not built yet: the keychain token backend, the trial-balance diff (§7.5,
+- macOS keychain token store via `security -i` (secret never on argv)
+
+Not built yet: the trial-balance diff (§7.5,
 ledger territory), the Tauri shell, the React UI.
 
 The first live authentication run should happen wherever the OAuth credentials

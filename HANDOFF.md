@@ -43,7 +43,7 @@ backend in §2.1. Never in the repo, never in a dotfile Dropbox syncs.
 
 ## 1. Where the work stands
 
-`cargo test` — 222 tests, all offline, all green. `cargo clippy --all-targets` —
+`cargo test` — 228 tests, all offline, all green. `cargo clippy --all-targets` —
 clean.
 
 Built and tested:
@@ -62,10 +62,10 @@ Built and tested:
 | `http` | `HttpQboClient`: request building, fault-code mapping, 401 → one refresh + resend; `live::UreqTransport` behind `--features live` |
 | `oauth` | Authorize URL, loopback callback (state-checked), code exchange, `TokenManager` (persist-before-use, generation fallback on `invalid_grant` only, JSONL rotation log) |
 | `driver` | Initial sweep, CDC poll, truncation backfill; `reconcile` (§7): heal missing/stale, quarantine extras, orphaned-line check |
+| `keychain` | `KeychainTokenStore`: one login-keychain item per realm (service `qbo-local`), written via `security -i` with hex `-X` so the token is never on argv; default on macOS, `--file-tokens` for the 0700 file store |
 
-**Not built:** the keychain token backend (§2.1), the §7.5 trial-balance diff,
-the Tauri shell, the React UI. M0 needs only the first; tokens currently land in
-`FileTokenStore` under the app home, mode 0700, never inside Dropbox.
+**Not built:** the §7.5 trial-balance diff, the Tauri shell, the React UI. M0
+code is complete; what remains is the live run.
 
 ### 1.1 Running M0 on the Mac
 
@@ -78,8 +78,8 @@ cargo run --release --features live --bin qbo-local -- reconcile --realm <id>   
 ```
 
 App home is `~/Library/Application Support/qbo-local` (override with
-`QBO_LOCAL_HOME`; any path containing "dropbox" is refused). It holds the token
-file, `rotation-log.jsonl` and `replica-<realm>.db`.
+`QBO_LOCAL_HOME`; any path containing "dropbox" is refused). It holds
+`rotation-log.jsonl` and `replica-<realm>.db`; tokens go to the login keychain.
 
 **Unverified mappings in `http.rs`, check against the first live run:** fault
 codes 5010 (stale), 610 (not found), 3200 (auth), 003001 (throttle);
@@ -91,7 +91,7 @@ constant or one function; the tests pin today's assumption.
 
 ## 2. What to build, in order
 
-### 2.1 `KeychainTokenStore`
+### 2.1 `KeychainTokenStore` — BUILT (`keychain.rs`); verify on the Mac that the first save raises no keychain prompt loop
 
 Implement the existing `auth::TokenStore` trait against the macOS keychain.
 
