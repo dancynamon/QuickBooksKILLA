@@ -4,7 +4,7 @@
 use chrono::{DateTime, NaiveDate, TimeZone, Utc};
 use rust_decimal::Decimal;
 
-use ledger::books::{self, Book, Contact, Item, ItemType};
+use ledger::books::{self, Book, Contact, DueDay, Item, ItemType, Terms};
 use ledger::chart;
 use ledger::post::{self, Posting};
 use ledger::report;
@@ -44,6 +44,8 @@ fn customer(id: &str, name: &str, terms: Option<i64>, exempt: bool) -> Contact {
         bill_address: None,
         ship_address: None,
         terms_days: terms,
+        due_day: None,
+        terms_source_ref: None,
         is_tax_exempt: exempt,
         default_class: Some(ClassId("foam".to_string())),
         is_active: true,
@@ -551,4 +553,172 @@ fn ap_aging_ties_to_2000() {
     assert_eq!(aging.totals.total, usd(30000));
     let ap = balance(&ledger, chart::ACCOUNTS_PAYABLE, as_of);
     assert_eq!(ap.checked_neg().unwrap(), aging.totals.total);
+}
+
+// ---------------------------------------------------------------------------
+// Date-driven terms (D41)
+// ---------------------------------------------------------------------------
+
+fn day_of_month(day: u32, next_month_within: u32) -> Terms {
+    Terms::DayOfMonth {
+        day,
+        next_month_within,
+    }
+}
+
+#[test]
+fn the_31st_is_the_last_day_of_a_shorter_month() {
+    let end = day_of_month(31, 0);
+    assert_eq!(end.due_date(ymd(2027, 2, 3)), ymd(2027, 2, 28));
+    assert_eq!(end.due_date(ymd(2026, 4, 10)), ymd(2026, 4, 30));
+    assert_eq!(end.due_date(ymd(2026, 1, 10)), ymd(2026, 1, 31));
+    // Rolled out of January into February, still clamped.
+    assert_eq!(
+        day_of_month(31, 5).due_date(ymd(2027, 1, 28)),
+        ymd(2027, 2, 28)
+    );
+    // The 30th in February, too.
+    assert_eq!(
+        day_of_month(30, 0).due_date(ymd(2027, 2, 1)),
+        ymd(2027, 2, 28)
+    );
+}
+
+#[test]
+fn a_leap_february_ends_on_the_29th() {
+    assert_eq!(
+        day_of_month(31, 0).due_date(ymd(2028, 2, 3)),
+        ymd(2028, 2, 29)
+    );
+    assert_eq!(
+        day_of_month(29, 0).due_date(ymd(2027, 2, 3)),
+        ymd(2027, 2, 28)
+    );
+    assert_eq!(
+        day_of_month(29, 0).due_date(ymd(2028, 2, 3)),
+        ymd(2028, 2, 29)
+    );
+    assert_eq!(
+        day_of_month(31, 5).due_date(ymd(2028, 1, 28)),
+        ymd(2028, 2, 29)
+    );
+    // Dated on the due day itself: 0 days away is within even a 0-day
+    // window (the window is inclusive, D41), so it rolls a month.
+    assert_eq!(
+        day_of_month(31, 0).due_date(ymd(2028, 2, 29)),
+        ymd(2028, 3, 31)
+    );
+}
+
+#[test]
+fn a_document_dated_within_the_window_is_due_a_month_later() {
+    // QBO's "due on the 1st, next month if issued within 5 days" (term 37 in
+    // the replica), checked against invoices QBO itself dated.
+    let first = day_of_month(1, 5);
+    assert_eq!(first.due_date(ymd(2026, 10, 7)), ymd(2026, 11, 1));
+    assert_eq!(first.due_date(ymd(2026, 10, 26)), ymd(2026, 11, 1)); // 6 days out
+    assert_eq!(first.due_date(ymd(2026, 10, 27)), ymd(2026, 12, 1)); // 5 days: rolls
+    assert_eq!(first.due_date(ymd(2026, 2, 25)), ymd(2026, 4, 1)); // QBO: 2026-04-01
+    assert_eq!(first.due_date(ymd(2026, 12, 28)), ymd(2027, 2, 1)); // across the year
+    assert_eq!(first.due_date(ymd(2026, 11, 1)), ymd(2026, 12, 1)); // dated on the day
+                                                                    // Term 47: the 31st, within 5 days (QBO: 2023-04-25 due 2023-05-31).
+    let end = day_of_month(31, 5);
+    assert_eq!(end.due_date(ymd(2023, 4, 25)), ymd(2023, 5, 31));
+    assert_eq!(end.due_date(ymd(2023, 4, 24)), ymd(2023, 4, 30));
+    assert_eq!(end.due_date(ymd(2022, 11, 30)), ymd(2022, 12, 31));
+}
+
+#[test]
+fn terms_read_as_people_say_them() {
+    assert_eq!(Terms::Net { days: 30 }.label(), "Net 30");
+    assert_eq!(Terms::Net { days: 0 }.label(), "Due on receipt");
+    assert_eq!(day_of_month(1, 5).label(), "Due the 1st");
+    assert_eq!(day_of_month(2, 0).label(), "Due the 2nd");
+    assert_eq!(day_of_month(13, 0).label(), "Due the 13th");
+    assert_eq!(day_of_month(22, 0).label(), "Due the 22nd");
+    assert_eq!(day_of_month(31, 5).label(), "Due the last of the month");
+}
+
+#[test]
+fn a_day_of_month_customer_round_trips_and_fills_the_due_date_on_entry_and_edit() {
+    let ledger = book();
+    let mut club = customer("c-club", "Swim Club", None, false);
+    club.due_day = Some(DueDay {
+        day: 1,
+        next_month_within: 5,
+    });
+    club.terms_source_ref = Some("37".to_string());
+    books::upsert_contact(&ledger, CO, &club, now()).unwrap();
+    let stored = books::contact(&ledger, CO, "c-club").unwrap().unwrap();
+    assert_eq!(stored, club);
+    assert_eq!(stored.terms(), day_of_month(1, 5));
+
+    let mut invoice = doc(
+        "inv-club",
+        DocKind::Invoice,
+        ymd(2026, 10, 28),
+        Some((ContactKind::Customer, "c-club")),
+    );
+    invoice.lines = vec![line(1, LineKind::Item, Some("mat"), 10000, false)];
+    let saved = enter(&ledger, invoice);
+    assert_eq!(saved.due_date, Some(ymd(2026, 12, 1)));
+
+    // An edit that clears the due date and moves the date refills it.
+    let mut edited = saved.clone();
+    edited.txn_date = ymd(2026, 10, 2);
+    edited.due_date = None;
+    let revision = books::update_document(
+        &ledger,
+        CO,
+        edited,
+        PostingConfig::default(),
+        CommandMeta {
+            actor_id: "dan".to_string(),
+            kind: "test".to_string(),
+            hlc: now().to_rfc3339(),
+        },
+        now(),
+    )
+    .unwrap();
+    assert_eq!(revision.document.due_date, Some(ymd(2026, 11, 1)));
+
+    // The aging reads the stored due date: 1 Nov 2026, 30 days past due on 1 Dec.
+    let row = books::open_documents(&ledger, CO, Book::Receivable, ymd(2026, 12, 1))
+        .unwrap()
+        .into_iter()
+        .find(|d| d.document_id == "inv-club")
+        .unwrap();
+    assert_eq!(row.due_date, ymd(2026, 11, 1));
+
+    // Switching the customer back to net days drops the day of the month,
+    // and keeps the QBO term id it came from.
+    let mut net = stored.clone();
+    net.set_terms(Terms::Net { days: 15 });
+    net.terms_source_ref = None;
+    books::upsert_contact(&ledger, CO, &net, now()).unwrap();
+    let back = books::contact(&ledger, CO, "c-club").unwrap().unwrap();
+    assert_eq!((back.terms_days, back.due_day), (Some(15), None));
+    assert_eq!(back.terms_source_ref.as_deref(), Some("37"));
+}
+
+#[test]
+fn terms_that_are_both_or_out_of_range_are_refused() {
+    let ledger = book();
+    let mut both = customer("c-both", "Both", Some(30), false);
+    both.due_day = Some(DueDay {
+        day: 1,
+        next_month_within: 0,
+    });
+    assert!(books::upsert_contact(&ledger, CO, &both, now()).is_err());
+    for (day, within) in [(0, 0), (32, 0), (1, 32)] {
+        let mut bad = customer("c-bad", "Bad", None, false);
+        bad.due_day = Some(DueDay {
+            day,
+            next_month_within: within,
+        });
+        assert!(
+            books::upsert_contact(&ledger, CO, &bad, now()).is_err(),
+            "{day}/{within}"
+        );
+    }
 }

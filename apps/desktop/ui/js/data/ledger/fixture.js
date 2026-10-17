@@ -27,6 +27,7 @@
 // `ledger-mcp` processes over two different `.sqlite` files never would.
 
 import { createProvider } from "./provider.js";
+import { termsDueDate, termsLabel, termsOf } from "./terms.js";
 
 // ---------------------------------------------------------------------------
 // money helpers — cent-integer arithmetic, `js/data/fixture.js`'s pattern.
@@ -392,13 +393,16 @@ function seedDocumentVersions() {
 function seedContacts() {
   const contact = (c) => ({
     company_name: null, email: null, phone: null, bill_address: null, ship_address: null,
-    terms_days: null, is_tax_exempt: false, default_class: null, is_active: true, source_ref: null,
+    terms_days: null, due_day: null, is_tax_exempt: false, default_class: null, is_active: true,
+    source_ref: null, terms_source_ref: null,
     ...c,
   });
   return new Map([
     contact({ contact_id: "cust-blue-harbor", kind: "customer", display_name: "Blue Harbor Swim Club", email: "office@blueharbor.example", terms_days: 30, default_class: "foam" }),
     contact({ contact_id: "cust-fairview", kind: "customer", display_name: "Fairview County Parks", company_name: "County of Fairview", terms_days: 30, is_tax_exempt: true, default_class: "chairs" }),
     contact({ contact_id: "cust-harborview", kind: "customer", display_name: "Harborview Signs", terms_days: 15, default_class: "signs" }),
+    // QBO's date-driven term (D41): due the 1st, next month if dated within 5 days.
+    contact({ contact_id: "cust-lakeside", kind: "customer", display_name: "Lakeside YMCA", due_day: { day: 1, next_month_within: 5 }, terms_source_ref: "37" }),
     contact({ contact_id: "vend-spectra", kind: "vendor", display_name: "Spectra EVA", terms_days: 30 }),
   ].map((c) => [c.contact_id, c]));
 }
@@ -501,12 +505,6 @@ function linesCents(lines) {
     if (l.kind === "Description" || l.kind === "Journal") return sum;
     return sum + toCents(l.amount);
   }, 0);
-}
-
-function addDays(isoDate, days) {
-  const d = new Date(`${isoDate}T00:00:00Z`);
-  d.setUTCDate(d.getUTCDate() + days);
-  return d.toISOString().slice(0, 10);
 }
 
 function daysBetween(fromIso, toIso) {
@@ -978,7 +976,8 @@ function createBook() {
       contact_id: c.contact_id, kind: c.kind, display_name: c.display_name,
       company_name: c.company_name, email: c.email, phone: c.phone,
       bill_address: c.bill_address, ship_address: c.ship_address,
-      terms_days: c.terms_days, is_tax_exempt: c.is_tax_exempt,
+      terms_days: c.terms_days, terms: termsOf(c), terms_label: termsLabel(termsOf(c)),
+      terms_source_ref: c.terms_source_ref, is_tax_exempt: c.is_tax_exempt,
       default_class: c.default_class, is_active: c.is_active, source_ref: c.source_ref,
     };
   }
@@ -1039,8 +1038,28 @@ function createBook() {
     const contact = {
       company_name: null, email: null, phone: null, bill_address: null, ship_address: null,
       terms_days: null, is_tax_exempt: false, default_class: null, is_active: true, source_ref: null,
+      terms_source_ref: null,
       ...raw,
     };
+    // `terms` (D41) is the other way to say `terms_days`; stored as either.
+    const terms = raw.terms ?? null;
+    delete contact.terms;
+    if (terms != null) {
+      const day = terms.type === "day_of_month";
+      if (day ? !(terms.day >= 1 && terms.day <= 31 && (terms.next_month_within ?? 0) >= 0 && (terms.next_month_within ?? 0) <= 31)
+        : terms.type !== "net" || !(terms.days >= 0)) {
+        throw new LedgerFixtureError(`bad terms: ${JSON.stringify(terms)}`);
+      }
+      if (raw.terms_days != null && JSON.stringify(termsOf({ terms_days: raw.terms_days })) !== JSON.stringify(terms)) {
+        throw new LedgerFixtureError('"terms" and "terms_days" disagree; send one of them');
+      }
+      contact.terms_days = day ? null : (terms.days || null);
+      contact.due_day = day ? { day: terms.day, next_month_within: terms.next_month_within ?? 0 } : null;
+    } else if (raw.due_day === undefined) {
+      contact.due_day = null;
+    }
+    const was = contacts.get(raw.contact_id);
+    contact.terms_source_ref = contact.terms_source_ref ?? was?.terms_source_ref ?? null;
     contacts.set(contact.contact_id, contact);
     return withLockedThrough({ contact: contactJson(contact) });
   }
@@ -1144,7 +1163,7 @@ function createBook() {
     }
     if (contact) {
       if (doc.due_date == null && (doc.kind === "Invoice" || doc.kind === "Bill")) {
-        doc.due_date = addDays(doc.txn_date, Math.max(contact.terms_days ?? 0, 0));
+        doc.due_date = termsDueDate(termsOf(contact), doc.txn_date);
       }
       if (doc.header_class == null) doc.header_class = contact.default_class;
     }

@@ -690,19 +690,26 @@ pub fn document_sheet(
         (number_label.to_string(), number),
         ("Date".to_string(), date(doc.txn_date)),
     ];
+    // A contact on day-of-month terms (D41) shows them by name when they
+    // gave this due date; otherwise the terms are read off the due date.
+    let day_of_month = contact
+        .as_ref()
+        .map(|c| c.terms())
+        .filter(|t| matches!(t, books::Terms::DayOfMonth { .. }))
+        .filter(|t| {
+            doc.due_date
+                .is_none_or(|due| due == t.due_date(doc.txn_date))
+        });
     let terms_days = doc
         .due_date
         .map(|due| (due - doc.txn_date).num_days())
         .or_else(|| contact.as_ref().and_then(|c| c.terms_days));
     match doc.kind {
         DocKind::Invoice => {
-            if let Some(days) = terms_days {
-                let terms = if days <= 0 {
-                    "Due on receipt".to_string()
-                } else {
-                    format!("Net {days}")
-                };
-                meta.push(("Terms".into(), terms));
+            if let Some(terms) = day_of_month {
+                meta.push(("Terms".into(), terms.label()));
+            } else if let Some(days) = terms_days {
+                meta.push(("Terms".into(), books::Terms::Net { days }.label()));
             }
             meta.push((
                 "Due Date".into(),

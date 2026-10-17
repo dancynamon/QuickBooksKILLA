@@ -5,9 +5,10 @@
 //! is the design.
 //!
 //! - **Masters.** Chart and classes through the same mapping `ledger import`
-//!   uses, then customers, vendors (with their terms folded into
-//!   `terms_days`) and items into [`crate::books`], every one keyed by its QBO
-//!   id with the id kept in `source_ref`. Numbering is moved past QBO's
+//!   uses, then customers, vendors (their QBO term read as net days or, for a
+//!   date-driven term, a day of the month, D41, with the term id kept in
+//!   `terms_source_ref`) and items into [`crate::books`], every one keyed by
+//!   its QBO id with the id kept in `source_ref`. Numbering is moved past QBO's
 //!   highest number per type ([`books::ensure_next_number`]).
 //! - **Opening entry.** QBO's trial balance as of the date, one line per
 //!   account, balanced by construction; the 3950 plug must come out zero.
@@ -44,7 +45,7 @@ use ledger_core::{round_money, Money, MoneyError, RoundingPolicy};
 use qbo_local::domain::{EntityType, RealmId};
 use qbo_local::store::{MirroredEntity, Store, StoreError};
 
-use crate::books::{self, Book, BooksError, Contact, Item, ItemType, OpenDocument};
+use crate::books::{self, Book, BooksError, Contact, Item, ItemType, OpenDocument, Terms};
 use crate::chart;
 use crate::import::{
     self, qbo_document_id, translate, ClassFallback, ImportError, TranslateContext,
@@ -411,25 +412,51 @@ fn entities(
     Ok(out)
 }
 
-/// QBO term id to net days. A date-driven term (due on a day of the month)
-/// has no net-days equivalent: it is reported and treated as due on receipt.
+/// QBO term id to the ledger's [`Terms`]: `DueDays` is net days, a
+/// date-driven term (`DayOfMonthDue`, `DueNextMonthDays`) is a day of the
+/// month (D41). Discounts (`DiscountPercent`, `DiscountDays`,
+/// `DiscountDayOfMonth`) are not carried; a term with neither shape is
+/// reported and treated as due on receipt.
 fn read_terms(
     replica: &Store,
     realm: &RealmId,
     warnings: &mut Vec<String>,
-) -> Result<HashMap<String, Option<i64>>, StoreError> {
+) -> Result<HashMap<String, Option<Terms>>, StoreError> {
     let mut terms = HashMap::new();
     for entity in entities(replica, realm, EntityType::Term)? {
         let raw = &entity.raw_json;
-        let days = raw.get("DueDays").and_then(Value::as_i64);
-        if days.is_none() {
-            warnings.push(format!(
-                "term {} ({}) is not a net-days term; contacts on it are due on receipt",
-                entity.qbo_id,
-                text(raw, "Name").unwrap_or_default()
-            ));
-        }
-        terms.insert(entity.qbo_id.clone(), days);
+        let int = |field: &str| raw.get(field).and_then(Value::as_i64);
+        let read = match (int("DueDays"), int("DayOfMonthDue")) {
+            (_, Some(day)) => Some(Terms::DayOfMonth {
+                day: u32::try_from(day).unwrap_or(0),
+                next_month_within: int("DueNextMonthDays")
+                    .and_then(|d| u32::try_from(d).ok())
+                    .unwrap_or(0),
+            }),
+            (Some(days), None) => Some(Terms::Net { days }),
+            (None, None) => None,
+        };
+        let read = match read.map(|t| (t, t.check())) {
+            Some((t, Ok(()))) => Some(t),
+            Some((_, Err(err))) => {
+                warnings.push(format!(
+                    "term {} ({}): {err}; contacts on it are due on receipt",
+                    entity.qbo_id,
+                    text(raw, "Name").unwrap_or_default()
+                ));
+                None
+            }
+            None => {
+                warnings.push(format!(
+                    "term {} ({}) has neither DueDays nor DayOfMonthDue; contacts on it are \
+                     due on receipt",
+                    entity.qbo_id,
+                    text(raw, "Name").unwrap_or_default()
+                ));
+                None
+            }
+        };
+        terms.insert(entity.qbo_id.clone(), read);
     }
     Ok(terms)
 }
@@ -439,7 +466,7 @@ fn import_contacts(
     replica: &Store,
     realm: &RealmId,
     company: &str,
-    terms: &HashMap<String, Option<i64>>,
+    terms: &HashMap<String, Option<Terms>>,
     now: DateTime<Utc>,
     report: &mut SlimReport,
 ) -> Result<(), SlimError> {
@@ -460,7 +487,8 @@ fn import_contacts(
             let is_tax_exempt = kind == ContactKind::Customer
                 && (raw.get("Taxable").and_then(Value::as_bool) == Some(false)
                     || raw.get("ResaleNum").is_some());
-            let contact = Contact {
+            let term_ref = reference(raw, term_field);
+            let mut contact = Contact {
                 contact_id: entity.qbo_id.clone(),
                 kind,
                 display_name,
@@ -469,13 +497,17 @@ fn import_contacts(
                 phone: nested_text(raw, "PrimaryPhone", "FreeFormNumber"),
                 bill_address: address(raw.get("BillAddr")),
                 ship_address: address(raw.get("ShipAddr")),
-                terms_days: reference(raw, term_field)
-                    .and_then(|id| terms.get(&id).copied().flatten()),
+                terms_days: None,
+                due_day: None,
                 is_tax_exempt,
                 default_class: None,
                 is_active: raw.get("Active").and_then(Value::as_bool).unwrap_or(true),
                 source_ref: Some(entity.qbo_id.clone()),
+                terms_source_ref: term_ref.clone(),
             };
+            if let Some(read) = term_ref.and_then(|id| terms.get(&id).copied().flatten()) {
+                contact.set_terms(read);
+            }
             match books::upsert_contact(ledger, company, &contact, now) {
                 Ok(()) => match kind {
                     ContactKind::Customer => report.customers += 1,

@@ -482,6 +482,25 @@ unique per kind; an item's accounts and class must exist, and an inventory
 item (and only one) carries an `asset_account`. `source_ref` keeps the QBO id
 when the slim import loads them.
 
+A contact's terms (D41) go either as `terms_days` (net days; null is due on
+receipt) or as a `terms` object, which also says QBO's date-driven terms:
+
+```json
+{ "name": "upsert_contact", "arguments": { "contact": {
+  "contact_id": "cust-lakeside", "kind": "Customer", "display_name": "Lakeside YMCA",
+  "terms": { "type": "day_of_month", "day": 1, "next_month_within": 5 } } } }
+```
+
+`{ "type": "net", "days": 30 }` is the same as `"terms_days": 30`; both
+sent and disagreeing is refused. `day_of_month` is due on `day` (1 to 31,
+the month's last day when it has fewer), the first such day on or after the
+document date, a month later when that is `next_month_within` (0 to 31) days
+or fewer away. Every contact comes back with `terms_days` (null on
+day-of-month terms), `terms` (always set; due on receipt is net 0),
+`terms_label` (`"Net 30"`, `"Due on receipt"`, `"Due the 1st"`, `"Due the
+last of the month"`) and `terms_source_ref` (the QBO term id the slim import
+read them from, kept like `source_ref`).
+
 ### `create_document`
 
 The standalone entry path (D28), and the one a repointed skill should use.
@@ -753,7 +772,8 @@ progress. The same output comes from the CLI: `ledger render document` and
 **What prints.** Everything comes from saved documents and master data: the
 newest version of the document; the contact's display or company name and
 bill/ship addresses (newline-separated in `contacts`); the number, date,
-terms (`Net N` from the due date, else the contact's terms) and due date;
+terms (the contact's day-of-month terms when they gave this due date, else
+`Net N` from the due date, else the contact's terms) and due date;
 each line's item SKU and description (the line's own description first),
 quantity, rate (amount ÷ quantity) and amount; subtotal, discount, sales tax
 at its rate, total; amount paid and balance due from the same open-item rule

@@ -58,7 +58,7 @@ pub use mcp_stdio::{ToolError, ToolSpec};
 
 use crate::accountant::{self, AccountantError};
 use crate::authnet::link::{self, HostedPaymentClient, LinkError};
-use crate::books::{self, Book, BooksError, Contact, Item};
+use crate::books::{self, Book, BooksError, Contact, Item, Terms};
 use crate::payroll::{self, PayrollError};
 use crate::post::{self, PostError, Posting};
 use crate::render::{self, PayLinkMode, PayLinkOutcome, RenderConfig, RenderError};
@@ -472,12 +472,30 @@ impl<'a> LedgerToolSet<'a> {
 
     fn upsert_contact(&mut self, args: &mut Value) -> Result<Value, ToolError> {
         self.refuse_if_replaying()?;
-        let raw = args
+        let mut raw = args
             .get_mut("contact")
             .map(Value::take)
             .ok_or_else(|| ToolError::new("missing \"contact\""))?;
-        let contact: Contact = serde_json::from_value(raw)
+        // `terms` (D41) is the other way to say what `terms_days` says.
+        let terms = match raw.as_object_mut().and_then(|map| map.remove("terms")) {
+            None | Some(Value::Null) => None,
+            Some(value) => Some(
+                serde_json::from_value::<Terms>(value)
+                    .map_err(|err| ToolError::new(format!("invalid \"terms\": {err}")))?,
+            ),
+        };
+        let mut contact: Contact = serde_json::from_value(raw)
             .map_err(|err| ToolError::new(format!("invalid \"contact\": {err}")))?;
+        if let Some(terms) = terms {
+            if (contact.terms_days.is_some() || contact.due_day.is_some())
+                && terms != contact.terms()
+            {
+                return Err(ToolError::new(
+                    "\"terms\" and \"terms_days\" disagree; send one of them",
+                ));
+            }
+            contact.set_terms(terms);
+        }
         books::upsert_contact(self.ledger, &self.company, &contact, Utc::now())
             .map_err(books_err)?;
         self.with_locked_through(json!({ "contact": contact_json(&contact) }))
@@ -1309,8 +1327,14 @@ pub fn tools() -> Vec<ToolSpec> {
             description: "Creates or replaces a customer or vendor. `contact`: `contact_id`, \
                 `kind` (\"Customer\" or \"Vendor\"), `display_name` (unique per kind), and \
                 optionally `company_name`, `email`, `phone`, `bill_address`, `ship_address`, \
-                `terms_days` (net days; null is due on receipt), `is_tax_exempt`, \
-                `default_class`, `is_active`, `source_ref` (the QBO id when imported).",
+                `terms_days` (net days; null is due on receipt) or instead `terms` \
+                (`{\"type\": \"net\", \"days\": 30}` or `{\"type\": \"day_of_month\", \
+                \"day\": 1, \"next_month_within\": 5}`: due on that day, clamped to the \
+                month's last, a month later when dated that many days or fewer before it), \
+                `is_tax_exempt`, `default_class`, `is_active`, `source_ref` (the QBO id when \
+                imported), `terms_source_ref` (the QBO term id when imported). A contact \
+                comes back with `terms_days`, `terms` and `terms_label` (\"Net 30\", \
+                \"Due the 1st\").",
             input_schema: tool_schema(json!({ "contact": { "type": "object" } }), &["contact"]),
         },
         ToolSpec {
@@ -2272,6 +2296,9 @@ fn contact_json(contact: &Contact) -> Value {
         "bill_address": contact.bill_address,
         "ship_address": contact.ship_address,
         "terms_days": contact.terms_days,
+        "terms": contact.terms(),
+        "terms_label": contact.terms().label(),
+        "terms_source_ref": contact.terms_source_ref,
         "is_tax_exempt": contact.is_tax_exempt,
         "default_class": class_id_json(&contact.default_class),
         "is_active": contact.is_active,
@@ -2961,6 +2988,66 @@ mod tests {
             }}),
         );
         assert_ne!(response["result"]["isError"], json!(true), "{response}");
+    }
+
+    #[test]
+    fn a_contact_takes_day_of_month_terms_and_an_invoice_is_due_by_them() {
+        let ledger = seed_ledger();
+        let mut server = new_server(&ledger, COMPANY.to_string());
+        seed_master_data(&mut server);
+
+        let response = call_tool(
+            &mut server,
+            10,
+            "upsert_contact",
+            json!({ "contact": { "contact_id": "c-club", "kind": "Customer",
+                "display_name": "Swim Club",
+                "terms": { "type": "day_of_month", "day": 31, "next_month_within": 5 } } }),
+        );
+        assert_ne!(response["result"]["isError"], json!(true), "{response}");
+        let contact = &response["result"]["structuredContent"]["contact"];
+        assert_eq!(contact["terms_days"], Value::Null);
+        assert_eq!(
+            contact["terms"],
+            json!({ "type": "day_of_month", "day": 31, "next_month_within": 5 })
+        );
+        assert_eq!(contact["terms_label"], json!("Due the last of the month"));
+
+        // Net terms still come back in both shapes.
+        let listed = call_tool(&mut server, 11, "list_contacts", json!({ "query": "pool" }));
+        let pool = &listed["result"]["structuredContent"][0];
+        assert_eq!(pool["terms_days"], json!(30));
+        assert_eq!(pool["terms"], json!({ "type": "net", "days": 30 }));
+        assert_eq!(pool["terms_label"], json!("Net 30"));
+
+        // `terms` and a disagreeing `terms_days` are refused.
+        let response = call_tool(
+            &mut server,
+            12,
+            "upsert_contact",
+            json!({ "contact": { "contact_id": "c-club", "kind": "Customer",
+                "display_name": "Swim Club", "terms_days": 30,
+                "terms": { "type": "day_of_month", "day": 1 } } }),
+        );
+        assert_eq!(response["result"]["isError"], json!(true), "{response}");
+
+        // Dated 2027-01-28, the 31st is 3 days away: due the last of February.
+        let response = call_tool(
+            &mut server,
+            13,
+            "create_document",
+            json!({ "actor": "dan", "document": {
+                "kind": "Invoice", "txn_date": "2027-01-28",
+                "contact": { "kind": "Customer", "id": "c-club" },
+                "lines": [{ "kind": "Item", "item_id": "mat", "amount": "100.00",
+                            "is_taxable": true }]
+            }}),
+        );
+        assert_ne!(response["result"]["isError"], json!(true), "{response}");
+        assert_eq!(
+            response["result"]["structuredContent"]["due_date"],
+            json!("2027-02-28")
+        );
     }
 
     #[test]
