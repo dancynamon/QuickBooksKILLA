@@ -418,7 +418,7 @@ pub fn translate(
         }
     }
     let is_voided = entity.is_deleted || json_text(raw, "TxnStatus").as_deref() == Some("Voided");
-    let document_id = format!("qbo:{}:{}", entity.entity_type.as_str(), qbo_id);
+    let document_id = qbo_document_id(doc_kind, &qbo_id);
     let memo = doc
         .private_note
         .clone()
@@ -448,6 +448,31 @@ pub fn translate(
         class_sources,
         warnings,
     })
+}
+
+/// The ledger document id of an imported QBO document: `qbo:<Type>:<id>`,
+/// `<Type>` the QBO entity name. Every imported document is saved under this
+/// id, and every imported application targets it, so a payment imported
+/// after its invoice relieves exactly that invoice in
+/// [`crate::books::open_documents`].
+pub fn qbo_document_id(kind: DocKind, qbo_id: &str) -> String {
+    let entity = match kind {
+        DocKind::Estimate => "Estimate",
+        DocKind::Invoice => "Invoice",
+        DocKind::SalesReceipt => "SalesReceipt",
+        DocKind::CreditMemo => "CreditMemo",
+        DocKind::RefundReceipt => "RefundReceipt",
+        DocKind::Payment => "Payment",
+        DocKind::PurchaseOrder => "PurchaseOrder",
+        DocKind::Bill => "Bill",
+        DocKind::BillPayment => "BillPayment",
+        DocKind::VendorCredit => "VendorCredit",
+        DocKind::Purchase => "Purchase",
+        DocKind::Deposit => "Deposit",
+        DocKind::JournalEntry => "JournalEntry",
+        other => other.as_str(),
+    };
+    format!("qbo:{entity}:{qbo_id}")
 }
 
 /// The line kind a QBO pseudo item stands for, or `None` for a real item id.
@@ -707,7 +732,7 @@ fn collect_applications(
                         amount
                     };
                     applications.push(Application {
-                        target_document_id: txn_id,
+                        target_document_id: qbo_document_id(target_kind, &txn_id),
                         target_kind,
                         amount,
                     })

@@ -502,6 +502,74 @@ pub fn next_number(ledger: &Ledger, company: &str, kind: DocKind) -> Result<Stri
     Ok(candidate.to_string())
 }
 
+/// Makes sure the next number [`next_number`] hands out for `kind` is at
+/// least `at_least`, and never lowers it. The slim cutover import (D28) uses
+/// this to carry numbering on past QBO's highest number, which usually sits
+/// on a paid document the import never brings across, so seeding from the
+/// saved documents alone would reissue it.
+pub fn ensure_next_number(
+    ledger: &Ledger,
+    company: &str,
+    kind: DocKind,
+    at_least: i64,
+) -> Result<i64, BooksError> {
+    let conn = ledger.conn();
+    let tx = conn.unchecked_transaction()?;
+    let stored: Option<i64> = tx
+        .query_row(
+            "SELECT next_number FROM doc_sequences WHERE company_id = ?1 AND doc_type = ?2",
+            params![company, kind.as_str()],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let saved_next: i64 = tx
+        .query_row(
+            "SELECT MAX(CAST(doc_number AS INTEGER)) FROM document_versions
+             WHERE company_id = ?1 AND doc_type = ?2
+               AND doc_number <> '' AND doc_number NOT GLOB '*[^0-9]*'",
+            params![company, kind.as_str()],
+            |row| row.get::<_, Option<i64>>(0),
+        )?
+        .map_or(FIRST_NUMBER, |n| n + 1);
+    let next = stored.unwrap_or(saved_next).max(saved_next).max(at_least);
+    tx.execute(
+        "INSERT INTO doc_sequences (company_id, doc_type, next_number) VALUES (?1, ?2, ?3)
+         ON CONFLICT (company_id, doc_type) DO UPDATE SET next_number = excluded.next_number",
+        params![company, kind.as_str(), next],
+    )?;
+    tx.commit()?;
+    Ok(next)
+}
+
+/// The oplog kind the slim cutover import (`crate::slim`) saves an open
+/// document under. Such a document's AR or AP sits in the opening entry, not
+/// in an entry of its own, so it must never be posted: see
+/// [`carried_by_opening`].
+pub const SLIM_OPEN_ITEM_KIND: &str = "import_slim_open_item";
+
+/// Whether `document_id` was brought across by the slim cutover import as an
+/// open item whose balance the opening entry carries (D28). Posting such a
+/// document, or a new version of it, would put its AR or AP on the books a
+/// second time; the writers that post refuse it and say why.
+pub fn carried_by_opening(
+    ledger: &Ledger,
+    company: &str,
+    document_id: &str,
+) -> Result<bool, BooksError> {
+    Ok(ledger
+        .conn()
+        .query_row(
+            "SELECT 1 FROM document_versions dv JOIN oplog o
+               ON o.company_id = dv.company_id AND o.command_id = dv.command_id
+             WHERE dv.company_id = ?1 AND dv.document_id = ?2 AND o.kind = ?3
+             LIMIT 1",
+            params![company, document_id, SLIM_OPEN_ITEM_KIND],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some())
+}
+
 /// The document of type `kind` that holds `number` in its newest version.
 fn number_owner(
     conn: &rusqlite::Connection,
@@ -730,7 +798,7 @@ pub fn document_total(doc: &LedgerDocument) -> Result<Money, ledger_core::MoneyE
 // ---------------------------------------------------------------------------
 
 /// Which side of the book: what customers owe, or what is owed to vendors.
-#[derive(Copy, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Book {
     Receivable,
@@ -821,8 +889,7 @@ fn contact_names(ledger: &Ledger, company: &str) -> Result<HashMap<String, Strin
 }
 
 /// Every document with something still open on `book` as of `as_of`, oldest
-/// first. Open = total less every application to it from a settling document
-/// dated on or before `as_of`. Due date is the document's own, else its date.
+/// first. See [`open_items`] for what "open" means.
 pub fn open_documents(
     ledger: &Ledger,
     company: &str,
@@ -830,54 +897,126 @@ pub fn open_documents(
     as_of: NaiveDate,
 ) -> Result<Vec<OpenDocument>, BooksError> {
     let docs = latest_documents(ledger, company, book.doc_types(), as_of)?;
-    let mut applied: HashMap<&str, Money> = HashMap::new();
-    for doc in docs.iter().filter(|d| book.settles(d.kind)) {
-        for application in &doc.applications {
-            let entry = applied
+    let names = contact_names(ledger, company)?;
+    Ok(open_items(&docs, book, as_of, &names)?)
+}
+
+/// The open items on `book` among `docs` as of `as_of`, oldest first. Pure,
+/// so the slim cutover import (`crate::slim`) can work out what was open in
+/// QBO on a date from translated replica documents with exactly the rule the
+/// ledger applies to its own.
+///
+/// - An invoice or bill is open for its total less every application to it
+///   from a settling document dated on or before `as_of`.
+/// - A credit memo or vendor credit is a negative open item, used up by its
+///   own applications and by applications to it inside a payment. Inside a
+///   payment those carry the sign of what the payment takes out of AR or AP
+///   (`crate::import::translate`: negative for a credit), so a payment's
+///   application to a credit adds to what is used rather than to what is
+///   left.
+/// - A bill payment's unapplied remainder is a negative open item on
+///   payables: `crate::post` debits it to 2000 like an application, so AP
+///   aging has to carry it to tie. A customer payment's unapplied remainder
+///   parks in 2300 (W8), not 1200, and is never an AR open item.
+///
+/// Due date is the document's own, else its date. `names` maps contact ids
+/// to display names; an id with no name shows as itself.
+pub fn open_items(
+    docs: &[LedgerDocument],
+    book: Book,
+    as_of: NaiveDate,
+    names: &HashMap<String, String>,
+) -> Result<Vec<OpenDocument>, ledger_core::MoneyError> {
+    let in_window = |doc: &&LedgerDocument| doc.txn_date <= as_of && !doc.is_voided;
+    // Applications from settling documents, by target, signed as recorded.
+    let mut paid: HashMap<&str, Money> = HashMap::new();
+    // A credit's own applications, by the credit itself.
+    let mut consumed: HashMap<&str, Money> = HashMap::new();
+    // A link to an estimate or purchase order says where a line came from;
+    // it moves no money.
+    let moves_money =
+        |a: &&crate::types::Application| !matches!(a.target_kind, DocKind::Estimate | DocKind::PurchaseOrder);
+    for doc in docs.iter().filter(in_window).filter(|d| book.settles(d.kind)) {
+        for application in doc.applications.iter().filter(moves_money) {
+            let entry = paid
                 .entry(application.target_document_id.as_str())
                 .or_insert(Money::ZERO);
             *entry = entry.checked_add(application.amount)?;
         }
-        // A credit memo's own applications use it up as well.
         if book.opens(doc.kind) == Some(true) {
-            let used = Money::checked_sum(doc.applications.iter().map(|a| a.amount))?;
-            let entry = applied
+            let used = Money::checked_sum(
+                doc.applications
+                    .iter()
+                    .filter(moves_money)
+                    .map(|a| a.amount),
+            )?;
+            let entry = consumed
                 .entry(doc.document_id.as_str())
                 .or_insert(Money::ZERO);
             *entry = entry.checked_add(used)?;
         }
     }
 
-    let names = contact_names(ledger, company)?;
     let mut open = Vec::new();
-    for doc in &docs {
-        let Some(is_credit) = book.opens(doc.kind) else {
-            continue;
-        };
-        let gross = document_total(doc)?;
-        let used = applied
-            .get(doc.document_id.as_str())
-            .copied()
-            .unwrap_or(Money::ZERO);
-        let remaining = gross.checked_sub(used)?;
-        if remaining.is_zero() {
-            continue;
-        }
-        let sign = |m: Money| if is_credit { m.checked_neg() } else { Ok(m) };
+    for doc in docs.iter().filter(in_window) {
         let contact_id = doc
             .contact
             .as_ref()
             .map(|c| c.id.clone())
             .unwrap_or_default();
+        let contact_name = names
+            .get(&contact_id)
+            .cloned()
+            .unwrap_or_else(|| contact_id.clone());
+
+        if book == Book::Payable && doc.kind == DocKind::BillPayment {
+            if !doc.unapplied.is_zero() {
+                let prepaid = doc.unapplied.checked_neg()?;
+                open.push(OpenDocument {
+                    document_id: doc.document_id.clone(),
+                    kind: doc.kind,
+                    number: doc.number.clone(),
+                    contact_id,
+                    contact_name,
+                    txn_date: doc.txn_date,
+                    due_date: doc.txn_date,
+                    total: prepaid,
+                    applied: Money::ZERO,
+                    open: prepaid,
+                });
+            }
+            continue;
+        }
+
+        let Some(is_credit) = book.opens(doc.kind) else {
+            continue;
+        };
+        let gross = document_total(doc)?;
+        let from_payments = paid
+            .get(doc.document_id.as_str())
+            .copied()
+            .unwrap_or(Money::ZERO);
+        let used = if is_credit {
+            let own = consumed
+                .get(doc.document_id.as_str())
+                .copied()
+                .unwrap_or(Money::ZERO);
+            // A payment records its use of a credit as a negative amount.
+            own.checked_sub(from_payments)?
+        } else {
+            from_payments
+        };
+        let remaining = gross.checked_sub(used)?;
+        if remaining.is_zero() {
+            continue;
+        }
+        let sign = |m: Money| if is_credit { m.checked_neg() } else { Ok(m) };
         open.push(OpenDocument {
             document_id: doc.document_id.clone(),
             kind: doc.kind,
             number: doc.number.clone(),
-            contact_name: names
-                .get(&contact_id)
-                .cloned()
-                .unwrap_or_else(|| contact_id.clone()),
             contact_id,
+            contact_name,
             txn_date: doc.txn_date,
             due_date: doc.due_date.unwrap_or(doc.txn_date),
             total: sign(gross)?,
@@ -902,7 +1041,8 @@ pub struct AgingRow {
 }
 
 impl AgingRow {
-    fn add(&mut self, days_past_due: i64, amount: Money) -> Result<(), ledger_core::MoneyError> {
+    /// Adds `amount` to the bucket `days_past_due` falls in, and to the total.
+    pub fn add(&mut self, days_past_due: i64, amount: Money) -> Result<(), ledger_core::MoneyError> {
         let bucket = match days_past_due {
             i64::MIN..=0 => &mut self.current,
             1..=30 => &mut self.days_1_30,

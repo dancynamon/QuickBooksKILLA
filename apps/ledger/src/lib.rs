@@ -49,6 +49,7 @@ pub mod nightly;
 pub mod pipeline;
 pub mod post;
 pub mod report;
+pub mod slim;
 pub mod store;
 pub mod types;
 pub mod verify;

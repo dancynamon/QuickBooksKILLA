@@ -338,6 +338,22 @@ impl<'a> LedgerToolSet<'a> {
         Ok(())
     }
 
+    /// D28: an open item the slim cutover import brought across is carried
+    /// by the opening entry. Posting a new version of it would put its AR or
+    /// AP on the books a second time.
+    fn refuse_if_carried_by_opening(&self, document_id: &str) -> Result<(), ToolError> {
+        if books::carried_by_opening(self.ledger, &self.company, document_id)
+            .map_err(books_err)?
+        {
+            return Err(ToolError::new(format!(
+                "{document_id} came across in the cutover import and its balance sits in the \
+                 opening entry; settle it with a payment or credit, or adjust it with a journal \
+                 entry, rather than editing it"
+            )));
+        }
+        Ok(())
+    }
+
     /// Attaches the company's current `locked_through` to a write's result,
     /// so a caller always sees the gate it is or is not up against —
     /// required on every write tool by this module's own docs.
@@ -397,6 +413,7 @@ impl<'a> LedgerToolSet<'a> {
         let doc: LedgerDocument = serde_json::from_value(document_value)
             .map_err(|err| ToolError::new(format!("invalid \"document\": {err}")))?;
 
+        self.refuse_if_carried_by_opening(&doc.document_id)?;
         let (doc, ctx) =
             books::prepare_document(self.ledger, &self.company, doc, PostingConfig::default())
                 .map_err(books_err)?;
@@ -459,6 +476,7 @@ impl<'a> LedgerToolSet<'a> {
         normalize_money_fields(&mut document_value);
         let doc: LedgerDocument = serde_json::from_value(document_value)
             .map_err(|err| ToolError::new(format!("invalid \"document\": {err}")))?;
+        self.refuse_if_carried_by_opening(&doc.document_id)?;
 
         let now = Utc::now();
         let version = self
