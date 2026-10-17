@@ -8,7 +8,7 @@ use std::process::Command;
 
 use chrono::{DateTime, NaiveDate, Utc};
 
-use ledger::authnet::{self, AuthnetConfig};
+use ledger::authnet::{self, AuthnetConfig, ResolvedInvoice};
 use ledger::bank::{MatchRules, NewStatement, ParsedLine};
 use ledger::chart;
 use ledger::post::{self, Posting};
@@ -137,13 +137,19 @@ fn import_sample(ledger: &Ledger, known_invoices: &[(&str, &str, DocKind)]) -> I
     assert_eq!(batches.len(), 1, "one batch in the sample");
 
     let cfg = config();
-    let resolve = |number: &str| -> Option<(String, DocKind)> {
+    // Fixed invoices with no balance limit: the open-balance cap is
+    // `import_settlement`'s, covered in `authnet_link.rs`.
+    let resolve = |number: &str| -> Option<ResolvedInvoice> {
         known_invoices
             .iter()
             .find(|(inv_number, _, _)| *inv_number == number)
-            .map(|(_, doc_id, kind)| (doc_id.to_string(), *kind))
+            .map(|(_, doc_id, kind)| ResolvedInvoice {
+                document_id: doc_id.to_string(),
+                kind: *kind,
+                open: Money::from_minor(i64::MAX),
+            })
     };
-    let documents = authnet::settlement_documents(&batches, &cfg, &resolve);
+    let documents = authnet::settlement_documents(&batches, &cfg, &resolve).expect("builds");
 
     let ctx = PostingContext::default();
     let mut counts = ImportCounts::default();
@@ -343,7 +349,7 @@ Transaction ID,Transaction Status,Settlement Date/Time,Batch ID,Settlement Amoun
     let rows = authnet::parse_transactions(text).expect("parses");
     let batches = authnet::group_batches(&rows).expect("groups");
     let never_resolves = |_: &str| None;
-    let documents = authnet::settlement_documents(&batches, &cfg, &never_resolves);
+    let documents = authnet::settlement_documents(&batches, &cfg, &never_resolves).expect("builds");
     let payment = documents
         .iter()
         .find(|doc| doc.kind == DocKind::Payment)

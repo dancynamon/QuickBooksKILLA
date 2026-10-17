@@ -107,13 +107,24 @@ and for each settled refund a `RefundReceipt` under `--refund-class` (default
 `drop`, since the export carries no class or item information to derive one
 from).
 
+**A sale never applies more than the invoice still has open.** The
+application is capped at the invoice's open balance (total less every
+payment and credit applied to it, whatever its date), less what earlier rows
+in the same file already applied to it. The rest of the sale is parked in
+2300 with a `warning:` line naming the split, e.g. `106.62 applied, 13.38
+over its open balance parked unapplied`. An invoice already paid in full (two
+links both paid, or a check plus a link) or voided takes the whole sale
+unapplied (`nothing left open on it`). Dan then refunds the customer or
+applies the credit to their next invoice.
+
 **Re-importing the same file posts nothing new.** Every document's id is
 deterministic from the batch/transaction id, and a settled Authorize.net
 transaction never changes once it appears in this export — so a document
 whose id has already been saved is skipped outright rather than replaced
 (unlike a QBO import, which re-posts a document whose payload changed).
 Running the same file twice reports `skipped (already imported): N` and
-`batches settled: 0`.
+`batches settled: 0`. Already-imported sales are left out before the
+open-balance cap is worked out, since the balance already reflects them.
 
 ```
 --clearing NUM        Authorize.net clearing account, default 1160.

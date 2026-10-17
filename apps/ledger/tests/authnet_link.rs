@@ -240,6 +240,141 @@ fn invoice_to_link_to_settlement_clears_the_ar_aging() {
     assert_eq!(again.applied, 0);
 }
 
+/// One invoice of $100.00 + tax = $106.62, open on the receivable book.
+fn invoice_and_server(ledger: &Ledger) -> (Server<'_>, String, String) {
+    let mut server =
+        mcp::new_server_with_payments(ledger, COMPANY.into(), Box::new(MockAuthnet::new()));
+    seed_master_data(&mut server);
+    let (invoice_id, number, total) = create_invoice(&mut server, 3, "100.00");
+    assert_eq!(total, "106.62");
+    (server, invoice_id, number)
+}
+
+fn settlement_csv(rows: &[(&str, &str, &str)]) -> String {
+    let mut csv = String::from(
+        "Transaction ID,Transaction Status,Settlement Date/Time,Batch ID,Settlement Amount,Invoice Number,Customer ID\n",
+    );
+    for (txn, amount, number) in rows {
+        csv.push_str(&format!(
+            "{txn},Settled Successfully,9/20/2026,b88,{amount},{number},cpool\n"
+        ));
+    }
+    csv
+}
+
+fn import(ledger: &Ledger, csv: &str) -> authnet::ImportReport {
+    let report =
+        authnet::import_settlement(ledger, COMPANY, csv, &authnet_config(), "test", Utc::now())
+            .unwrap();
+    assert!(report.rejected.is_empty(), "{report:?}");
+    report
+}
+
+fn payment(ledger: &Ledger, txn: &str) -> LedgerDocument {
+    let payload = ledger
+        .latest_document_payload(COMPANY, &format!("authnet:txn:{txn}"))
+        .unwrap()
+        .unwrap();
+    serde_json::from_str(&payload).unwrap()
+}
+
+fn applied(doc: &LedgerDocument) -> Money {
+    Money::checked_sum(doc.applications.iter().map(|a| a.amount)).unwrap()
+}
+
+fn open_on(ledger: &Ledger, invoice_id: &str) -> Money {
+    books::open_documents(
+        ledger,
+        COMPANY,
+        Book::Receivable,
+        "2026-12-31".parse().unwrap(),
+    )
+    .unwrap()
+    .into_iter()
+    .find(|d| d.document_id == invoice_id)
+    .map(|d| d.open)
+    .unwrap_or(Money::ZERO)
+}
+
+#[test]
+fn an_exact_payment_applies_in_full() {
+    let ledger = seed_ledger();
+    let (_server, invoice_id, number) = invoice_and_server(&ledger);
+    let report = import(&ledger, &settlement_csv(&[("70001", "106.62", &number)]));
+    assert_eq!((report.applied, report.unapplied), (1, 0), "{report:?}");
+    assert!(report.warnings.is_empty());
+    let doc = payment(&ledger, "70001");
+    assert_eq!(applied(&doc), Money::from_minor(10_662));
+    assert_eq!(doc.unapplied, Money::ZERO);
+    assert_eq!(open_on(&ledger, &invoice_id), Money::ZERO);
+}
+
+#[test]
+fn an_overpayment_applies_the_open_balance_and_parks_the_rest() {
+    let ledger = seed_ledger();
+    let (_server, invoice_id, number) = invoice_and_server(&ledger);
+    let report = import(&ledger, &settlement_csv(&[("70002", "120.00", &number)]));
+    assert_eq!((report.applied, report.unapplied), (0, 1), "{report:?}");
+    let doc = payment(&ledger, "70002");
+    assert_eq!(applied(&doc), Money::from_minor(10_662));
+    assert_eq!(doc.unapplied, Money::from_minor(1_338));
+    assert_eq!(open_on(&ledger, &invoice_id), Money::ZERO);
+    let warning = &report.warnings[0];
+    assert!(warning.contains("106.62 applied"), "{warning}");
+    assert!(warning.contains("13.38 over its open balance"), "{warning}");
+}
+
+#[test]
+fn a_payment_against_an_already_paid_invoice_is_all_unapplied() {
+    let ledger = seed_ledger();
+    let (mut server, invoice_id, number) = invoice_and_server(&ledger);
+    // Paid by check first.
+    ok(&call_tool(
+        &mut server,
+        4,
+        "create_document",
+        json!({ "actor": "dan", "document": {
+            "kind": "Payment", "txn_date": "2026-09-25",
+            "contact": { "kind": "Customer", "id": "cpool" },
+            "applications": [{ "target_document_id": invoice_id,
+                               "target_kind": "Invoice", "amount": "106.62" }]
+        }}),
+    ));
+    let report = import(&ledger, &settlement_csv(&[("70003", "106.62", &number)]));
+    assert_eq!((report.applied, report.unapplied), (0, 1), "{report:?}");
+    let doc = payment(&ledger, "70003");
+    assert!(doc.applications.is_empty());
+    assert_eq!(doc.unapplied, Money::from_minor(10_662));
+    assert!(
+        report.warnings[0].contains("nothing left open"),
+        "{report:?}"
+    );
+    assert_eq!(open_on(&ledger, &invoice_id), Money::ZERO);
+}
+
+#[test]
+fn two_sales_in_one_file_for_one_invoice_share_its_open_balance() {
+    let ledger = seed_ledger();
+    let (_server, invoice_id, number) = invoice_and_server(&ledger);
+    let csv = settlement_csv(&[("70004", "80.00", &number), ("70005", "80.00", &number)]);
+    let report = import(&ledger, &csv);
+    assert_eq!((report.applied, report.unapplied), (1, 1), "{report:?}");
+    assert_eq!(
+        applied(&payment(&ledger, "70004")),
+        Money::from_minor(8_000)
+    );
+    let second = payment(&ledger, "70005");
+    assert_eq!(applied(&second), Money::from_minor(2_662));
+    assert_eq!(second.unapplied, Money::from_minor(5_338));
+    assert_eq!(open_on(&ledger, &invoice_id), Money::ZERO);
+
+    // A re-import neither posts them again nor re-counts them against the
+    // (now zero) open balance.
+    let again = import(&ledger, &csv);
+    assert_eq!(again.skipped, 3);
+    assert_eq!((again.applied, again.unapplied), (0, 0));
+}
+
 #[test]
 fn a_voided_invoice_a_non_invoice_and_an_unknown_id_are_refused() {
     let ledger = seed_ledger();
