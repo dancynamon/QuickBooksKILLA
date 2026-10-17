@@ -57,6 +57,7 @@ use mcp_stdio::{ServerInfo, ToolSet};
 pub use mcp_stdio::{ToolError, ToolSpec};
 
 use crate::accountant::{self, AccountantError};
+use crate::authnet::link::{self, HostedPaymentClient, LinkError};
 use crate::books::{self, Book, BooksError, Contact, Item};
 use crate::post::{self, PostError, Posting};
 use crate::report;
@@ -86,6 +87,9 @@ use ledger_core::Money;
 pub struct LedgerToolSet<'a> {
     ledger: &'a Ledger,
     company: String,
+    /// The Authorize.net client `payment_link` asks for a hosted page.
+    /// `None`: the tool says it is not configured.
+    payments: Option<Box<dyn HostedPaymentClient + 'a>>,
 }
 
 impl<'a> ToolSet for LedgerToolSet<'a> {
@@ -108,7 +112,36 @@ pub fn new_server(ledger: &Ledger, company: String) -> Server<'_> {
         name: "ledger",
         version: env!("CARGO_PKG_VERSION"),
     };
-    mcp_stdio::Server::new(LedgerToolSet { ledger, company }, info)
+    mcp_stdio::Server::new(
+        LedgerToolSet {
+            ledger,
+            company,
+            payments: None,
+        },
+        info,
+    )
+}
+
+/// [`new_server`] with an Authorize.net client behind `payment_link`
+/// (`crate::authnet::link`): `HttpAuthnetClient` in `ledger-mcp`,
+/// `MockAuthnet` under test.
+pub fn new_server_with_payments<'a>(
+    ledger: &'a Ledger,
+    company: String,
+    payments: Box<dyn HostedPaymentClient + 'a>,
+) -> Server<'a> {
+    let info = ServerInfo {
+        name: "ledger",
+        version: env!("CARGO_PKG_VERSION"),
+    };
+    mcp_stdio::Server::new(
+        LedgerToolSet {
+            ledger,
+            company,
+            payments: Some(payments),
+        },
+        info,
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -265,6 +298,7 @@ impl<'a> LedgerToolSet<'a> {
             "decide_adjustment" => self.decide_adjustment(&args),
             "bank_confirm_proposal" => self.bank_confirm_proposal(&args),
             "close_period" => self.close_period(&args),
+            "payment_link" => self.payment_link(&args),
             "reopen_period" => self.reopen_period(&args),
 
             other => Err(ToolError::new(format!("unknown tool: {other}"))),
@@ -446,6 +480,38 @@ impl<'a> LedgerToolSet<'a> {
             "tax": doc.tax.as_ref().map(|t| money_str(t.total_tax)),
             "entry_id": entry_id,
             "entry": entry_value,
+        }))
+    }
+
+    /// Asks Authorize.net for a hosted payment page for one open invoice
+    /// (`crate::authnet::link`). Writes nothing to the ledger; refused during
+    /// a replay all the same, since the open balance it charges would be
+    /// half-imported.
+    fn payment_link(&mut self, args: &Value) -> Result<Value, ToolError> {
+        self.refuse_if_replaying()?;
+        let document_id = required_str(args, "document_id")?.to_string();
+        let client = self.payments.as_mut().ok_or_else(|| {
+            ToolError::new(
+                "Authorize.net is not configured for this server (docs/AUTHNET.md, \"Payment link\")",
+            )
+        })?;
+        let minted = link::payment_link(
+            self.ledger,
+            &self.company,
+            &document_id,
+            client.as_mut(),
+            Utc::now(),
+        )
+        .map_err(link_err)?;
+        Ok(json!({
+            "document_id": minted.document_id,
+            "invoice_number": minted.invoice_number,
+            "amount": money_str(minted.amount),
+            "environment": minted.environment.as_str(),
+            "url": minted.url,
+            "token": minted.token,
+            "expires_at": minted.expires_at.to_rfc3339(),
+            "html": minted.html(),
         }))
     }
 
@@ -894,6 +960,29 @@ pub fn tools() -> Vec<ToolSpec> {
                     },
                 }),
                 &["document", "actor"],
+            ),
+        },
+        ToolSpec {
+            name: "payment_link",
+            description: "An Authorize.net hosted payment page for one invoice (D15, D30, \
+                docs/AUTHNET.md). Sends the invoice's own number as invoiceNumber and its open \
+                balance as the amount, so the settlement import applies the customer's payment \
+                back to this invoice. Refused for a document that is not an invoice, a voided \
+                invoice, a fully paid one, or one with no number; refused while an import \
+                replay is in progress. Writes nothing to the ledger and moves no money: the \
+                customer pays on Authorize.net's page. The token lasts 15 minutes and must be \
+                POSTed to `url` as form field `token` — `html` is a page that does that on \
+                open. Returns `document_id`, `invoice_number`, `amount`, `environment` \
+                (\"sandbox\" unless production is enabled), `url`, `token`, `expires_at` and \
+                `html`.",
+            input_schema: tool_schema(
+                json!({
+                    "document_id": {
+                        "type": "string",
+                        "description": "The invoice's document_id (create_document returns it).",
+                    },
+                }),
+                &["document_id"],
             ),
         },
         ToolSpec {
@@ -1685,6 +1774,10 @@ fn accountant_err(err: AccountantError) -> ToolError {
     ToolError::new(err.to_string())
 }
 
+fn link_err(err: LinkError) -> ToolError {
+    ToolError::new(err.to_string())
+}
+
 fn post_err(err: PostError) -> ToolError {
     ToolError::new(err.to_string())
 }
@@ -1840,6 +1933,7 @@ mod tests {
             "bank_confirm_proposal",
             "close_period",
             "reopen_period",
+            "payment_link",
         ];
         assert_eq!(listed.len(), expected.len());
         for name in expected {

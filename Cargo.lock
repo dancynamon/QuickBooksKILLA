@@ -545,10 +545,13 @@ dependencies = [
  "rusqlite",
  "rust_decimal",
  "rust_decimal_macros",
+ "security-framework",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror",
+ "toml",
+ "ureq",
  "uuid",
 ]
 
