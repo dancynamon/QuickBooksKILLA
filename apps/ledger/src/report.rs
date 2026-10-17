@@ -720,7 +720,7 @@ impl TbDiff {
     }
 }
 
-fn format_money(amount: Money) -> String {
+pub(crate) fn format_money(amount: Money) -> String {
     let minor = amount.minor();
     let sign = if minor < 0 { "-" } else { "" };
     let abs = minor.unsigned_abs();

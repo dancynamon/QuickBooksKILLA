@@ -873,10 +873,15 @@ side, outside this book, and could not carry the ledger's numbering.
   `docs/AUTHNET.md` are from Authorize.net's testing guide as commonly
   cited, not re-read today.
 
-**Open:** a settled sale is applied for its full amount even if the invoice
-was meanwhile paid another way (two links paid, or a check plus a link), which
-would over-apply the invoice. The import should cap the application at the
-open balance and park the rest unapplied; not changed here.
+**Closed (was open):** a settled sale used to be applied for its full amount
+even if the invoice was meanwhile paid another way (two links paid, or a
+check plus a link), over-applying the invoice. `import_settlement` now caps
+each application at the invoice's open balance (`books::open_documents`,
+receivable book, every date) less what earlier rows in the same file already
+applied, and parks the excess in 2300 with a warning; an invoice with nothing
+open (paid or voided) takes the whole sale unapplied. Sales already imported
+are dropped before the cap is computed, since the open balance already
+reflects them.
 
 ## D31 — Real fixtures: a closed slice, amounts scaled per document, a secret seed
 

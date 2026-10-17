@@ -54,7 +54,9 @@ use chrono::{DateTime, NaiveDate, Utc};
 
 use ledger_core::{Money, MoneyError};
 
+use crate::books::{self, Book, BooksError};
 use crate::post::{self, PostError, Posting};
+use crate::report::format_money;
 use crate::store::{CommandMeta, Ledger, LedgerError};
 use crate::types::{
     AccountId, Application, ClassId, ContactKind, ContactRef, DocKind, DocLine, LedgerDocument,
@@ -243,32 +245,76 @@ fn settlement_document(batch: &SettlementBatch, config: &AuthnetConfig) -> Ledge
     }
 }
 
+/// What a settled sale's `Invoice Number` resolved to: the invoice's
+/// `document_id` and kind (what an `Application` names), and its open
+/// balance before this import ([`crate::books::open_documents`],
+/// `Book::Receivable`). An invoice with nothing left open — fully paid, or
+/// voided — resolves with `open` zero rather than not at all, so the memo can
+/// say which.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResolvedInvoice {
+    pub document_id: String,
+    pub kind: DocKind,
+    pub open: Money,
+}
+
 /// A settled sale's `Payment`: applies to the invoice `resolve_invoice`
-/// finds for `txn.invoice_number`, else the whole amount is `unapplied`
-/// (2300, per `crate::post::post_payment`) — the memo always names the
-/// invoice number that was looked up (or its absence), so a caller can
-/// render a warning for the unapplied case without this function returning
-/// anything richer than a document.
+/// finds for `txn.invoice_number`, capped at what is still open on it —
+/// `remaining`, keyed by `document_id`, starts at the resolver's `open` and
+/// is drawn down by each sale applied in this run, so two links paid in the
+/// same file (or a link paid after a check) never over-apply the invoice.
+/// Whatever the cap leaves over, or the whole amount when nothing resolves,
+/// is `unapplied` (2300, per `crate::post::post_payment`), and the memo says
+/// why, so a caller can render a warning for it without this function
+/// returning anything richer than a document.
 fn payment_document(
     batch: &SettlementBatch,
     txn: &AuthnetTxn,
     config: &AuthnetConfig,
-    resolve_invoice: &dyn Fn(&str) -> Option<(String, DocKind)>,
-) -> LedgerDocument {
+    resolve_invoice: &dyn Fn(&str) -> Option<ResolvedInvoice>,
+    remaining: &mut HashMap<String, Money>,
+) -> Result<LedgerDocument, MoneyError> {
     let resolved = txn.invoice_number.as_deref().and_then(resolve_invoice);
     let (applications, unapplied, memo) = match (&resolved, &txn.invoice_number) {
-        (Some((document_id, kind)), Some(number)) => (
-            vec![Application {
-                target_document_id: document_id.clone(),
-                target_kind: *kind,
-                amount: txn.amount,
-            }],
-            Money::ZERO,
-            format!(
-                "Authorize.net sale {} for invoice {number} (batch {})",
-                txn.txn_id, batch.batch_id
-            ),
-        ),
+        (Some(invoice), Some(number)) => {
+            let open = remaining
+                .entry(invoice.document_id.clone())
+                .or_insert(invoice.open.max(Money::ZERO));
+            let applied = txn.amount.min(*open);
+            *open = open.checked_sub(applied)?;
+            let excess = txn.amount.checked_sub(applied)?;
+            let applications = if applied.is_zero() {
+                Vec::new()
+            } else {
+                vec![Application {
+                    target_document_id: invoice.document_id.clone(),
+                    target_kind: invoice.kind,
+                    amount: applied,
+                }]
+            };
+            let memo = if excess.is_zero() {
+                format!(
+                    "Authorize.net sale {} for invoice {number} (batch {})",
+                    txn.txn_id, batch.batch_id
+                )
+            } else if applied.is_zero() {
+                format!(
+                    "Authorize.net sale {} for invoice {number}: nothing left open on it, {} parked unapplied (batch {})",
+                    txn.txn_id,
+                    format_money(excess),
+                    batch.batch_id
+                )
+            } else {
+                format!(
+                    "Authorize.net sale {} for invoice {number}: {} applied, {} over its open balance parked unapplied (batch {})",
+                    txn.txn_id,
+                    format_money(applied),
+                    format_money(excess),
+                    batch.batch_id
+                )
+            };
+            (applications, excess, memo)
+        }
         (None, Some(number)) => (
             Vec::new(),
             txn.amount,
@@ -287,7 +333,7 @@ fn payment_document(
         ),
     };
 
-    LedgerDocument {
+    Ok(LedgerDocument {
         document_id: format!("authnet:txn:{}", txn.txn_id),
         kind: DocKind::Payment,
         number: None,
@@ -306,7 +352,7 @@ fn payment_document(
         is_voided: false,
         source_ref: Some(txn.txn_id.clone()),
         memo: Some(memo),
-    }
+    })
 }
 
 /// A settled refund's `RefundReceipt`: Dr 4950 under [`AuthnetConfig::refund_class`],
@@ -360,9 +406,11 @@ fn refund_document(
 /// one `Payment` per settled sale, one `RefundReceipt` per settled refund.
 /// `resolve_invoice` looks an invoice number up against whatever store the
 /// caller has (a live `Ledger`, or a fixed map in a test) and returns the
-/// `(document_id, DocKind)` `crate::post::post_payment` needs to build an
+/// [`ResolvedInvoice`] `crate::post::post_payment` needs to build an
 /// `Application` — `None` when no invoice matches, in which case the sale's
-/// whole amount goes `unapplied` to 2300.
+/// whole amount goes `unapplied` to 2300. A sale is applied only up to the
+/// invoice's open balance, tracked across every batch in `batches`, and the
+/// rest goes `unapplied` too ([`payment_document`]).
 ///
 /// `document_id`s (`authnet:<batch_id>` for the settlement,
 /// `authnet:txn:<txn_id>` for each sale/refund) are the re-import dedupe
@@ -373,21 +421,26 @@ fn refund_document(
 pub fn settlement_documents(
     batches: &[SettlementBatch],
     config: &AuthnetConfig,
-    resolve_invoice: &dyn Fn(&str) -> Option<(String, DocKind)>,
-) -> Vec<LedgerDocument> {
+    resolve_invoice: &dyn Fn(&str) -> Option<ResolvedInvoice>,
+) -> Result<Vec<LedgerDocument>, MoneyError> {
+    let mut remaining = HashMap::new();
     let mut documents = Vec::new();
     for batch in batches {
         documents.push(settlement_document(batch, config));
         for txn in &batch.transactions {
             match txn.kind {
-                TxnKind::Sale => {
-                    documents.push(payment_document(batch, txn, config, resolve_invoice))
-                }
+                TxnKind::Sale => documents.push(payment_document(
+                    batch,
+                    txn,
+                    config,
+                    resolve_invoice,
+                    &mut remaining,
+                )?),
                 TxnKind::Refund => documents.push(refund_document(batch, txn, config)),
             }
         }
     }
-    documents
+    Ok(documents)
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -398,6 +451,8 @@ pub enum ImportError {
     Money(#[from] MoneyError),
     #[error(transparent)]
     Ledger(#[from] LedgerError),
+    #[error(transparent)]
+    Books(#[from] BooksError),
 }
 
 /// What [`import_settlement`] did with one file.
@@ -412,7 +467,9 @@ pub struct ImportReport {
     /// `document_id: reason` for every document the store or posting rules
     /// refused. The rest of the file still posts.
     pub rejected: Vec<String>,
-    /// The memo of every sale parked unapplied, for Dan to chase.
+    /// The memo of every sale parked wholly or partly unapplied — no
+    /// matching invoice, or more than the invoice still had open — for Dan
+    /// to chase.
     pub warnings: Vec<String>,
 }
 
@@ -424,7 +481,12 @@ pub struct ImportReport {
 /// Authorize.net transaction is immutable once it appears in this export).
 /// A sale's `Invoice Number` resolves through
 /// [`Ledger::document_by_number`] — the number [`link`] sends as
-/// `invoiceNumber` on the hosted payment page.
+/// `invoiceNumber` on the hosted payment page — and applies at most the
+/// invoice's current open balance ([`books::open_documents`]), less whatever
+/// earlier rows in the same file already applied; the excess is parked in
+/// 2300 with a warning. Sales already imported are dropped before the
+/// documents are built, so a re-import neither posts them again nor counts
+/// them against the open balance a second time (it already reflects them).
 pub fn import_settlement(
     ledger: &Ledger,
     company: &str,
@@ -434,11 +496,40 @@ pub fn import_settlement(
     now: DateTime<Utc>,
 ) -> Result<ImportReport, ImportError> {
     let rows = parse_transactions(text)?;
-    let batches = group_batches(&rows)?;
-    let resolve_invoice = |number: &str| -> Option<(String, DocKind)> {
-        ledger.document_by_number(company, number).ok().flatten()
+    let mut batches = group_batches(&rows)?;
+    let mut report = ImportReport::default();
+
+    for batch in &mut batches {
+        let mut kept = Vec::with_capacity(batch.transactions.len());
+        for txn in batch.transactions.drain(..) {
+            let id = format!("authnet:txn:{}", txn.txn_id);
+            if ledger.document_version_count(company, &id)? > 0 {
+                report.skipped += 1;
+            } else {
+                kept.push(txn);
+            }
+        }
+        batch.transactions = kept;
+    }
+
+    // Everything dated, so a payment recorded after the settlement date
+    // still counts against the invoice.
+    let as_of = NaiveDate::from_ymd_opt(9999, 12, 31).expect("valid date");
+    let open: HashMap<String, Money> =
+        books::open_documents(ledger, company, Book::Receivable, as_of)?
+            .into_iter()
+            .map(|doc| (doc.document_id, doc.open))
+            .collect();
+    let resolve_invoice = |number: &str| -> Option<ResolvedInvoice> {
+        let (document_id, kind) = ledger.document_by_number(company, number).ok().flatten()?;
+        let open = open.get(&document_id).copied().unwrap_or(Money::ZERO);
+        Some(ResolvedInvoice {
+            document_id,
+            kind,
+            open,
+        })
     };
-    let documents = settlement_documents(&batches, config, &resolve_invoice);
+    let documents = settlement_documents(&batches, config, &resolve_invoice)?;
 
     let ctx = PostingContext {
         config: PostingConfig {
@@ -448,7 +539,6 @@ pub fn import_settlement(
         ..PostingContext::default()
     };
 
-    let mut report = ImportReport::default();
     for doc in &documents {
         if ledger.document_version_count(company, &doc.document_id)? > 0 {
             report.skipped += 1;
@@ -602,7 +692,7 @@ mod tests {
             fee_class: ClassId("foam".into()),
         };
         let resolve = |_: &str| None;
-        let documents = settlement_documents(&batches, &config, &resolve);
+        let documents = settlement_documents(&batches, &config, &resolve).expect("builds");
         assert_eq!(documents.len(), 2);
 
         let settlement = &documents[0];
@@ -648,10 +738,14 @@ mod tests {
             refund_class: ClassId("foam".into()),
             fee_class: ClassId("foam".into()),
         };
-        let resolve = |number: &str| -> Option<(String, DocKind)> {
-            (number == "1001").then(|| ("inv-1".to_string(), DocKind::Invoice))
+        let resolve = |number: &str| -> Option<ResolvedInvoice> {
+            (number == "1001").then(|| ResolvedInvoice {
+                document_id: "inv-1".to_string(),
+                kind: DocKind::Invoice,
+                open: Money::from_minor(10_000),
+            })
         };
-        let documents = settlement_documents(&batches, &config, &resolve);
+        let documents = settlement_documents(&batches, &config, &resolve).expect("builds");
         // settlement + 2 payments
         assert_eq!(documents.len(), 3);
         let resolved_payment = &documents[1];
@@ -662,6 +756,66 @@ mod tests {
         let unresolved_payment = &documents[2];
         assert!(unresolved_payment.applications.is_empty());
         assert_eq!(unresolved_payment.unapplied, Money::from_minor(5_000));
+    }
+
+    #[test]
+    fn sales_across_batches_draw_down_one_invoices_open_balance() {
+        let rows = vec![
+            row(
+                "t1",
+                TransactionStatus::SettledSuccessfully,
+                "b1",
+                6_000,
+                Some("1001"),
+                None,
+            ),
+            row(
+                "t2",
+                TransactionStatus::SettledSuccessfully,
+                "b2",
+                6_000,
+                Some("1001"),
+                None,
+            ),
+            row(
+                "t3",
+                TransactionStatus::SettledSuccessfully,
+                "b2",
+                1_000,
+                Some("1001"),
+                None,
+            ),
+        ];
+        let batches = group_batches(&rows).expect("groups");
+        let config = AuthnetConfig {
+            clearing: AccountId("1160".into()),
+            fees: AccountId("6700".into()),
+            undeposited: AccountId("1150".into()),
+            refund_class: ClassId("foam".into()),
+            fee_class: ClassId("foam".into()),
+        };
+        let resolve = |_: &str| -> Option<ResolvedInvoice> {
+            Some(ResolvedInvoice {
+                document_id: "inv-1".to_string(),
+                kind: DocKind::Invoice,
+                open: Money::from_minor(10_000),
+            })
+        };
+        let documents = settlement_documents(&batches, &config, &resolve).expect("builds");
+        let payments: Vec<_> = documents
+            .iter()
+            .filter(|d| d.kind == DocKind::Payment)
+            .map(|d| {
+                (
+                    d.applications
+                        .first()
+                        .map(|a| a.amount.minor())
+                        .unwrap_or(0),
+                    d.unapplied.minor(),
+                )
+            })
+            .collect();
+        assert_eq!(payments, vec![(6_000, 0), (4_000, 2_000), (0, 1_000)]);
     }
 
     #[test]
@@ -683,7 +837,7 @@ mod tests {
             fee_class: ClassId("foam".into()),
         };
         let resolve = |_: &str| None;
-        let documents = settlement_documents(&batches, &config, &resolve);
+        let documents = settlement_documents(&batches, &config, &resolve).expect("builds");
         let refund = &documents[1];
         assert_eq!(refund.kind, DocKind::RefundReceipt);
         assert_eq!(refund.pay_from, Some(AccountId("1160".into())));
