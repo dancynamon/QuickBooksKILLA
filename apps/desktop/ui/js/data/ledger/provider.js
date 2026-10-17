@@ -40,6 +40,7 @@ export const TOOL = Object.freeze({
   updateDocument: "update_document",
   voidDocument: "void_document",
   applyCredit: "apply_credit",
+  paymentLink: "payment_link",
   saveAndPostDocument: "save_and_post_document",
   reverseEntry: "reverse_entry",
   proposeAdjustment: "propose_adjustment",
@@ -152,6 +153,12 @@ export function createProvider(callTool) {
         TOOL.applyCredit,
         args({ credit_id: creditId, target_document_id: targetDocumentId, amount, actor }),
       );
+    },
+    /** D30: an Authorize.net hosted payment page for one open invoice, for
+     * its open balance. Writes nothing; the token lasts 15 minutes, so it is
+     * minted when the page is about to be opened, never printed. */
+    paymentLink(documentId) {
+      return callTool(TOOL.paymentLink, { document_id: documentId });
     },
     saveAndPostDocument(document, actor, items) {
       return callTool(TOOL.saveAndPostDocument, args({ document, actor, items }));

@@ -51,6 +51,9 @@ export function creditTargets(open, credit) {
 }
 
 function applyCellHtml(open, d) {
+  if (d.kind === "Invoice" && toCents(d.open) > 0) {
+    return `<button class="btn" type="button" data-pay="${esc(d.document_id)}" title="Open Authorize.net's card page for ${plain(d.open)} now — the token lasts 15 minutes">Take card payment</button>`;
+  }
   const targets = creditTargets(open, d);
   if (targets.length === 0) return "";
   return `<span class="apply-credit" style="display:inline-flex;gap:4px;align-items:center">
@@ -147,6 +150,29 @@ export async function renderOpenItems(main, book) {
               text: `Applied ${credit.kind === "CreditMemo" ? "credit memo" : "vendor credit"} ${label(creditId)} to ${label(target)}: ${result.applied} now on it`,
             });
           } catch (err) {
+            main.dataset.openNotice = JSON.stringify({ ok: false, text: err.message });
+          }
+          renderOpenItems(main, book);
+        });
+      });
+      main.querySelectorAll("[data-pay]").forEach((btn) => {
+        btn.addEventListener("click", async () => {
+          // D30: minted now, opened now. The settlement import applies the
+          // payment back to this invoice by its number once it settles.
+          const page = window.open("", "_blank");
+          try {
+            const link = await ledgerProvider.paymentLink(btn.dataset.pay);
+            if (page) {
+              page.document.open();
+              page.document.write(link.html);
+              page.document.close();
+            }
+            main.dataset.openNotice = JSON.stringify({
+              ok: true,
+              text: `${link.environment === "sandbox" ? "Sandbox " : ""}card page for invoice ${link.invoice_number}, ${link.amount}, open until ${new Date(link.expires_at).toLocaleTimeString()}${page ? "" : " — the window was blocked; allow pop-ups and try again"}. It posts here when the Authorize.net batch settles and is imported.`,
+            });
+          } catch (err) {
+            page?.close();
             main.dataset.openNotice = JSON.stringify({ ok: false, text: err.message });
           }
           renderOpenItems(main, book);

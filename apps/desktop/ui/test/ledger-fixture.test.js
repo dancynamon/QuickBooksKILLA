@@ -505,3 +505,25 @@ test("apply_credit nets an open credit memo against an open invoice; an edit to 
   }, "dan"), /applied against/);
   assert.equal((await ledger.aging("receivable", "2026-12-31")).totals.total, await control(ledger, "1200"));
 });
+
+test("payment_link mints a sandbox page for an open invoice's open balance and refuses what can't be matched back", async () => {
+  const ledger = createFixtureProvider();
+  const created = await ledger.createDocument({
+    kind: "Invoice", txn_date: "2026-10-01", contact: { kind: "Customer", id: "cust-blue-harbor" },
+    lines: [{ kind: "Item", item_id: "sign-custom", amount: "100.00", is_taxable: true }],
+  }, "dan");
+  await ledger.createDocument({
+    kind: "Payment", txn_date: "2026-10-05", contact: { kind: "Customer", id: "cust-blue-harbor" },
+    applications: [{ target_document_id: created.document_id, target_kind: "Invoice", amount: "50.00" }],
+  }, "dan");
+
+  const link = await ledger.paymentLink(created.document_id);
+  assertRow(link, SCHEMA.payment_link.top, "payment_link");
+  assert.equal(link.invoice_number, created.number);
+  assert.equal(link.amount, "56.62", "the open balance, not the original total");
+  assert.equal(link.environment, "sandbox");
+  assert.match(link.html, /name="token"/);
+
+  await assert.rejects(ledger.paymentLink("bill-3001"), /not an invoice/);
+  await assert.rejects(ledger.paymentLink("inv-2001"), /fully paid/);
+});

@@ -252,6 +252,11 @@ export const SCHEMA = {
     result: "object",
     top: [...REVISION_FIELDS, "target_document_id", "applied", ...WITH_LOCKED_THROUGH],
   },
+  // `mcp.rs::payment_link` — writes nothing, so no `locked_through`.
+  payment_link: {
+    result: "object",
+    top: ["document_id", "invoice_number", "amount", "environment", "url", "token", "expires_at", "html"],
+  },
   save_and_post_document: {
     result: "object",
     top: ["document_id", "version", "entry_id", "entry", ...WITH_LOCKED_THROUGH],

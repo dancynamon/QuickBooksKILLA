@@ -1386,6 +1386,30 @@ function createBook() {
     return withLockedThrough(commitRevision(old, doc, { void: why }, actor, "mcp_void_document"));
   }
 
+  /** `authnet/link.rs::payment_link`'s refusals and result shape, with a
+   * made-up sandbox token: the fixture never calls Authorize.net. */
+  function paymentLink(documentId) {
+    const doc = documents.get(documentId);
+    if (!doc) throw new LedgerFixtureError(`unknown document ${documentId}`);
+    if (doc.kind !== "Invoice") throw new LedgerFixtureError(`${documentId} is a ${doc.kind}, not an invoice`);
+    if (doc.is_voided) throw new LedgerFixtureError(`invoice ${doc.number ?? documentId} is voided`);
+    if (!doc.number) throw new LedgerFixtureError(`invoice ${documentId} has no number to match the payment back by`);
+    const open = openDocuments("receivable", "9999-12-31").find((d) => d.document_id === documentId);
+    if (!open || toCents(open.open) <= 0) throw new LedgerFixtureError(`invoice ${doc.number} is fully paid`);
+    const url = "https://test.authorize.net/payment/payment";
+    const token = `fixture-token-${doc.number}`;
+    return {
+      document_id: documentId,
+      invoice_number: doc.number,
+      amount: open.open,
+      environment: "sandbox",
+      url,
+      token,
+      expires_at: new Date(Date.now() + 15 * 60_000).toISOString(),
+      html: `<!doctype html><html><body onload="document.forms[0].submit()"><form method="post" action="${url}"><input type="hidden" name="token" value="${token}"><noscript><button type="submit">Continue to payment</button></noscript></form></body></html>`,
+    };
+  }
+
   /** `mcp.rs::apply_credit` over `books.rs::apply_credit`. */
   function applyCredit(creditId, targetId, amount, actor) {
     if (!actor) throw new LedgerFixtureError('missing "actor"');
@@ -1658,6 +1682,8 @@ function createBook() {
         return updateDocument(args.document, args.actor);
       case "void_document":
         return voidDocument(args.document_id, args.reason, args.actor);
+      case "payment_link":
+        return paymentLink(args.document_id);
       case "apply_credit":
         return applyCredit(args.credit_id, args.target_document_id, args.amount, args.actor);
       case "save_and_post_document":
