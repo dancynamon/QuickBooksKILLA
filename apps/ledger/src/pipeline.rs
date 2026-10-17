@@ -21,7 +21,9 @@
 //! - **Identical**: the document is skipped entirely — no new
 //!   `document_versions` row, nothing reversed, nothing reposted. Counted in
 //!   [`PipelineReport::skipped_unchanged`].
-//! - **Different**: every posted entry for the document is reversed as of the
+//! - **Different**: every *live* entry for the document
+//!   ([`crate::store::Ledger::live_entries_for_document`]: posted, not itself a
+//!   reversal, not already reversed) is reversed as of the
 //!   *new* document's `txn_date` (`Ledger::reverse_entry`), a new document
 //!   version is saved, and the new entry is posted. Counted in
 //!   [`PipelineReport::replaced`].
@@ -503,7 +505,17 @@ fn process_document(
             return;
         }
 
-        for (entry_id, _entry, _posted) in &posted_existing {
+        let live = match ledger.live_entries_for_document(company, &document_id) {
+            Ok(live) => live,
+            Err(err) => {
+                report.rejected.push(Rejected {
+                    document_id,
+                    reason: err.to_string(),
+                });
+                return;
+            }
+        };
+        for (entry_id, _entry) in &live {
             if let Err(err) = ledger.reverse_entry(company, entry_id, doc.txn_date, now) {
                 report.rejected.push(Rejected {
                     document_id: document_id.clone(),
@@ -638,7 +650,7 @@ fn account_mapping_from_ledger(
 ///
 /// Idempotent, the same rule §6 gives every imported document (see this
 /// module's own docs above): a saved opening balance document whose payload
-/// is unchanged is skipped entirely; one that differs has its posted entries
+/// is unchanged is skipped entirely; one that differs has its live entries
 /// reversed as of `as_of` and the new version posted in its place. Safe to
 /// call again with the same `qbo_tb`, and safe to call as part of
 /// [`boundary_walk`]'s per-year scratch replay.
@@ -672,8 +684,8 @@ pub fn apply_opening_balance(
     }
 
     let replaced = !posted_existing.is_empty();
-    for (entry_id, _entry, _posted) in &posted_existing {
-        ledger.reverse_entry(company, entry_id, as_of, now)?;
+    for (entry_id, _entry) in ledger.live_entries_for_document(company, &document_id)? {
+        ledger.reverse_entry(company, &entry_id, as_of, now)?;
     }
 
     let version = ledger.save_document(

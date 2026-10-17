@@ -524,6 +524,83 @@ fn changing_one_entity_and_re_running_reverses_and_reposts_only_that_document() 
     assert!(entries.iter().all(|(_, _, posted)| *posted));
 }
 
+/// `BILL-1` re-mirrored at `amount` with sync token `token`, as a CDC update.
+fn bill_at(amount: f64, token: &str, at: chrono::DateTime<Utc>) -> MirroredEntity {
+    MirroredEntity {
+        entity_type: EntityType::Bill,
+        qbo_id: "BILL-1".to_string(),
+        sync_token: token.into(),
+        last_updated_utc: at,
+        is_deleted: false,
+        raw_json: json!({
+            "Id": "BILL-1", "TxnDate": "2026-07-18", "ClassRef": { "value": "4" },
+            "VendorRef": { "value": "77" }, "TotalAmt": amount,
+            "Line": [ {
+                "Amount": amount, "DetailType": "AccountBasedExpenseLineDetail",
+                "AccountBasedExpenseLineDetail": { "AccountRef": { "value": "EXP1" } }
+            } ]
+        }),
+    }
+}
+
+#[test]
+fn a_document_changed_twice_reverses_only_its_live_entry_each_time() {
+    let replica = seeded_replica();
+    let ledger = new_ledger();
+    let as_of = NaiveDate::from_ymd_opt(2026, 12, 31).unwrap();
+    let run = |at| {
+        import_replica(
+            &ledger,
+            &replica,
+            &realm(),
+            "aquamentor",
+            &ImportOptions::default(),
+            at,
+        )
+        .unwrap()
+    };
+
+    run(now());
+    let second_at = later_now();
+    let third_at = Utc.with_ymd_and_hms(2026, 9, 12, 14, 0, 0).unwrap();
+    for (amount, token, at) in [(300.00, "2", second_at), (350.00, "3", third_at)] {
+        replica
+            .apply_batch(&realm(), &[bill_at(amount, token, at)], None, at)
+            .unwrap();
+        let report = run(at);
+        assert_eq!(report.replaced, 1);
+        assert!(report.rejected.is_empty());
+    }
+
+    // Same net as reversing everything would give: only the $350.00 bill.
+    let trial_balance = tb(&ledger, as_of);
+    assert_eq!(trial_balance.total_debits, trial_balance.total_credits);
+    assert_eq!(balance(&trial_balance, "2000"), Money::from_minor(-35_000));
+    assert_eq!(balance(&trial_balance, "6100"), Money::from_minor(35_000));
+
+    // Original, its reversal, second, its reversal, third — no reversal of
+    // a reversal, and no second reversal of the original.
+    let entries = ledger
+        .entries_for_document("aquamentor", "qbo:Bill:BILL-1")
+        .unwrap();
+    assert_eq!(entries.len(), 5);
+    assert!(entries.iter().all(|(_, _, posted)| *posted));
+    let reversals: Vec<&String> = entries
+        .iter()
+        .filter_map(|(_, entry, _)| entry.reversal_of.as_ref())
+        .collect();
+    assert_eq!(reversals.len(), 2);
+    assert_ne!(reversals[0], reversals[1]);
+    assert!(reversals.iter().all(|target| entries
+        .iter()
+        .any(|(id, entry, _)| id == *target && entry.reversal_of.is_none())));
+
+    let live = ledger
+        .live_entries_for_document("aquamentor", "qbo:Bill:BILL-1")
+        .unwrap();
+    assert_eq!(live.len(), 1);
+}
+
 // ---------------------------------------------------------------------------
 // Non-posting documents on re-run (§6): an unchanged Estimate is skipped,
 // never re-saved as a fresh version.

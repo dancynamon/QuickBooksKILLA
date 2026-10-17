@@ -1563,6 +1563,27 @@ impl Ledger {
             .collect()
     }
 
+    /// The posted entries of a document that nothing has reversed yet, and are
+    /// not themselves reversals: what the book currently holds for it.
+    pub fn live_entries_for_document(
+        &self,
+        company: &str,
+        document_id: &str,
+    ) -> Result<Vec<(EntryId, JournalEntry)>, LedgerError> {
+        let all = self.entries_for_document(company, document_id)?;
+        let reversed: std::collections::HashSet<String> = all
+            .iter()
+            .filter_map(|(_, entry, posted)| entry.reversal_of.clone().filter(|_| *posted))
+            .collect();
+        Ok(all
+            .into_iter()
+            .filter(|(id, entry, posted)| {
+                *posted && entry.reversal_of.is_none() && !reversed.contains(id)
+            })
+            .map(|(id, entry, _)| (id, entry))
+            .collect())
+    }
+
     // -----------------------------------------------------------------------
     // Accountant mode (§8): adjustment requests, close history, GL and audit
     // reads. Business rules live in `crate::accountant`; these are plain CRUD

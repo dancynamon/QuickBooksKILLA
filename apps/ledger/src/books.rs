@@ -20,7 +20,7 @@
 //!   part way (a closed period, a missing class) leaves the book untouched.
 //!   Nothing is ever deleted: every version stays in `document_versions`.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use chrono::{DateTime, NaiveDate, Utc};
 use rusqlite::{params, OptionalExtension, Row};
@@ -1055,27 +1055,6 @@ pub fn latest_document(
     Ok(serde_json::from_str(&raw)?)
 }
 
-/// The posted entries of a document that nothing has reversed yet, and are
-/// not themselves reversals: what the book currently holds for it.
-fn live_entries(
-    ledger: &Ledger,
-    company: &str,
-    document_id: &str,
-) -> Result<Vec<(EntryId, JournalEntry)>, BooksError> {
-    let all = ledger.entries_for_document(company, document_id)?;
-    let reversed: HashSet<String> = all
-        .iter()
-        .filter_map(|(_, entry, posted)| entry.reversal_of.clone().filter(|_| *posted))
-        .collect();
-    Ok(all
-        .into_iter()
-        .filter(|(id, entry, posted)| {
-            *posted && entry.reversal_of.is_none() && !reversed.contains(id)
-        })
-        .map(|(id, entry, _)| (id, entry))
-        .collect())
-}
-
 /// The same journal effect, whichever version it was posted from.
 fn same_posting(a: &JournalEntry, b: &JournalEntry) -> bool {
     a.entry_date == b.entry_date
@@ -1152,7 +1131,7 @@ fn commit_revision(
 ) -> Result<Revision, BooksError> {
     check_unlocked(ledger, company, old.txn_date)?;
     check_unlocked(ledger, company, doc.txn_date)?;
-    let live = live_entries(ledger, company, &doc.document_id)?;
+    let live = ledger.live_entries_for_document(company, &doc.document_id)?;
     let next_version = ledger.document_version_count(company, &doc.document_id)? + 1;
 
     let (new_entry, reverse) = match reposting {
