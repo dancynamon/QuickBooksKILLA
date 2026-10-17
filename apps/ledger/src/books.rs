@@ -33,8 +33,7 @@ use crate::post::{self, Posting};
 use crate::store::{CommandMeta, EntryId, Ledger, LedgerError};
 use crate::types::{
     AccountId, Application, ClassId, ContactKind, ContactRef, CustomerPosting, DocKind,
-    ItemAccounts, JournalEntry, LedgerDocument, LineKind, PostingConfig, PostingContext,
-    TaxDetail,
+    ItemAccounts, JournalEntry, LedgerDocument, LineKind, PostingConfig, PostingContext, TaxDetail,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -1162,7 +1161,8 @@ fn commit_revision(
         Reposting::Post(ctx) => match post::post(&doc, next_version, ctx)? {
             Posting::NonPosting => (None, true),
             Posting::Entry(entry) => {
-                let unchanged = matches!(&live[..], [(_, old_entry)] if same_posting(old_entry, &entry));
+                let unchanged =
+                    matches!(&live[..], [(_, old_entry)] if same_posting(old_entry, &entry));
                 if unchanged {
                     (None, false)
                 } else {
@@ -1286,14 +1286,9 @@ pub fn update_document(
         let Some(book) = book_of(target.kind) else {
             continue;
         };
-        let applied = applied_by_others(
-            ledger,
-            company,
-            book,
-            &target.document_id,
-            &doc.document_id,
-        )?
-        .checked_add(application.amount)?;
+        let applied =
+            applied_by_others(ledger, company, book, &target.document_id, &doc.document_id)?
+                .checked_add(application.amount)?;
         let total = document_total(&target)?;
         if applied > total {
             return Err(BooksError::Overapplied {
@@ -1303,7 +1298,15 @@ pub fn update_document(
             });
         }
     }
-    commit_revision(ledger, company, &old, doc, Reposting::Post(&ctx), command, now)
+    commit_revision(
+        ledger,
+        company,
+        &old,
+        doc,
+        Reposting::Post(&ctx),
+        command,
+        now,
+    )
 }
 
 /// Voids a saved document (§6: it posts a reversal rather than vanishing):
@@ -1339,7 +1342,15 @@ pub fn void_document(
         Some(memo) if !memo.is_empty() => format!("Voided: {reason}. {memo}"),
         _ => format!("Voided: {reason}"),
     });
-    commit_revision(ledger, company, &old, doc, Reposting::Void(reason), command, now)
+    commit_revision(
+        ledger,
+        company,
+        &old,
+        doc,
+        Reposting::Void(reason),
+        command,
+        now,
+    )
 }
 
 /// Applies an open credit memo to an open invoice of the same customer (or

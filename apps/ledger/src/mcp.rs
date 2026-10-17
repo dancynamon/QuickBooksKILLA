@@ -473,10 +473,28 @@ impl<'a> LedgerToolSet<'a> {
             .get_mut("document")
             .map(Value::take)
             .ok_or_else(|| ToolError::new("missing \"document\""))?;
-        if document_value.get("document_id").and_then(Value::as_str).is_none() {
+        let Some(document_id) = document_value
+            .get("document_id")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+        else {
             return Err(ToolError::new(
                 "missing \"document.document_id\": update_document edits a saved document",
             ));
+        };
+        // An editor that only shows lines (a credit memo's form) must not
+        // silently drop what the document already applies: no
+        // `applications` key keeps the saved ones; `[]` clears them.
+        if let Some(map) = document_value.as_object_mut() {
+            if !map.contains_key("applications") {
+                let saved = books::latest_document(self.ledger, &self.company, &document_id)
+                    .map_err(books_err)?;
+                map.insert(
+                    "applications".to_string(),
+                    serde_json::to_value(&saved.applications)
+                        .map_err(|err| ToolError::new(err.to_string()))?,
+                );
+            }
         }
         fill_document_defaults(&mut document_value)?;
         normalize_money_fields(&mut document_value);
@@ -1019,7 +1037,8 @@ pub fn tools() -> Vec<ToolSpec> {
                 the next version. When what it posts changed, the old entry is reversed (dated \
                 as the entry it reverses) and the new one posted, in one all-or-nothing unit; \
                 when it did not (a memo edit), the entry stands. The number is kept: leave it \
-                out, or send the same one. Refused, with nothing changed: a voided document, a \
+                out, or send the same one. Leave `applications` out to keep the saved ones \
+                (`[]` clears them). Refused, with nothing changed: a voided document, a \
                 change of `kind` or of contact type (customer to vendor), renumbering a \
                 document the book numbers, a total below what is already applied against it, \
                 an application beyond what is open on its target, either the old or the new \
@@ -2598,7 +2617,10 @@ mod tests {
                     "target_document_id": invoice_id, "amount": "25.00" }),
         );
         assert_ne!(applied["result"]["isError"], json!(true), "{applied}");
-        assert_eq!(applied["result"]["structuredContent"]["applied"], json!("25.00"));
+        assert_eq!(
+            applied["result"]["structuredContent"]["applied"],
+            json!("25.00")
+        );
         assert_eq!(
             applied["result"]["structuredContent"]["entry_id"],
             Value::Null
@@ -2609,9 +2631,37 @@ mod tests {
             "open_documents",
             json!({ "book": "receivable", "as_of": "2026-12-31" }),
         );
-        let open = open["result"]["structuredContent"].as_array().unwrap().clone();
+        let open = open["result"]["structuredContent"]
+            .as_array()
+            .unwrap()
+            .clone();
         assert_eq!(open[0]["open"], json!("125.00"));
         assert_eq!(open[1]["open"], json!("-15.00"));
+
+        // Editing the credit's lines without sending `applications` keeps
+        // what it already applies.
+        let edited = call_tool(
+            &mut server,
+            90,
+            "update_document",
+            json!({ "actor": "dan", "document": {
+                "document_id": credit_id, "kind": "CreditMemo", "txn_date": "2026-09-05",
+                "contact": { "kind": "Customer", "id": "c-pool" },
+                "lines": [{ "kind": "Item", "item_id": "mat", "amount": "45.00" }] }}),
+        );
+        assert_ne!(edited["result"]["isError"], json!(true), "{edited}");
+        let open = call_tool(
+            &mut server,
+            91,
+            "open_documents",
+            json!({ "book": "receivable", "as_of": "2026-12-31" }),
+        );
+        let open = open["result"]["structuredContent"]
+            .as_array()
+            .unwrap()
+            .clone();
+        assert_eq!(open[0]["open"], json!("125.00"));
+        assert_eq!(open[1]["open"], json!("-20.00"));
 
         // The invoice has a credit applied: void the credit first.
         let refused = call_tool(
@@ -2636,7 +2686,10 @@ mod tests {
                 json!({ "actor": "dan", "document_id": document_id, "reason": "duplicate" }),
             );
             assert_ne!(voided["result"]["isError"], json!(true), "{voided}");
-            assert_eq!(voided["result"]["structuredContent"]["is_voided"], json!(true));
+            assert_eq!(
+                voided["result"]["structuredContent"]["is_voided"],
+                json!(true)
+            );
         }
         let aging = call_tool(
             &mut server,

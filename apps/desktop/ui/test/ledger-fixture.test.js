@@ -1,6 +1,6 @@
 // Ledger schema contract test — the sibling of `test/fixture.test.js` for
 // the ledger provider (`apps/desktop/README.md`'s ledger section). Asserts
-// the fixture provider's output for all twenty-four `ledger-mcp` tools
+// the fixture provider's output for all twenty-eight `ledger-mcp` tools
 // (`docs/MCP.md`) satisfies `js/data/ledger/schema.js` — derived from
 // `apps/ledger/src/mcp.rs`'s own `_json` rendering functions — plus a few
 // behavioural checks: the write gate refuses a write dated on or before
@@ -344,4 +344,164 @@ test("upsert_contact refuses a second customer with the same name; upsert_item e
     ledger.upsertItem({ item_id: "y", name: "Y", item_type: "service", income_account: "4100", expense_account: "5000", asset_account: "1300" }),
     /asset account/,
   );
+});
+
+// --- corrections: get/update/void a document, apply a credit (§4/§6) ------
+
+const BLUE = { kind: "Customer", id: "cust-blue-harbor" };
+
+async function invoiceFor(ledger, amount, extra = {}) {
+  return ledger.createDocument({
+    kind: "Invoice", txn_date: "2026-10-01", contact: BLUE,
+    lines: [{ kind: "Item", item_id: "sign-custom", amount, is_taxable: true }], ...extra,
+  }, "dan");
+}
+
+async function control(ledger, number, asOf = "2026-12-31") {
+  return (await ledger.trialBalance(asOf)).rows.find((r) => r.number === number).balance;
+}
+
+test("ledger fixture provider satisfies the schema for get_document, update_document, void_document and apply_credit", async () => {
+  const ledger = createFixtureProvider();
+  const created = await invoiceFor(ledger, "100.00");
+
+  const doc = await ledger.getDocument(created.document_id);
+  assertRow(doc, SCHEMA.get_document.top, "get_document");
+  for (const l of doc.lines) assertRow(l, SCHEMA.get_document.line, "get_document.lines[]");
+
+  const seeded = await ledger.getDocument("pmt-4001");
+  for (const a of seeded.applications) assertRow(a, SCHEMA.get_document.application, "get_document.applications[]");
+
+  const updated = await ledger.updateDocument({ ...doc, contact: BLUE, lines: [{ kind: "Item", item_id: "sign-custom", amount: "120.00", is_taxable: true }], tax: null }, "dan");
+  assertWithLockedThrough(updated, SCHEMA.update_document, "update_document");
+  assertJournalEntry(updated.entry, SCHEMA.update_document, "update_document.entry");
+
+  const credit = await ledger.createDocument({
+    kind: "CreditMemo", txn_date: "2026-10-02", contact: BLUE,
+    lines: [{ kind: "Item", item_id: "sign-custom", amount: "10.00" }],
+  }, "dan");
+  const applied = await ledger.applyCredit(credit.document_id, created.document_id, undefined, "dan");
+  assertWithLockedThrough(applied, SCHEMA.apply_credit, "apply_credit");
+
+  const voided = await ledger.voidDocument(credit.document_id, "issued in error", "dan");
+  assertWithLockedThrough(voided, SCHEMA.void_document, "void_document");
+});
+
+test("an edit keeps the number, reverses the old entry, posts the new one and the aging still ties to 1200", async () => {
+  const ledger = createFixtureProvider();
+  const created = await invoiceFor(ledger, "100.00");
+  const updated = await ledger.updateDocument({
+    document_id: created.document_id, kind: "Invoice", txn_date: "2026-10-01", contact: BLUE,
+    lines: [{ kind: "Item", item_id: "sign-custom", amount: "200.00", is_taxable: true }],
+  }, "dan");
+  assert.equal(updated.version, 2);
+  assert.equal(updated.number, created.number, "left blank, the number is kept");
+  assert.equal(updated.total, "213.25");
+  assert.equal(updated.reversal_entry_ids.length, 1);
+
+  const entries = await ledger.entriesForDocument(created.document_id);
+  assert.equal(entries.length, 3);
+  const reversal = entries.find((e) => e.entry_id === updated.reversal_entry_ids[0]).entry;
+  assert.equal(reversal.reversal_of, created.entry_id);
+  assert.equal(reversal.entry_date, "2026-10-01", "dated as the entry it reverses");
+
+  const ar = await ledger.aging("receivable", "2026-12-31");
+  assert.equal(ar.totals.total, await control(ledger, "1200"));
+  const open = (await ledger.openDocuments("receivable", "2026-12-31")).find((d) => d.document_id === created.document_id);
+  assert.equal(open.open, "213.25");
+
+  // A memo-only edit leaves the entry standing.
+  const memo = await ledger.updateDocument({
+    document_id: created.document_id, kind: "Invoice", txn_date: "2026-10-01", contact: BLUE,
+    lines: [{ kind: "Item", item_id: "sign-custom", amount: "200.00", is_taxable: true }],
+    memo: updated.entry.memo,
+  }, "dan");
+  assert.equal(memo.version, 3);
+  assert.deepEqual(memo.reversal_entry_ids, []);
+  assert.equal(memo.entry_id, null);
+});
+
+test("an edit refuses a renumber, a kind or contact-type change, and a closed period, changing nothing", async () => {
+  const ledger = createFixtureProvider();
+  const created = await invoiceFor(ledger, "100.00");
+  const base = {
+    document_id: created.document_id, kind: "Invoice", txn_date: "2026-10-01", contact: BLUE,
+    lines: [{ kind: "Item", item_id: "sign-custom", amount: "150.00" }],
+  };
+  await assert.rejects(ledger.updateDocument({ ...base, number: "99999" }, "dan"), /keeps its number/);
+  await assert.rejects(ledger.updateDocument({ ...base, kind: "SalesReceipt" }, "dan"), /cannot make it a SalesReceipt/);
+  await assert.rejects(ledger.updateDocument({ ...base, contact: { kind: "Vendor", id: "vend-spectra" } }, "dan"), /cannot make it name a vendor/);
+  await assert.rejects(ledger.updateDocument({ ...base, txn_date: "2026-07-15" }, "dan"), /closed/);
+  await assert.rejects(ledger.updateDocument({ ...base, document_id: "nope" }, "dan"), /no saved document nope/);
+  // The seeded July invoice sits in the closed period.
+  const july = await ledger.getDocument("inv-2001");
+  await assert.rejects(ledger.updateDocument({ ...july, contact: BLUE, memo: "late note" }, "dan"), /closed/);
+  assert.equal((await ledger.entriesForDocument(created.document_id)).length, 1);
+  assert.equal((await ledger.getDocument(created.document_id)).version, 1);
+});
+
+test("a void reverses the entry, drops the document from the aging and is refused while a payment is applied", async () => {
+  const ledger = createFixtureProvider();
+  const created = await invoiceFor(ledger, "100.00");
+  const payment = await ledger.createDocument({
+    kind: "Payment", txn_date: "2026-10-05", contact: BLUE,
+    applications: [{ target_document_id: created.document_id, target_kind: "Invoice", amount: "50.00" }],
+  }, "dan");
+  await assert.rejects(ledger.voidDocument(created.document_id, "duplicate", "dan"), /applied against it/);
+  await assert.rejects(ledger.voidDocument(payment.document_id, "  ", "dan"), /reason/);
+
+  await ledger.voidDocument(payment.document_id, "bounced", "dan");
+  const voided = await ledger.voidDocument(created.document_id, "duplicate", "dan");
+  assert.equal(voided.is_voided, true);
+  assert.equal(voided.reversal_entry_ids.length, 1);
+  const reversal = (await ledger.entriesForDocument(created.document_id)).find((e) => e.entry_id === voided.reversal_entry_ids[0]).entry;
+  assert.match(reversal.memo, /^VOID: .*\(duplicate\)$/);
+
+  const doc = await ledger.getDocument(created.document_id);
+  assert.equal(doc.is_voided, true);
+  assert.equal(doc.memo, "Voided: duplicate");
+  assert.ok(!(await ledger.openDocuments("receivable", "2026-12-31")).some((d) => d.document_id === created.document_id));
+  assert.equal((await ledger.aging("receivable", "2026-12-31")).totals.total, await control(ledger, "1200"));
+  await assert.rejects(ledger.voidDocument(created.document_id, "again", "dan"), /voided/);
+  await assert.rejects(ledger.updateDocument({ ...doc, contact: BLUE }, "dan"), /voided/);
+});
+
+test("apply_credit nets an open credit memo against an open invoice; an edit to the credit keeps it applied", async () => {
+  const ledger = createFixtureProvider();
+  const invoice = await invoiceFor(ledger, "100.00");
+  const credit = await ledger.createDocument({
+    kind: "CreditMemo", txn_date: "2026-10-02", contact: BLUE,
+    lines: [{ kind: "Item", item_id: "sign-custom", amount: "40.00" }],
+  }, "dan");
+
+  await assert.rejects(ledger.applyCredit(credit.document_id, "inv-2003", undefined, "dan"), /different contacts/);
+  await assert.rejects(ledger.applyCredit(credit.document_id, invoice.document_id, "50.00", "dan"), /more than is open/);
+  await assert.rejects(ledger.applyCredit(invoice.document_id, invoice.document_id, undefined, "dan"), /not a credit memo/);
+
+  const first = await ledger.applyCredit(credit.document_id, invoice.document_id, "15.00", "dan");
+  assert.equal(first.applied, "15.00");
+  assert.equal(first.entry_id, null, "a credit posts the same whatever it is applied to");
+  const rest = await ledger.applyCredit(credit.document_id, invoice.document_id, undefined, "dan");
+  assert.equal(rest.applied, "40.00");
+
+  let open = await ledger.openDocuments("receivable", "2026-12-31");
+  assert.equal(open.find((d) => d.document_id === invoice.document_id).open, "66.62");
+  assert.ok(!open.some((d) => d.document_id === credit.document_id), "used up");
+  assert.equal((await ledger.aging("receivable", "2026-12-31")).totals.total, await control(ledger, "1200"));
+
+  // The form sends no applications for a credit memo's lines: they stay.
+  const edited = await ledger.updateDocument({
+    document_id: credit.document_id, kind: "CreditMemo", txn_date: "2026-10-02", contact: BLUE,
+    lines: [{ kind: "Item", item_id: "sign-custom", amount: "45.00" }],
+  }, "dan");
+  assert.equal(edited.total, "45.00");
+  assert.equal((await ledger.getDocument(credit.document_id)).applications[0].amount, "40.00");
+  open = await ledger.openDocuments("receivable", "2026-12-31");
+  assert.equal(open.find((d) => d.document_id === credit.document_id).open, "-5.00");
+  // Cutting it below what it applies is refused.
+  await assert.rejects(ledger.updateDocument({
+    document_id: credit.document_id, kind: "CreditMemo", txn_date: "2026-10-02", contact: BLUE,
+    lines: [{ kind: "Item", item_id: "sign-custom", amount: "30.00" }],
+  }, "dan"), /applied against/);
+  assert.equal((await ledger.aging("receivable", "2026-12-31")).totals.total, await control(ledger, "1200"));
 });

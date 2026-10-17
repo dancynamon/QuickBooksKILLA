@@ -511,8 +511,10 @@ reversal, the version and the new entry commit as one unit
 (`Ledger::atomically`, a SQLite savepoint): a refusal part way leaves the
 book exactly as it was.
 
-The number is kept: leave it out, or send the one it has. Refused, with
-nothing changed:
+The number is kept: leave it out, or send the one it has. Leave
+`applications` out to keep the saved ones — editing a credit memo's lines
+does not unapply it — or send `[]` to clear them. Refused, with nothing
+changed:
 
 - a voided document (it stays voided), or an edit that sets `is_voided`
   (use `void_document`);

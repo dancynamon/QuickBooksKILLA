@@ -9,13 +9,21 @@
 // Keyboard-first: the first field takes focus, Tab walks the line grid,
 // Enter in a line's last cell adds a line, ⌘/Ctrl-Enter saves. A draft
 // survives switching kinds and leaving the screen until it is saved.
+//
+// The same form edits a saved document (`#ledger-edit/<id>`, opened from
+// Receivables/Payables; `docs/MCP.md` "get_document" / "update_document"):
+// the document is read back into a draft, and saving sends a new version —
+// the book reverses the old entry and posts the new one, keeping the number.
+// A Void button with a reason (`void_document`) sits under it; a voided
+// document opens read-only, because it stays voided.
 
 import { ledgerProvider } from "../../data/ledger/index.js";
 import { esc, plain } from "../../format.js";
-import { viewHead, withState } from "../shared.js";
+import { errorState, loadingState, viewHead, withState } from "../shared.js";
 import { todayIso } from "./shared.js";
 import {
-  ENTRY_KINDS, buildDocument, effectiveAmount, lineForItem, previewTotals,
+  ENTRY_KINDS, buildDocument, buildEditedDocument, draftFromDocument, effectiveAmount,
+  fromCents, lineForItem, previewTotals, toCents,
 } from "./entry.js";
 import { sessionHint } from "./masters.js";
 
@@ -23,6 +31,8 @@ const ACTOR = "dan";
 
 /** kind -> draft, kept for the life of the window. */
 const drafts = new Map();
+/** document_id -> { doc, draft, error } while it is being edited. */
+const editing = new Map();
 
 function blankLine() {
   return { itemId: "", account: "", description: "", qty: "", rate: "", amount: "", cls: "", taxable: false };
@@ -48,17 +58,81 @@ function safeAmount(line) {
 }
 
 export async function renderNewDocument(main, kind) {
-  const spec = ENTRY_KINDS[kind];
   const draft = draftFor(kind);
   if (sessionHint.contactId) {
     // "Invoice" / "Bill" from the contacts list: start this draft for them.
     draft.contactId = sessionHint.contactId;
     sessionHint.contactId = null;
   }
+  await renderForm(main, kind, draft, null);
+}
+
+/** `#ledger-edit/<document_id>`: a saved document, read back into the form.
+ * `fresh` (arriving by navigation) reads it again rather than resuming an
+ * edit left earlier, so the form never saves over a newer version. */
+export async function renderEditDocument(main, documentId, { fresh = false } = {}) {
+  if (fresh) {
+    editing.delete(documentId);
+    delete main.dataset.entryNotice;
+  }
+  let entry = editing.get(documentId);
+  if (!entry) {
+    loadingState(main, "document");
+    let doc;
+    try {
+      doc = await ledgerProvider.getDocument(documentId);
+    } catch (err) {
+      errorState(main, err);
+      return;
+    }
+    entry = { doc, draft: null, error: null };
+    if (!doc.is_voided) {
+      try {
+        entry.draft = draftFromDocument(doc);
+      } catch (err) {
+        entry.error = err.message;
+      }
+    }
+    editing.set(documentId, entry);
+  }
+  if (!entry.draft) {
+    renderReadOnly(main, entry.doc, entry.error);
+    return;
+  }
+  await renderForm(main, entry.doc.kind, entry.draft, entry.doc);
+}
+
+/** The applications a saved payment already made, folded back into the open
+ * list it is edited against: a target it paid off is open again by what
+ * this payment applied, so the edit can change it. */
+async function withOwnApplications(open, saved, kind) {
+  const rows = open.map((d) => ({ ...d }));
+  for (const a of saved?.applications ?? []) {
+    const row = rows.find((d) => d.document_id === a.target_document_id);
+    if (row) {
+      row.open = fromCents(toCents(row.open) + toCents(a.amount));
+      continue;
+    }
+    const target = await ledgerProvider.getDocument(a.target_document_id);
+    rows.push({
+      document_id: target.document_id, kind: target.kind ?? kind, number: target.number,
+      txn_date: target.txn_date, due_date: target.due_date ?? target.txn_date,
+      total: target.total, open: a.amount,
+    });
+  }
+  return rows;
+}
+
+function noticeFor(main, kind) {
   const stored = main.dataset.entryNotice ? JSON.parse(main.dataset.entryNotice) : null;
   // A notice belongs to the kind that raised it, not whatever kind the URL
   // shows next.
-  const notice = stored?.kind === kind ? stored : null;
+  return stored?.kind === kind ? stored : null;
+}
+
+async function renderForm(main, kind, draft, saved) {
+  const spec = ENTRY_KINDS[kind];
+  const notice = noticeFor(main, kind);
 
   await withState(
     main,
@@ -72,6 +146,7 @@ export async function renderNewDocument(main, kind) {
       if (!spec.lines && draft.contactId) {
         open = (await ledgerProvider.openDocuments(spec.applies.book, draft.txnDate))
           .filter((d) => d.contact_id === draft.contactId && d.kind === spec.applies.kind);
+        if (saved && saved.contact?.id === draft.contactId) open = await withOwnApplications(open, saved, spec.applies.kind);
       }
       return { contacts, items, open };
     },
@@ -88,13 +163,19 @@ export async function renderNewDocument(main, kind) {
 
       const classHints = [...new Set([...contacts, ...items].map((x) => x.default_class).filter(Boolean))].sort();
 
-      main.innerHTML = viewHead(
-        `New ${spec.label.toLowerCase()}`,
-        spec.posts ? "Saves and posts to the own book" : "Saves to the own book; posts nothing",
-        `<div class="seg" role="group" aria-label="Document type">
-          ${Object.entries(ENTRY_KINDS).map(([k, s]) => `<button data-kind="${k}" aria-pressed="${k === kind}">${esc(s.label)}</button>`).join("")}
-        </div>`,
-      ) + `
+      main.innerHTML = (saved
+        ? viewHead(
+          `${spec.label} ${saved.number ?? ""}`.trim(),
+          `Editing version ${saved.version} · saving keeps the number and ${spec.posts ? "reverses the old entry before posting the new one" : "posts nothing"}`,
+          `<a class="btn" href="#ledger-new/${kind}">New ${esc(spec.label.toLowerCase())}</a>`,
+        )
+        : viewHead(
+          `New ${spec.label.toLowerCase()}`,
+          spec.posts ? "Saves and posts to the own book" : "Saves to the own book; posts nothing",
+          `<div class="seg" role="group" aria-label="Document type">
+            ${Object.entries(ENTRY_KINDS).map(([k, s]) => `<button data-kind="${k}" aria-pressed="${k === kind}">${esc(s.label)}</button>`).join("")}
+          </div>`,
+        )) + `
       <div class="pad">
         ${notice ? noticeHtml(notice) : ""}
         <form id="entryForm" autocomplete="off">
@@ -110,7 +191,7 @@ export async function renderNewDocument(main, kind) {
                 <input class="form-input" type="date" name="txnDate" value="${esc(draft.txnDate)}" required>
               </label>
               ${spec.lines ? `<label class="form-field"><span class="lbl">${spec.numbered ? "Number" : "Vendor's number"}</span>
-                <input class="form-input mono" name="number" value="${esc(draft.number)}" placeholder="${spec.numbered ? "next in sequence" : "from the bill"}">
+                <input class="form-input mono" name="number" value="${esc(draft.number)}" placeholder="${spec.numbered ? "next in sequence" : "from the bill"}" ${saved && spec.numbered ? "readonly title=\"A saved document keeps its number\"" : ""}>
               </label>` : ""}
               ${spec.bank ? `<label class="form-field"><span class="lbl">${esc(spec.bank.label)}</span>
                 <select class="form-select" name="bank">
@@ -129,14 +210,15 @@ export async function renderNewDocument(main, kind) {
           <div class="strip" id="entryTotals">${totalsHtml(kind, spec, draft, contact)}</div>
 
           <div class="form-actions" style="margin-top:12px">
-            <button class="btn btn-primary" type="submit">${spec.posts ? "Save and post" : "Save"}</button>
+            <button class="btn btn-primary" type="submit">${saved ? "Save changes" : spec.posts ? "Save and post" : "Save"}</button>
             <span class="hint" style="margin:0">⌘/Ctrl-Enter saves. ${spec.taxed ? "Tax is the book's: NJ 6.625% on taxable lines, none for an exempt customer." : ""}</span>
           </div>
         </form>
+        ${saved ? voidFormHtml(saved) : ""}
         <datalist id="classHints">${classHints.map((c) => `<option value="${esc(c)}">`).join("")}</datalist>
       </div>`;
 
-      wire(main, kind, spec, draft, contact, itemsById);
+      wire(main, kind, spec, draft, contact, itemsById, saved);
       const first = draft.contactId
         ? main.querySelector(spec.lines ? "[data-line='0'][data-field='itemId']" : "[data-app='0']")
         : main.querySelector("[name='contactId']");
@@ -148,15 +230,84 @@ export async function renderNewDocument(main, kind) {
 function noticeHtml(notice) {
   if (!notice.ok) return `<div class="form-error">${esc(notice.text)}</div>`;
   const r = notice.result;
+  const verb = { updated: "Saved changes to", voided: "Voided" }[notice.action] ?? "Saved";
   const parts = [
-    `Saved ${esc(notice.label)}${r.number ? ` ${esc(r.number)}` : ""}`,
+    `${verb} ${esc(notice.label)}${r.number ? ` ${esc(r.number)}` : ""}${r.version > 1 ? ` (version ${r.version})` : ""}`,
+    r.reversal_entry_ids?.length ? `reversed ${r.reversal_entry_ids.map(esc).join(", ")}` : null,
     `total ${plain(r.total)}`,
     r.tax != null ? `tax ${plain(r.tax)}` : null,
     r.due_date ? `due ${esc(r.due_date)}` : null,
-    r.entry_id ? `posted as ${esc(r.entry_id)}` : "not posted",
+    r.entry_id ? `posted as ${esc(r.entry_id)}`
+      : notice.action === "voided" ? null
+        : notice.action === "updated" ? (r.reversal_entry_ids?.length ? "posts nothing now" : "entry unchanged")
+          : "not posted",
     `locked through ${esc(r.locked_through ?? "nothing")}`,
   ].filter(Boolean);
   return `<div class="form-ok">${parts.join(" · ")}</div>`;
+}
+
+function voidFormHtml(saved) {
+  return `<form id="voidForm" class="panel" style="margin-top:18px" autocomplete="off"><div class="panel-body">
+    <div class="form-grid">
+      <label class="form-field wide"><span class="lbl">Void ${esc(saved.number ?? saved.document_id)}</span>
+        <input class="form-input" name="reason" placeholder="Why — kept on the document and its reversal" required>
+      </label>
+    </div>
+    <div class="form-actions">
+      <button class="btn" type="submit">Void</button>
+      <span class="hint" style="margin:0">Nothing is deleted: the book saves a voided version and reverses its entry. Refused while a payment or credit is applied to it, or in a closed period.</span>
+    </div>
+  </div></form>`;
+}
+
+/** A document this form does not edit — voided, or a kind or line it
+ * cannot show — as a plain summary, with Void when it is not voided yet. */
+function renderReadOnly(main, doc, why) {
+  const notice = noticeFor(main, doc.kind);
+  main.innerHTML = viewHead(
+    `${doc.kind} ${doc.number ?? ""}`.trim(),
+    doc.is_voided ? "Voided · kept, never deleted" : why ?? "",
+    `<a class="btn" href="#ledger-open/receivable">Receivables</a><a class="btn" href="#ledger-open/payable">Payables</a>`,
+  ) + `
+  <div class="pad">
+    ${notice ? noticeHtml(notice) : ""}
+    ${doc.is_voided ? `<div class="banner banner-warn">${esc(doc.memo ?? "Voided")}</div>` : ""}
+    <div class="strip">
+      <div class="strip-cell"><div class="lbl">Date</div><div class="strip-val">${esc(doc.txn_date)}</div></div>
+      <div class="strip-cell"><div class="lbl">Contact</div><div class="strip-val">${esc(doc.contact?.id ?? "—")}</div></div>
+      <div class="strip-cell"><div class="lbl">Total</div><div class="strip-val">${plain(doc.total)}</div></div>
+      <div class="strip-cell"><div class="lbl">Version</div><div class="strip-val">${esc(doc.version)}</div></div>
+    </div>
+    <div class="grid-wrap"><div class="grid-scroll"><table>
+      <thead><tr><th>#</th><th>Kind</th><th>Item / account</th><th>Description</th><th class="r">Amount</th></tr></thead>
+      <tbody>${(doc.lines ?? []).map((l) => `<tr>
+        <td class="mono dim">${esc(l.line_no)}</td><td class="dim">${esc(l.kind)}</td>
+        <td class="mono">${esc(l.item_id ?? l.account ?? "")}</td><td>${esc(l.description ?? "")}</td>
+        <td class="r num">${plain(l.amount)}</td>
+      </tr>`).join("") || `<tr><td colspan="5" class="dim">No lines.</td></tr>`}</tbody>
+    </table></div></div>
+    ${doc.is_voided ? "" : voidFormHtml(doc)}
+  </div>`;
+  wireVoid(main, doc);
+}
+
+function wireVoid(main, saved) {
+  const form = main.querySelector("#voidForm");
+  if (!form) return;
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const reason = form.elements.reason.value.trim();
+    if (!reason) return;
+    const label = ENTRY_KINDS[saved.kind]?.noun ?? ENTRY_KINDS[saved.kind]?.label.toLowerCase() ?? saved.kind;
+    try {
+      const result = await ledgerProvider.voidDocument(saved.document_id, reason, ACTOR);
+      editing.delete(saved.document_id);
+      main.dataset.entryNotice = JSON.stringify({ kind: saved.kind, ok: true, action: "voided", label, result });
+    } catch (err) {
+      main.dataset.entryNotice = JSON.stringify({ kind: saved.kind, ok: false, text: err.message });
+    }
+    renderEditDocument(main, saved.document_id);
+  });
 }
 
 function contactNote(contact, spec) {
@@ -227,16 +378,18 @@ function totalsHtml(kind, spec, draft, contact) {
     + cell("Total", t.total);
 }
 
-function wire(main, kind, spec, draft, contact, itemsById) {
+function wire(main, kind, spec, draft, contact, itemsById, saved) {
   const form = main.querySelector("#entryForm");
   const totals = main.querySelector("#entryTotals");
   const repaintTotals = () => {
     totals.innerHTML = totalsHtml(kind, spec, draft, contact);
   };
+  const again = () => (saved ? renderEditDocument(main, saved.document_id) : renderNewDocument(main, kind));
   const rerender = () => {
     delete main.dataset.entryNotice;
-    renderNewDocument(main, kind);
+    again();
   };
+  wireVoid(main, saved);
 
   main.querySelectorAll("[data-kind]").forEach((btn) => {
     btn.addEventListener("click", () => {
@@ -325,19 +478,26 @@ function wire(main, kind, spec, draft, contact, itemsById) {
     event.preventDefault();
     let document;
     try {
-      document = buildDocument(kind, draft);
+      document = saved ? buildEditedDocument(kind, draft) : buildDocument(kind, draft);
     } catch (err) {
       main.dataset.entryNotice = JSON.stringify({ kind, ok: false, text: err.message });
-      renderNewDocument(main, kind);
+      again();
       return;
     }
+    const label = spec.noun ?? spec.label.toLowerCase();
     try {
-      const result = await ledgerProvider.createDocument(document, ACTOR);
-      drafts.delete(kind);
-      main.dataset.entryNotice = JSON.stringify({ kind, ok: true, label: spec.noun ?? spec.label.toLowerCase(), result });
+      if (saved) {
+        const result = await ledgerProvider.updateDocument(document, ACTOR);
+        editing.delete(saved.document_id);
+        main.dataset.entryNotice = JSON.stringify({ kind, ok: true, action: "updated", label, result });
+      } else {
+        const result = await ledgerProvider.createDocument(document, ACTOR);
+        drafts.delete(kind);
+        main.dataset.entryNotice = JSON.stringify({ kind, ok: true, label, result });
+      }
     } catch (err) {
       main.dataset.entryNotice = JSON.stringify({ kind, ok: false, text: err.message });
     }
-    renderNewDocument(main, kind);
+    again();
   });
 }

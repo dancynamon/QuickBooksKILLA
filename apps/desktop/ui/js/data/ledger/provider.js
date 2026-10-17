@@ -1,8 +1,8 @@
 // The ledger provider contract. `docs/MCP.md`'s ledger section documents
-// twenty-four `ledger-mcp` tools (fourteen reads, ten gated writes); this
+// twenty-eight `ledger-mcp` tools (fifteen reads, thirteen gated writes); this
 // file is the one place that knows their wire names and argument shapes, so
 // `fixture.js` and `tauri.js` each supply only a `callTool(tool, args)`
-// function and get the same twenty-four typed methods for free.
+// function and get the same twenty-eight typed methods for free.
 //
 // Unlike `js/data/provider.js` (the qbo-local provider), there is no
 // `realm_id` here: `ledger-mcp` is bound to one company for the life of its
@@ -33,9 +33,13 @@ export const TOOL = Object.freeze({
   listItems: "list_items",
   openDocuments: "open_documents",
   aging: "aging",
+  getDocument: "get_document",
   upsertContact: "upsert_contact",
   upsertItem: "upsert_item",
   createDocument: "create_document",
+  updateDocument: "update_document",
+  voidDocument: "void_document",
+  applyCredit: "apply_credit",
   saveAndPostDocument: "save_and_post_document",
   reverseEntry: "reverse_entry",
   proposeAdjustment: "propose_adjustment",
@@ -111,6 +115,10 @@ export function createProvider(callTool) {
     aging(book, asOf) {
       return callTool(TOOL.aging, { book, as_of: asOf });
     },
+    /** A saved document as an editor needs it back, newest version. */
+    getDocument(documentId) {
+      return callTool(TOOL.getDocument, { document_id: documentId });
+    },
 
     // --- writes ------------------------------------------------------------
     // Every write's result carries `locked_through` (`docs/MCP.md`'s write
@@ -125,6 +133,25 @@ export function createProvider(callTool) {
      * fills the number, due date, header class and sales tax. */
     createDocument(document, actor) {
       return callTool(TOOL.createDocument, { document, actor });
+    },
+    /** Edit a saved document: what `createDocument` takes, plus its
+     * `document_id`. A new version; the old entry reversed and the new one
+     * posted when the posting changed. The number is kept. */
+    updateDocument(document, actor) {
+      return callTool(TOOL.updateDocument, { document, actor });
+    },
+    /** Void a saved document: a new version and a reversal, never a delete. */
+    voidDocument(documentId, reason, actor) {
+      return callTool(TOOL.voidDocument, { document_id: documentId, reason, actor });
+    },
+    /** Apply an open credit memo (or vendor credit) to an open invoice (or
+     * bill) of the same contact. `amount` omitted applies as much as both
+     * have open. */
+    applyCredit(creditId, targetDocumentId, amount, actor) {
+      return callTool(
+        TOOL.applyCredit,
+        args({ credit_id: creditId, target_document_id: targetDocumentId, amount, actor }),
+      );
     },
     saveAndPostDocument(document, actor, items) {
       return callTool(TOOL.saveAndPostDocument, args({ document, actor, items }));

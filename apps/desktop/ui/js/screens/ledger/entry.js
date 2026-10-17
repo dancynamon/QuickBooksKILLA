@@ -185,7 +185,10 @@ export function buildDocument(kind, draft) {
         throw new Error(`${where}: ${err.message}`);
       }
       if (amount == null) throw new Error(`${where}: an amount, or a quantity and a rate, is required`);
-      const line = { kind: itemId ? "Item" : "Account", amount, is_taxable: spec.taxed && Boolean(l.taxable) };
+      // A line read back from a saved document keeps its own kind (a
+      // shipping or discount line stays one); a typed line is an item or an
+      // account line.
+      const line = { kind: l.kind ?? (itemId ? "Item" : "Account"), amount, is_taxable: spec.taxed && Boolean(l.taxable) };
       if (itemId) line.item_id = itemId;
       else line.account = account;
       const qty = String(l.qty ?? "").trim();
@@ -240,4 +243,63 @@ export function lineForItem(kind, item) {
     cls: "",
     taxable: !purchase && Boolean(item.is_taxable),
   };
+}
+
+/** The number a quantity was entered as, else `null`. */
+function qtyOrNull(qty) {
+  const t = String(qty ?? "").trim();
+  return QTY_RE.test(t) && Number(t) !== 0 ? t : null;
+}
+
+/**
+ * A saved document (`get_document`) as the form's draft, so editing is the
+ * same form as entering. A line's rate is recovered when quantity × rate
+ * gives back the saved amount exactly, so changing the quantity reprices
+ * the line; otherwise the amount stays as typed. Throws for a document with
+ * lines this form cannot show faithfully (journal lines).
+ * @param {object} doc `get_document`'s result
+ */
+export function draftFromDocument(doc) {
+  const spec = ENTRY_KINDS[doc.kind];
+  if (!spec) throw new Error(`this form does not edit a ${doc.kind}`);
+  if ((doc.lines ?? []).some((l) => l.kind === "Journal" || l.kind === "Description")) {
+    throw new Error(`${doc.number ?? doc.document_id} has lines this form does not edit`);
+  }
+  const lines = (doc.lines ?? []).map((l) => {
+    const line = {
+      itemId: l.item_id ?? "", account: l.account ?? "", description: l.description ?? "",
+      qty: l.qty ?? "", rate: "", amount: l.amount, cls: l.class ?? "", taxable: Boolean(l.is_taxable),
+    };
+    if (l.kind !== "Item" && l.kind !== "Account") line.kind = l.kind;
+    const qty = qtyOrNull(l.qty);
+    if (qty) {
+      const cents = toCents(l.amount);
+      const rate = fromCents(Math.round(cents / Number(qty)));
+      if (lineAmount(qty, rate) === fromCents(cents)) {
+        line.rate = rate;
+        line.amount = "";
+      }
+    }
+    return line;
+  });
+  const bankAccount = spec.bank ? doc[spec.bank.field] ?? "" : "";
+  return {
+    documentId: doc.document_id,
+    txnDate: doc.txn_date,
+    contactId: doc.contact?.id ?? "",
+    number: doc.number ?? "",
+    memo: doc.memo ?? "",
+    bank: bankAccount,
+    lines: lines.length ? lines : [{ itemId: "", account: "", description: "", qty: "", rate: "", amount: "", cls: "", taxable: false }],
+    applications: (doc.applications ?? []).map((a) => ({ documentId: a.target_document_id, kind: a.target_kind, amount: a.amount })),
+  };
+}
+
+/** A draft being edited, as the `document` `update_document` takes: what
+ * `buildDocument` sends, plus the saved `document_id` and the number it
+ * keeps. */
+export function buildEditedDocument(kind, draft) {
+  if (!draft.documentId) throw new Error("not a saved document");
+  const document = buildDocument(kind, draft);
+  return { document_id: draft.documentId, ...document };
 }

@@ -154,7 +154,9 @@ fn invoice(id: &str, on: NaiveDate, contact: &str, minor: i64) -> LedgerDocument
 fn enter(ledger: &Ledger, document: LedgerDocument) -> LedgerDocument {
     let (document, context) =
         books::prepare_document(ledger, CO, document, PostingConfig::default()).unwrap();
-    let version = ledger.save_document(CO, &document, command(), now()).unwrap();
+    let version = ledger
+        .save_document(CO, &document, command(), now())
+        .unwrap();
     if let Posting::Entry(entry) = post::post(&document, version.version, &context).unwrap() {
         ledger.post_entry(CO, &entry, now()).unwrap();
     }
@@ -288,7 +290,10 @@ fn an_edit_may_not_change_kind_contact_type_or_number() {
     ));
 
     assert!(matches!(
-        edit(&ledger, invoice("never-saved", ymd(2026, 9, 1), "c-pool", 1)),
+        edit(
+            &ledger,
+            invoice("never-saved", ymd(2026, 9, 1), "c-pool", 1)
+        ),
         Err(BooksError::UnknownDocument(_))
     ));
 
@@ -405,8 +410,7 @@ fn a_void_reverses_the_entry_and_the_document_leaves_the_aging() {
     ));
 
     // Void the payment: it releases what it applied.
-    let revision =
-        books::void_document(&ledger, CO, "pay-1", "bounced", command(), now()).unwrap();
+    let revision = books::void_document(&ledger, CO, "pay-1", "bounced", command(), now()).unwrap();
     assert!(revision.document.is_voided);
     assert_eq!(revision.reversals.len(), 1);
     assert!(revision.entry.is_none());
@@ -415,10 +419,7 @@ fn a_void_reverses_the_entry_and_the_document_leaves_the_aging() {
     let revision =
         books::void_document(&ledger, CO, "inv-1", "duplicate", command(), now()).unwrap();
     assert_eq!(revision.version, 2);
-    assert_eq!(
-        revision.document.memo.as_deref(),
-        Some("Voided: duplicate")
-    );
+    assert_eq!(revision.document.memo.as_deref(), Some("Voided: duplicate"));
     let entries = ledger.entries_for_document(CO, "inv-1").unwrap();
     let (_, reversal, _) = entries
         .iter()
@@ -444,7 +445,10 @@ fn a_void_reverses_the_entry_and_the_document_leaves_the_aging() {
 fn a_credit_memo_applies_to_an_open_invoice_and_both_net_in_the_aging() {
     let ledger = book();
     enter(&ledger, invoice("inv-1", ymd(2026, 9, 1), "c-pool", 10000));
-    enter(&ledger, invoice("inv-city", ymd(2026, 9, 1), "c-city", 10000));
+    enter(
+        &ledger,
+        invoice("inv-city", ymd(2026, 9, 1), "c-city", 10000),
+    );
     let credit = LedgerDocument {
         lines: vec![mat_line(4000)],
         ..doc("cm-1", DocKind::CreditMemo, ymd(2026, 9, 5), "c-pool")
@@ -463,13 +467,28 @@ fn a_credit_memo_applies_to_an_open_invoice_and_both_net_in_the_aging() {
     ));
     // More than the credit has open.
     assert!(matches!(
-        books::apply_credit(&ledger, CO, "cm-1", "inv-1", Some(usd(5000)), command(), now()),
+        books::apply_credit(
+            &ledger,
+            CO,
+            "cm-1",
+            "inv-1",
+            Some(usd(5000)),
+            command(),
+            now()
+        ),
         Err(BooksError::BadApplication(_))
     ));
 
-    let revision =
-        books::apply_credit(&ledger, CO, "cm-1", "inv-1", Some(usd(1500)), command(), now())
-            .unwrap();
+    let revision = books::apply_credit(
+        &ledger,
+        CO,
+        "cm-1",
+        "inv-1",
+        Some(usd(1500)),
+        command(),
+        now(),
+    )
+    .unwrap();
     assert_eq!(revision.version, 2);
     assert!(revision.reversals.is_empty() && revision.entry.is_none());
     // The rest, by default.
@@ -480,10 +499,7 @@ fn a_credit_memo_applies_to_an_open_invoice_and_both_net_in_the_aging() {
 
     assert_eq!(
         open(&ledger),
-        [
-            ("inv-1".to_string(), 6000),
-            ("inv-city".to_string(), 10000)
-        ]
+        [("inv-1".to_string(), 6000), ("inv-city".to_string(), 10000)]
     );
     // The credit posted once and still stands; AR ties to the aging.
     assert_eq!(footprint(&ledger, "cm-1"), (3, 1));
