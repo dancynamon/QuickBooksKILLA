@@ -465,6 +465,9 @@ tbody tr[data-clickable]:hover { background: var(--accent-soft); }
   width: 100%; text-align: left;
 }
 .link-row:last-child { border-bottom: none; }
+/* A document number that opens it (Receivables/Payables -> #ledger-edit). */
+.doc-link { color: var(--accent); text-decoration: none; }
+.doc-link:hover { text-decoration: underline; }
 .link-row:hover .link-main { color: var(--accent); }
 .link-glyph {
   width: calc(24px * var(--fs)); height: calc(24px * var(--fs)); flex: none;

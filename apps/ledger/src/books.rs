@@ -13,6 +13,12 @@
 //! - Open documents and aging for receivables and payables, derived from the
 //!   saved documents and their applications, never stored. The slim cutover
 //!   import (D28) checks its AR and AP against QBO's aging with these.
+//! - Corrections (`LEDGER-DESIGN.md` §4/§6): [`update_document`],
+//!   [`void_document`] and [`apply_credit`] each save a new document version
+//!   and, when what the document posts has changed, reverse the old entry and
+//!   post the new one — all in one [`Ledger::atomically`] unit, so a refusal
+//!   part way (a closed period, a missing class) leaves the book untouched.
+//!   Nothing is ever deleted: every version stays in `document_versions`.
 
 use std::collections::HashMap;
 
@@ -23,10 +29,11 @@ use serde::{Deserialize, Serialize};
 
 use ledger_core::{round_money, Money, RoundingPolicy};
 
-use crate::store::{Ledger, LedgerError};
+use crate::post::{self, Posting};
+use crate::store::{CommandMeta, EntryId, Ledger, LedgerError};
 use crate::types::{
-    AccountId, ClassId, ContactKind, ContactRef, CustomerPosting, DocKind, ItemAccounts,
-    LedgerDocument, LineKind, PostingConfig, PostingContext, TaxDetail,
+    AccountId, Application, ClassId, ContactKind, ContactRef, CustomerPosting, DocKind,
+    ItemAccounts, JournalEntry, LedgerDocument, LineKind, PostingConfig, PostingContext, TaxDetail,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -68,6 +75,43 @@ pub enum BooksError {
     AssetAccountMismatch(String),
     #[error("stored value {0:?} does not parse")]
     BadStoredValue(String),
+    #[error(transparent)]
+    Post(#[from] crate::post::PostError),
+    #[error("no saved document {0}")]
+    UnknownDocument(String),
+    #[error("{0} is voided; a voided document cannot be changed")]
+    Voided(String),
+    #[error("{id} is a {from}; an edit cannot make it a {to}")]
+    KindChanged {
+        id: String,
+        from: &'static str,
+        to: &'static str,
+    },
+    #[error("{id} names a {from}; an edit cannot make it name a {to}")]
+    ContactTypeChanged {
+        id: String,
+        from: &'static str,
+        to: &'static str,
+    },
+    #[error("{kind} {id} keeps its number {kept}; an edit cannot renumber it to {requested}")]
+    NumberChanged {
+        kind: &'static str,
+        id: String,
+        kept: String,
+        requested: String,
+    },
+    #[error("an edit cannot void a document; use void_document")]
+    VoidThroughEdit,
+    #[error("{applied} is applied against {id}; its total cannot fall to {total}")]
+    Overapplied {
+        id: String,
+        applied: String,
+        total: String,
+    },
+    #[error("{id} has {applied} applied against it; void or edit those payments or credits first")]
+    HasApplications { id: String, applied: String },
+    #[error("cannot apply the credit: {0}")]
+    BadApplication(String),
 }
 
 // ---------------------------------------------------------------------------
@@ -468,8 +512,7 @@ pub const fn is_numbered(kind: DocKind) -> bool {
 /// already used by a saved document of the same type is skipped, never
 /// reissued. An allocated number that is never saved is a gap, as in QBO.
 pub fn next_number(ledger: &Ledger, company: &str, kind: DocKind) -> Result<String, BooksError> {
-    let conn = ledger.conn();
-    let tx = conn.unchecked_transaction()?;
+    let tx = ledger.write_tx()?;
     let stored: Option<i64> = tx
         .query_row(
             "SELECT next_number FROM doc_sequences WHERE company_id = ?1 AND doc_type = ?2",
@@ -1105,6 +1148,424 @@ pub fn aging(
         rows,
         totals,
     })
+}
+
+// ---------------------------------------------------------------------------
+// Corrections: edit, void, apply a credit (LEDGER-DESIGN.md §4/§6)
+// ---------------------------------------------------------------------------
+
+/// Later than any document's date, for "everything saved so far". Not
+/// `NaiveDate::MAX`, whose string form (`+262142-12-31`) sorts before
+/// `2027-01-01` in the `txn_date <= ?` text comparison.
+fn far_future() -> NaiveDate {
+    NaiveDate::from_ymd_opt(9999, 12, 31).expect("valid date")
+}
+
+/// `1234.56`, for a refusal a person reads.
+fn money_text(money: Money) -> String {
+    let minor = money.minor();
+    let sign = if minor < 0 { "-" } else { "" };
+    let abs = minor.unsigned_abs();
+    format!("{sign}{}.{:02}", abs / 100, abs % 100)
+}
+
+/// What an edit, a void or a credit application did.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Revision {
+    /// The document as now saved, newest version.
+    pub document: LedgerDocument,
+    pub version: i64,
+    /// The reversals posted against the entries the old version had live.
+    /// Empty when the posting did not change (a memo edit, a credit applied)
+    /// or the document never posts.
+    pub reversals: Vec<EntryId>,
+    /// The entry the new version posted, when it posted one.
+    pub entry: Option<(EntryId, JournalEntry)>,
+}
+
+/// The newest saved version of a document.
+pub fn latest_document(
+    ledger: &Ledger,
+    company: &str,
+    document_id: &str,
+) -> Result<LedgerDocument, BooksError> {
+    let raw = ledger
+        .latest_document_payload(company, document_id)?
+        .ok_or_else(|| BooksError::UnknownDocument(document_id.to_string()))?;
+    Ok(serde_json::from_str(&raw)?)
+}
+
+/// The same journal effect, whichever version it was posted from.
+fn same_posting(a: &JournalEntry, b: &JournalEntry) -> bool {
+    a.entry_date == b.entry_date
+        && a.memo == b.memo
+        && a.source_type == b.source_type
+        && a.is_flagged == b.is_flagged
+        && a.lines == b.lines
+}
+
+fn check_unlocked(ledger: &Ledger, company: &str, date: NaiveDate) -> Result<(), BooksError> {
+    if let Some(locked) = ledger.locked_through(company)? {
+        if date <= locked {
+            return Err(LedgerError::PeriodClosed { period_end: locked }.into());
+        }
+    }
+    Ok(())
+}
+
+/// The book a kind opens an item on.
+fn book_of(kind: DocKind) -> Option<Book> {
+    [Book::Receivable, Book::Payable]
+        .into_iter()
+        .find(|book| book.opens(kind).is_some())
+}
+
+/// Everything saved documents other than `excluding` apply against
+/// `document_id`.
+fn applied_by_others(
+    ledger: &Ledger,
+    company: &str,
+    book: Book,
+    document_id: &str,
+    excluding: &str,
+) -> Result<Money, BooksError> {
+    let mut total = Money::ZERO;
+    for doc in latest_documents(ledger, company, book.doc_types(), far_future())? {
+        if doc.document_id == excluding || !book.settles(doc.kind) {
+            continue;
+        }
+        for application in &doc.applications {
+            if application.target_document_id == document_id {
+                total = total.checked_add(application.amount)?;
+            }
+        }
+    }
+    Ok(total)
+}
+
+/// What the new version does to the journal.
+enum Reposting<'a> {
+    /// Post what `post::post` derives from the new version with this context,
+    /// reversing the old entry only if that differs.
+    Post(&'a PostingContext),
+    /// Reverse every live entry; post nothing new. The reason goes on the
+    /// reversals' memo.
+    Void(&'a str),
+    /// The posting cannot have changed (only applications moved on a credit
+    /// memo, which posts the same either way): save the version alone.
+    Keep,
+}
+
+/// Saves `doc` as the next version of `old` and brings the journal in line,
+/// as one unit. Both the old and the new date must be in an open period: an
+/// edit restates the document where it stood, so every reversal is dated
+/// the entry it reverses, and nothing in a closed period may move.
+fn commit_revision(
+    ledger: &Ledger,
+    company: &str,
+    old: &LedgerDocument,
+    doc: LedgerDocument,
+    reposting: Reposting<'_>,
+    command: CommandMeta,
+    now: DateTime<Utc>,
+) -> Result<Revision, BooksError> {
+    check_unlocked(ledger, company, old.txn_date)?;
+    check_unlocked(ledger, company, doc.txn_date)?;
+    let live = ledger.live_entries_for_document(company, &doc.document_id)?;
+    let next_version = ledger.document_version_count(company, &doc.document_id)? + 1;
+
+    let (new_entry, reverse) = match reposting {
+        Reposting::Keep => (None, false),
+        Reposting::Void(_) => (None, true),
+        Reposting::Post(ctx) => match post::post(&doc, next_version, ctx)? {
+            Posting::NonPosting => (None, true),
+            Posting::Entry(entry) => {
+                let unchanged =
+                    matches!(&live[..], [(_, old_entry)] if same_posting(old_entry, &entry));
+                if unchanged {
+                    (None, false)
+                } else {
+                    (Some(entry), true)
+                }
+            }
+        },
+    };
+    let void_reason = match reposting {
+        Reposting::Void(reason) => Some(reason),
+        _ => None,
+    };
+
+    ledger.atomically(|| {
+        let mut reversals = Vec::new();
+        if reverse {
+            for (entry_id, entry) in &live {
+                let mut reversal = entry.reversed(entry.entry_date, entry_id);
+                if let Some(reason) = void_reason {
+                    let original = entry.memo.clone().unwrap_or_default();
+                    reversal.memo = Some(format!("VOID: {original} ({reason})"));
+                }
+                reversals.push(ledger.post_entry(company, &reversal, now)?);
+            }
+        }
+        let version = ledger.save_document(company, &doc, command, now)?;
+        let entry = match new_entry {
+            Some(mut entry) => {
+                entry.source_version = version.version;
+                let entry_id = ledger.post_entry(company, &entry, now)?;
+                Some((entry_id, entry))
+            }
+            None => None,
+        };
+        Ok(Revision {
+            document: doc,
+            version: version.version,
+            reversals,
+            entry,
+        })
+    })
+}
+
+/// Edits a saved document: the same checks and fills as
+/// [`prepare_document`], then a new version, with the old entry reversed and
+/// the new one posted when what it posts changed. Refused: a voided
+/// document; a change of kind or of contact type; renumbering a document the
+/// book numbers (left blank, the number is kept); a total that falls below
+/// what payments and credits already apply against it; anything dated in a
+/// closed period, before or after the edit.
+pub fn update_document(
+    ledger: &Ledger,
+    company: &str,
+    mut doc: LedgerDocument,
+    config: PostingConfig,
+    command: CommandMeta,
+    now: DateTime<Utc>,
+) -> Result<Revision, BooksError> {
+    let old = latest_document(ledger, company, &doc.document_id)?;
+    if old.is_voided {
+        return Err(BooksError::Voided(doc.document_id));
+    }
+    if doc.is_voided {
+        return Err(BooksError::VoidThroughEdit);
+    }
+    if doc.kind != old.kind {
+        return Err(BooksError::KindChanged {
+            id: doc.document_id,
+            from: old.kind.as_str(),
+            to: doc.kind.as_str(),
+        });
+    }
+    if let (Some(was), Some(now_names)) = (&old.contact, &doc.contact) {
+        if was.kind != now_names.kind {
+            return Err(BooksError::ContactTypeChanged {
+                id: doc.document_id,
+                from: contact_kind_str(was.kind),
+                to: contact_kind_str(now_names.kind),
+            });
+        }
+    }
+    match (&doc.number, &old.number) {
+        (None, _) => doc.number = old.number.clone(),
+        (Some(requested), kept) if is_numbered(doc.kind) && Some(requested) != kept.as_ref() => {
+            return Err(BooksError::NumberChanged {
+                kind: doc.kind.as_str(),
+                id: doc.document_id,
+                kept: kept.clone().unwrap_or_default(),
+                requested: requested.clone(),
+            });
+        }
+        _ => {}
+    }
+    if doc.source_ref.is_none() {
+        doc.source_ref = old.source_ref.clone();
+    }
+
+    let (doc, ctx) = prepare_document(ledger, company, doc, config)?;
+    if let Some(book) = book_of(doc.kind) {
+        let mut applied =
+            applied_by_others(ledger, company, book, &doc.document_id, &doc.document_id)?;
+        if book.opens(doc.kind) == Some(true) {
+            applied = applied.checked_add(Money::checked_sum(
+                doc.applications.iter().map(|a| a.amount),
+            )?)?;
+        }
+        let total = document_total(&doc)?;
+        if applied > total {
+            return Err(BooksError::Overapplied {
+                id: doc.document_id,
+                applied: money_text(applied),
+                total: money_text(total),
+            });
+        }
+    }
+    for application in &doc.applications {
+        let target = latest_document(ledger, company, &application.target_document_id)?;
+        if target.is_voided {
+            return Err(BooksError::Voided(target.document_id));
+        }
+        let Some(book) = book_of(target.kind) else {
+            continue;
+        };
+        let applied =
+            applied_by_others(ledger, company, book, &target.document_id, &doc.document_id)?
+                .checked_add(application.amount)?;
+        let total = document_total(&target)?;
+        if applied > total {
+            return Err(BooksError::Overapplied {
+                id: target.document_id,
+                applied: money_text(applied),
+                total: money_text(total),
+            });
+        }
+    }
+    commit_revision(
+        ledger,
+        company,
+        &old,
+        doc,
+        Reposting::Post(&ctx),
+        command,
+        now,
+    )
+}
+
+/// Voids a saved document (§6: it posts a reversal rather than vanishing):
+/// a new version with `is_voided` set and `reason` on its memo, and every
+/// live entry reversed as of its own date. A voided invoice or bill drops off
+/// the open items; a voided payment or credit releases what it applied.
+/// Refused: a document already voided; an invoice or bill something is still
+/// applied against (void or edit that first); a closed period.
+pub fn void_document(
+    ledger: &Ledger,
+    company: &str,
+    document_id: &str,
+    reason: &str,
+    command: CommandMeta,
+    now: DateTime<Utc>,
+) -> Result<Revision, BooksError> {
+    let old = latest_document(ledger, company, document_id)?;
+    if old.is_voided {
+        return Err(BooksError::Voided(document_id.to_string()));
+    }
+    if let Some(book) = book_of(old.kind) {
+        let applied = applied_by_others(ledger, company, book, document_id, document_id)?;
+        if !applied.is_zero() {
+            return Err(BooksError::HasApplications {
+                id: document_id.to_string(),
+                applied: money_text(applied),
+            });
+        }
+    }
+    let mut doc = old.clone();
+    doc.is_voided = true;
+    doc.memo = Some(match &old.memo {
+        Some(memo) if !memo.is_empty() => format!("Voided: {reason}. {memo}"),
+        _ => format!("Voided: {reason}"),
+    });
+    commit_revision(
+        ledger,
+        company,
+        &old,
+        doc,
+        Reposting::Void(reason),
+        command,
+        now,
+    )
+}
+
+/// Applies an open credit memo to an open invoice of the same customer (or
+/// an open vendor credit to an open bill): a new version of the credit with
+/// the application on it, which [`open_documents`] and [`aging`] already net
+/// on both sides. The credit's posting does not depend on its applications,
+/// so nothing is reversed or reposted. `amount` defaults to the smaller of
+/// the two open balances, and may not exceed either.
+pub fn apply_credit(
+    ledger: &Ledger,
+    company: &str,
+    credit_id: &str,
+    target_id: &str,
+    amount: Option<Money>,
+    command: CommandMeta,
+    now: DateTime<Utc>,
+) -> Result<Revision, BooksError> {
+    let credit = latest_document(ledger, company, credit_id)?;
+    let target_kind = match credit.kind {
+        DocKind::CreditMemo => DocKind::Invoice,
+        DocKind::VendorCredit => DocKind::Bill,
+        other => {
+            return Err(BooksError::BadApplication(format!(
+                "{credit_id} is a {}, not a credit memo or vendor credit",
+                other.as_str()
+            )))
+        }
+    };
+    if credit.is_voided {
+        return Err(BooksError::Voided(credit_id.to_string()));
+    }
+    let target = latest_document(ledger, company, target_id)?;
+    if target.kind != target_kind {
+        return Err(BooksError::BadApplication(format!(
+            "a {} applies to a {}, and {target_id} is a {}",
+            credit.kind.as_str(),
+            target_kind.as_str(),
+            target.kind.as_str()
+        )));
+    }
+    if target.is_voided {
+        return Err(BooksError::Voided(target_id.to_string()));
+    }
+    let contact_of = |doc: &LedgerDocument| doc.contact.as_ref().map(|c| c.id.clone());
+    if contact_of(&credit) != contact_of(&target) {
+        return Err(BooksError::BadApplication(format!(
+            "{credit_id} and {target_id} belong to different contacts"
+        )));
+    }
+
+    let book = book_of(credit.kind).expect("a credit opens on a book");
+    let open = open_documents(ledger, company, book, far_future())?;
+    let open_of = |id: &str| {
+        open.iter()
+            .find(|d| d.document_id == id)
+            .map_or(Ok(Money::ZERO), |d| {
+                if d.open < Money::ZERO {
+                    d.open.checked_neg()
+                } else {
+                    Ok(d.open)
+                }
+            })
+    };
+    let credit_open = open_of(credit_id)?;
+    let target_open = open_of(target_id)?;
+    let amount = amount.unwrap_or_else(|| credit_open.min(target_open));
+    if amount <= Money::ZERO {
+        return Err(BooksError::BadApplication(format!(
+            "nothing to apply: {credit_id} has {} open and {target_id} has {} open",
+            money_text(credit_open),
+            money_text(target_open)
+        )));
+    }
+    if amount > credit_open || amount > target_open {
+        return Err(BooksError::BadApplication(format!(
+            "{} is more than is open: {credit_id} has {}, {target_id} has {}",
+            money_text(amount),
+            money_text(credit_open),
+            money_text(target_open)
+        )));
+    }
+
+    let mut doc = credit.clone();
+    match doc
+        .applications
+        .iter_mut()
+        .find(|a| a.target_document_id == target_id)
+    {
+        Some(existing) => existing.amount = existing.amount.checked_add(amount)?,
+        None => doc.applications.push(Application {
+            target_document_id: target_id.to_string(),
+            target_kind,
+            amount,
+        }),
+    }
+    commit_revision(ledger, company, &credit, doc, Reposting::Keep, command, now)
 }
 
 /// The contact a document names, as the document records it.

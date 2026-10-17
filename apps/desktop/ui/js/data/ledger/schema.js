@@ -1,18 +1,19 @@
 // The ledger schema contract. `docs/MCP.md`'s ledger section documents
-// twenty-four tools (fourteen reads, ten gated writes); this file is that
+// twenty-eight tools (fifteen reads, thirteen gated writes); this file is that
 // documentation turned into something a test can check — derived by reading
 // the `_json` rendering functions in `apps/ledger/src/mcp.rs` field by field
 // (`tb_row_json`, `pnl_json`, `bs_row_json`, `sales_tax_lines_json`,
 // `gl_line_json`/`gl_section_json`/`gl_detail_json`, `audit_row_json`,
 // `journal_line_json`/`journal_entry_json`, `adjustment_request_json`,
 // `bank_statement_json`/`bank_line_json`, `contact_json`, `item_json`,
-// `open_document_json`, `aging_row_json`) and the dispatch in
+// `open_document_json`, `aging_row_json`, `document_json`, `revision_json`)
+// and the dispatch in
 // `LedgerToolSet::call_tool`.
 //
 // `test/ledger-fixture.test.js` uses `checkShape` (`../js/data/schema.js`'s
 // `firstMissingField`, reused rather than duplicated) to assert the fixture
 // provider's output actually has these fields for every one of the
-// twenty-four tools — the same "missing/renamed field" check the qbo-local
+// twenty-eight tools — the same "missing/renamed field" check the qbo-local
 // schema makes, not a formatting nuance.
 
 // `mcp.rs::journal_line_json`
@@ -112,6 +113,25 @@ export const AGING_ROW_FIELDS = [
   "days_61_90", "over_90", "total",
 ];
 
+// `mcp.rs::document_json`
+export const DOCUMENT_FIELDS = [
+  "document_id", "version", "kind", "number", "txn_date", "due_date",
+  "contact", "header_class", "lines", "tax", "deposit_to", "pay_from",
+  "applications", "unapplied", "is_voided", "memo", "source_ref", "total",
+];
+export const DOCUMENT_LINE_FIELDS = [
+  "line_no", "kind", "amount", "class", "item_id", "account", "is_taxable",
+  "qty", "description",
+];
+export const APPLICATION_FIELDS = ["target_document_id", "target_kind", "amount"];
+
+// `mcp.rs::revision_json`: what update_document, void_document and
+// apply_credit return.
+export const REVISION_FIELDS = [
+  "document_id", "version", "number", "due_date", "total", "tax",
+  "is_voided", "reversal_entry_ids", "entry_id", "entry",
+];
+
 /** Every write tool's result carries the company's current `locked_through`
  * (`docs/MCP.md` "The write gate", rule 2) alongside whatever the tool
  * itself returns. */
@@ -191,6 +211,12 @@ export const SCHEMA = {
     top: ["book", "as_of", "rows", "totals"],
     row: AGING_ROW_FIELDS,
   },
+  get_document: {
+    result: "object",
+    top: DOCUMENT_FIELDS,
+    line: DOCUMENT_LINE_FIELDS,
+    application: APPLICATION_FIELDS,
+  },
 
   // --- writes — every one carries WITH_LOCKED_THROUGH -------------------
   upsert_contact: {
@@ -211,6 +237,20 @@ export const SCHEMA = {
     ],
     entry: JOURNAL_ENTRY_FIELDS,
     line: JOURNAL_LINE_FIELDS,
+  },
+  update_document: {
+    result: "object",
+    top: [...REVISION_FIELDS, ...WITH_LOCKED_THROUGH],
+    entry: JOURNAL_ENTRY_FIELDS,
+    line: JOURNAL_LINE_FIELDS,
+  },
+  void_document: {
+    result: "object",
+    top: [...REVISION_FIELDS, ...WITH_LOCKED_THROUGH],
+  },
+  apply_credit: {
+    result: "object",
+    top: [...REVISION_FIELDS, "target_document_id", "applied", ...WITH_LOCKED_THROUGH],
   },
   save_and_post_document: {
     result: "object",

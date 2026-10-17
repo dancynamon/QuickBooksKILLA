@@ -242,6 +242,16 @@ impl<'a> LedgerToolSet<'a> {
                     .map(open_document_json)
                     .collect::<Vec<_>>()))
             }
+            "get_document" => {
+                let document_id = required_str(&args, "document_id")?;
+                let doc = books::latest_document(self.ledger, &self.company, document_id)
+                    .map_err(books_err)?;
+                let version = self
+                    .ledger
+                    .document_version_count(&self.company, document_id)
+                    .map_err(ledger_err)?;
+                document_json(&doc, version)
+            }
             "aging" => {
                 let book = parse_book(&args)?;
                 let as_of = parse_date(&args, "as_of")?;
@@ -259,6 +269,9 @@ impl<'a> LedgerToolSet<'a> {
             "upsert_contact" => self.upsert_contact(&mut args),
             "upsert_item" => self.upsert_item(&mut args),
             "create_document" => self.create_document(&mut args),
+            "update_document" => self.update_document(&mut args),
+            "void_document" => self.void_document(&args),
+            "apply_credit" => self.apply_credit(&mut args),
             "save_and_post_document" => self.save_and_post_document(&mut args),
             "reverse_entry" => self.reverse_entry(&args),
             "propose_adjustment" => self.propose_adjustment(&mut args),
@@ -464,6 +477,113 @@ impl<'a> LedgerToolSet<'a> {
             "entry_id": entry_id,
             "entry": entry_value,
         }))
+    }
+
+    /// Edits a saved document (`LEDGER-DESIGN.md` §4/§6): the caller sends
+    /// the document as typed, `document_id` included, and
+    /// [`books::update_document`] saves it as the next version, reversing
+    /// the old entry and posting the new one in one unit.
+    fn update_document(&mut self, args: &mut Value) -> Result<Value, ToolError> {
+        self.refuse_if_replaying()?;
+        let actor = required_str(args, "actor")?.to_string();
+        let mut document_value = args
+            .get_mut("document")
+            .map(Value::take)
+            .ok_or_else(|| ToolError::new("missing \"document\""))?;
+        let Some(document_id) = document_value
+            .get("document_id")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+        else {
+            return Err(ToolError::new(
+                "missing \"document.document_id\": update_document edits a saved document",
+            ));
+        };
+        // An editor that only shows lines (a credit memo's form) must not
+        // silently drop what the document already applies: no
+        // `applications` key keeps the saved ones; `[]` clears them.
+        if let Some(map) = document_value.as_object_mut() {
+            if !map.contains_key("applications") {
+                let saved = books::latest_document(self.ledger, &self.company, &document_id)
+                    .map_err(books_err)?;
+                map.insert(
+                    "applications".to_string(),
+                    serde_json::to_value(&saved.applications)
+                        .map_err(|err| ToolError::new(err.to_string()))?,
+                );
+            }
+        }
+        fill_document_defaults(&mut document_value)?;
+        normalize_money_fields(&mut document_value);
+        let doc: LedgerDocument = serde_json::from_value(document_value)
+            .map_err(|err| ToolError::new(format!("invalid \"document\": {err}")))?;
+        let now = Utc::now();
+        let revision = books::update_document(
+            self.ledger,
+            &self.company,
+            doc,
+            PostingConfig::default(),
+            command("mcp_update_document", actor, now),
+            now,
+        )
+        .map_err(books_err)?;
+        self.with_locked_through(revision_json(&revision)?)
+    }
+
+    fn void_document(&mut self, args: &Value) -> Result<Value, ToolError> {
+        self.refuse_if_replaying()?;
+        let document_id = required_str(args, "document_id")?;
+        let reason = required_str(args, "reason")?.trim();
+        if reason.is_empty() {
+            return Err(ToolError::new("\"reason\" may not be empty"));
+        }
+        let actor = required_str(args, "actor")?.to_string();
+        let now = Utc::now();
+        let revision = books::void_document(
+            self.ledger,
+            &self.company,
+            document_id,
+            reason,
+            command("mcp_void_document", actor, now),
+            now,
+        )
+        .map_err(books_err)?;
+        self.with_locked_through(revision_json(&revision)?)
+    }
+
+    fn apply_credit(&mut self, args: &mut Value) -> Result<Value, ToolError> {
+        self.refuse_if_replaying()?;
+        let credit_id = required_str(args, "credit_id")?.to_string();
+        let target_id = required_str(args, "target_document_id")?.to_string();
+        let actor = required_str(args, "actor")?.to_string();
+        normalize_money_fields(args);
+        let amount = match args.get("amount") {
+            None | Some(Value::Null) => None,
+            Some(raw) => Some(value_to_money(raw)?),
+        };
+        let now = Utc::now();
+        let revision = books::apply_credit(
+            self.ledger,
+            &self.company,
+            &credit_id,
+            &target_id,
+            amount,
+            command("mcp_apply_credit", actor, now),
+            now,
+        )
+        .map_err(books_err)?;
+        let applied = revision
+            .document
+            .applications
+            .iter()
+            .find(|a| a.target_document_id == target_id)
+            .map(|a| money_str(a.amount));
+        let mut result = revision_json(&revision)?;
+        if let Value::Object(map) = &mut result {
+            map.insert("target_document_id".to_string(), json!(target_id));
+            map.insert("applied".to_string(), json!(applied));
+        }
+        self.with_locked_through(result)
     }
 
     fn save_and_post_document(&mut self, args: &mut Value) -> Result<Value, ToolError> {
@@ -862,6 +982,19 @@ pub fn tools() -> Vec<ToolSpec> {
             ),
         },
         ToolSpec {
+            name: "get_document",
+            description: "The newest saved version of one document, as an editor needs it: \
+                `kind`, `number`, `txn_date`, `due_date`, `contact`, `header_class`, `lines` \
+                (each `line_no`, `kind`, `amount`, `class`, `item_id`, `account`, \
+                `is_taxable`, `qty`, `description`), `tax`, `deposit_to`, `pay_from`, \
+                `applications`, `unapplied`, `is_voided`, `memo`, `source_ref`, plus \
+                `version` (how many versions are saved) and `total`.",
+            input_schema: tool_schema(
+                json!({ "document_id": { "type": "string" } }),
+                &["document_id"],
+            ),
+        },
+        ToolSpec {
             name: "upsert_contact",
             description: "Creates or replaces a customer or vendor. `contact`: `contact_id`, \
                 `kind` (\"Customer\" or \"Vendor\"), `display_name` (unique per kind), and \
@@ -912,6 +1045,84 @@ pub fn tools() -> Vec<ToolSpec> {
                     },
                 }),
                 &["document", "actor"],
+            ),
+        },
+        ToolSpec {
+            name: "update_document",
+            description: "Edits a saved document (`LEDGER-DESIGN.md` §4/§6: a correction is a \
+                reversal, never an overwrite). `document` is what create_document takes, with \
+                the saved `document_id`; it is checked and filled the same way, and saved as \
+                the next version. When what it posts changed, the old entry is reversed (dated \
+                as the entry it reverses) and the new one posted, in one all-or-nothing unit; \
+                when it did not (a memo edit), the entry stands. The number is kept: leave it \
+                out, or send the same one. Leave `applications` out to keep the saved ones \
+                (`[]` clears them). Refused, with nothing changed: a voided document, a \
+                change of `kind` or of contact type (customer to vendor), renumbering a \
+                document the book numbers, a total below what is already applied against it, \
+                an application beyond what is open on its target, either the old or the new \
+                date in a closed period, and while an import replay is in progress. Returns \
+                `document_id`, `version`, `number`, `due_date`, `total`, `tax`, `is_voided`, \
+                `reversal_entry_ids`, `entry_id` and `entry`.",
+            input_schema: tool_schema(
+                json!({
+                    "document": {
+                        "type": "object",
+                        "description": "The edited document, `document_id` included — see \
+                            create_document for the shape.",
+                    },
+                    "actor": { "type": "string", "description": "Who is editing it." },
+                }),
+                &["document", "actor"],
+            ),
+        },
+        ToolSpec {
+            name: "void_document",
+            description: "Voids a saved document (§6: it posts a reversal rather than \
+                vanishing). Saves a new version with `is_voided` true and `Voided: <reason>` \
+                on its memo, and reverses every live entry as of that entry's own date, \
+                `VOID: ... (<reason>)` on the reversal. A voided invoice or bill drops off \
+                open_documents and aging; a voided payment or credit memo releases what it \
+                applied. Refused: already voided; an invoice or bill with a payment or credit \
+                still applied against it (void or edit that first); a closed period; an import \
+                replay in progress. Returns the same fields as update_document.",
+            input_schema: tool_schema(
+                json!({
+                    "document_id": { "type": "string" },
+                    "reason": { "type": "string", "description": "Why. Required, not empty." },
+                    "actor": { "type": "string", "description": "Who is voiding it." },
+                }),
+                &["document_id", "reason", "actor"],
+            ),
+        },
+        ToolSpec {
+            name: "apply_credit",
+            description: "Applies an open credit memo to an open invoice of the same customer \
+                (or an open vendor credit to an open bill of the same vendor): a new version \
+                of the credit with the application added, which open_documents and aging net \
+                on both sides. The credit posts the same either way, so no entry moves. \
+                `amount` defaults to the smaller of the two open balances and may not exceed \
+                either. Refused on a voided document, a different contact, a credit dated in a \
+                closed period, and while an import replay is in progress. Returns the same \
+                fields as update_document plus `target_document_id` and `applied` (the \
+                credit's total now applied to that target).",
+            input_schema: tool_schema(
+                json!({
+                    "credit_id": {
+                        "type": "string",
+                        "description": "The CreditMemo or VendorCredit document.",
+                    },
+                    "target_document_id": {
+                        "type": "string",
+                        "description": "The Invoice or Bill to apply it to.",
+                    },
+                    "amount": {
+                        "type": ["string", "integer"],
+                        "description": "A two-place decimal string or minor units. Omit for \
+                            as much as both have open.",
+                    },
+                    "actor": { "type": "string", "description": "Who is applying it." },
+                }),
+                &["credit_id", "target_document_id", "actor"],
             ),
         },
         ToolSpec {
@@ -1657,6 +1868,81 @@ fn item_json(item: &Item) -> Value {
     })
 }
 
+fn command(kind: &str, actor: String, now: chrono::DateTime<Utc>) -> CommandMeta {
+    CommandMeta {
+        actor_id: actor,
+        kind: kind.to_string(),
+        hlc: now.to_rfc3339(),
+    }
+}
+
+/// A saved document as an editor needs it back: every field a person typed
+/// or the book filled, money as two-place strings, plus its `version` and
+/// `total`.
+fn document_json(doc: &LedgerDocument, version: i64) -> Result<Value, ToolError> {
+    let total = books::document_total(doc).map_err(|e| ToolError::new(e.to_string()))?;
+    Ok(json!({
+        "document_id": doc.document_id,
+        "version": version,
+        "kind": doc.kind.as_str(),
+        "number": doc.number,
+        "txn_date": doc.txn_date.to_string(),
+        "due_date": doc.due_date.map(|d| d.to_string()),
+        "contact": contact_ref_json(&doc.contact),
+        "header_class": class_id_json(&doc.header_class),
+        "lines": doc.lines.iter().map(|line| json!({
+            "line_no": line.line_no,
+            "kind": line.kind,
+            "amount": money_str(line.amount),
+            "class": class_id_json(&line.class),
+            "item_id": line.item_id,
+            "account": line.account.as_ref().map(|a| a.0.clone()),
+            "is_taxable": line.is_taxable,
+            "qty": line.qty.map(|q| q.to_string()),
+            "description": line.description,
+        })).collect::<Vec<_>>(),
+        "tax": doc.tax.as_ref().map(|t| json!({
+            "total_tax": money_str(t.total_tax),
+            "taxable_base": money_str(t.taxable_base),
+            "rate": t.rate.to_string(),
+        })),
+        "deposit_to": doc.deposit_to.as_ref().map(|a| a.0.clone()),
+        "pay_from": doc.pay_from.as_ref().map(|a| a.0.clone()),
+        "applications": doc.applications.iter().map(|a| json!({
+            "target_document_id": a.target_document_id,
+            "target_kind": a.target_kind.as_str(),
+            "amount": money_str(a.amount),
+        })).collect::<Vec<_>>(),
+        "unapplied": money_str(doc.unapplied),
+        "is_voided": doc.is_voided,
+        "memo": doc.memo,
+        "source_ref": doc.source_ref,
+        "total": money_str(total),
+    }))
+}
+
+/// What `update_document`, `void_document` and `apply_credit` return.
+fn revision_json(revision: &books::Revision) -> Result<Value, ToolError> {
+    let doc = &revision.document;
+    let total = books::document_total(doc).map_err(|e| ToolError::new(e.to_string()))?;
+    let (entry_id, entry) = match &revision.entry {
+        Some((id, entry)) => (json!(id), journal_entry_json(entry)),
+        None => (Value::Null, Value::Null),
+    };
+    Ok(json!({
+        "document_id": doc.document_id,
+        "version": revision.version,
+        "number": doc.number,
+        "due_date": doc.due_date.map(|d| d.to_string()),
+        "total": money_str(total),
+        "tax": doc.tax.as_ref().map(|t| money_str(t.total_tax)),
+        "is_voided": doc.is_voided,
+        "reversal_entry_ids": revision.reversals,
+        "entry_id": entry_id,
+        "entry": entry,
+    }))
+}
+
 fn open_document_json(doc: &books::OpenDocument) -> Value {
     json!({
         "document_id": doc.document_id,
@@ -1848,9 +2134,13 @@ mod tests {
             "list_items",
             "open_documents",
             "aging",
+            "get_document",
             "upsert_contact",
             "upsert_item",
             "create_document",
+            "update_document",
+            "void_document",
+            "apply_credit",
             "save_and_post_document",
             "reverse_entry",
             "propose_adjustment",
@@ -2255,6 +2545,190 @@ mod tests {
         assert_eq!(
             decimal_str_to_minor(dec!(1.005).to_string().as_str()),
             Err(())
+        );
+    }
+
+    #[test]
+    fn edit_void_and_apply_credit_through_the_tools() {
+        let ledger = seed_ledger();
+        let mut server = new_server(&ledger, COMPANY.to_string());
+        seed_master_data(&mut server);
+        let create = |server: &mut Server, id, document: Value| {
+            let response = call_tool(
+                server,
+                id,
+                "create_document",
+                json!({ "actor": "dan", "document": document }),
+            );
+            assert_ne!(response["result"]["isError"], json!(true), "{response}");
+            response["result"]["structuredContent"]["document_id"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
+        let invoice_id = create(
+            &mut server,
+            4,
+            json!({ "kind": "Invoice", "txn_date": "2026-09-01",
+                    "contact": { "kind": "Customer", "id": "c-pool" },
+                    "lines": [{ "kind": "Item", "item_id": "mat", "amount": "100.00" }] }),
+        );
+
+        // Read it back as an editor would, change the amount, send it back.
+        let got = call_tool(
+            &mut server,
+            5,
+            "get_document",
+            json!({ "document_id": invoice_id }),
+        );
+        let mut document = got["result"]["structuredContent"].clone();
+        assert_eq!(document["number"], json!("1001"));
+        assert_eq!(document["version"], json!(1));
+        assert_eq!(document["lines"][0]["amount"], json!("100.00"));
+        assert_eq!(document["contact"]["kind"], json!("customer"));
+        // The editor sends what a person typed, as create_document takes it.
+        let edited = json!({
+            "document_id": invoice_id, "kind": "Invoice", "txn_date": "2026-09-01",
+            "number": document["number"].take(),
+            "contact": { "kind": "Customer", "id": "c-pool" },
+            "lines": [{ "kind": "Item", "item_id": "mat", "amount": "150.00" }],
+        });
+        let updated = call_tool(
+            &mut server,
+            6,
+            "update_document",
+            json!({ "actor": "dan", "document": edited }),
+        );
+        assert_ne!(updated["result"]["isError"], json!(true), "{updated}");
+        let result = &updated["result"]["structuredContent"];
+        assert_eq!(result["version"], json!(2));
+        assert_eq!(result["number"], json!("1001"));
+        assert_eq!(result["total"], json!("150.00"));
+        assert_eq!(result["reversal_entry_ids"].as_array().unwrap().len(), 1);
+        assert!(result["entry_id"].is_string());
+        assert!(result.get("locked_through").is_some());
+
+        // A kind change is refused, as a tool error.
+        let refused = call_tool(
+            &mut server,
+            7,
+            "update_document",
+            json!({ "actor": "dan", "document": {
+                "document_id": invoice_id, "kind": "SalesReceipt", "txn_date": "2026-09-01",
+                "contact": { "kind": "Customer", "id": "c-pool" },
+                "lines": [{ "kind": "Item", "item_id": "mat", "amount": "150.00" }] }}),
+        );
+        assert_eq!(refused["result"]["isError"], json!(true));
+
+        let credit_id = create(
+            &mut server,
+            8,
+            json!({ "kind": "CreditMemo", "txn_date": "2026-09-05",
+                    "contact": { "kind": "Customer", "id": "c-pool" },
+                    "lines": [{ "kind": "Item", "item_id": "mat", "amount": "40.00" }] }),
+        );
+        let applied = call_tool(
+            &mut server,
+            9,
+            "apply_credit",
+            json!({ "actor": "dan", "credit_id": credit_id,
+                    "target_document_id": invoice_id, "amount": "25.00" }),
+        );
+        assert_ne!(applied["result"]["isError"], json!(true), "{applied}");
+        assert_eq!(
+            applied["result"]["structuredContent"]["applied"],
+            json!("25.00")
+        );
+        assert_eq!(
+            applied["result"]["structuredContent"]["entry_id"],
+            Value::Null
+        );
+        let open = call_tool(
+            &mut server,
+            10,
+            "open_documents",
+            json!({ "book": "receivable", "as_of": "2026-12-31" }),
+        );
+        let open = open["result"]["structuredContent"]
+            .as_array()
+            .unwrap()
+            .clone();
+        assert_eq!(open[0]["open"], json!("125.00"));
+        assert_eq!(open[1]["open"], json!("-15.00"));
+
+        // Editing the credit's lines without sending `applications` keeps
+        // what it already applies.
+        let edited = call_tool(
+            &mut server,
+            90,
+            "update_document",
+            json!({ "actor": "dan", "document": {
+                "document_id": credit_id, "kind": "CreditMemo", "txn_date": "2026-09-05",
+                "contact": { "kind": "Customer", "id": "c-pool" },
+                "lines": [{ "kind": "Item", "item_id": "mat", "amount": "45.00" }] }}),
+        );
+        assert_ne!(edited["result"]["isError"], json!(true), "{edited}");
+        let open = call_tool(
+            &mut server,
+            91,
+            "open_documents",
+            json!({ "book": "receivable", "as_of": "2026-12-31" }),
+        );
+        let open = open["result"]["structuredContent"]
+            .as_array()
+            .unwrap()
+            .clone();
+        assert_eq!(open[0]["open"], json!("125.00"));
+        assert_eq!(open[1]["open"], json!("-20.00"));
+
+        // The invoice has a credit applied: void the credit first.
+        let refused = call_tool(
+            &mut server,
+            11,
+            "void_document",
+            json!({ "actor": "dan", "document_id": invoice_id, "reason": "duplicate" }),
+        );
+        assert_eq!(refused["result"]["isError"], json!(true));
+        let missing_reason = call_tool(
+            &mut server,
+            12,
+            "void_document",
+            json!({ "actor": "dan", "document_id": credit_id, "reason": "  " }),
+        );
+        assert_eq!(missing_reason["result"]["isError"], json!(true));
+        for (id, document_id) in [(13, &credit_id), (14, &invoice_id)] {
+            let voided = call_tool(
+                &mut server,
+                id,
+                "void_document",
+                json!({ "actor": "dan", "document_id": document_id, "reason": "duplicate" }),
+            );
+            assert_ne!(voided["result"]["isError"], json!(true), "{voided}");
+            assert_eq!(
+                voided["result"]["structuredContent"]["is_voided"],
+                json!(true)
+            );
+        }
+        let aging = call_tool(
+            &mut server,
+            15,
+            "aging",
+            json!({ "book": "receivable", "as_of": "2026-12-31" }),
+        );
+        assert_eq!(
+            aging["result"]["structuredContent"]["totals"]["total"],
+            json!("0.00")
+        );
+        let got = call_tool(
+            &mut server,
+            16,
+            "get_document",
+            json!({ "document_id": invoice_id }),
+        );
+        assert_eq!(got["result"]["structuredContent"]["is_voided"], json!(true));
+        assert_eq!(
+            got["result"]["structuredContent"]["memo"],
+            json!("Voided: duplicate")
         );
     }
 }

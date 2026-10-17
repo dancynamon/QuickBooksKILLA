@@ -141,13 +141,15 @@ pub fn query(store: &Store, tool: &str, args: Value) -> Result<Value, CommandErr
 /// `docs/MCP.md`'s ledger section documents for that tool, the same value
 /// `apps/desktop/ui/js/data/ledger/tauri.js` expects back from `invoke`.
 ///
-/// `tool` is one of the twenty-four names [`ledger::mcp::tools`] lists —
-/// fourteen reads (`"trial_balance"`, `"profit_and_loss"`, `"balance_sheet"`,
+/// `tool` is one of the twenty-eight names [`ledger::mcp::tools`] lists —
+/// fifteen reads (`"trial_balance"`, `"profit_and_loss"`, `"balance_sheet"`,
 /// `"sales_tax_lines"`, `"general_ledger"`, `"audit_trail"`,
 /// `"entries_for_document"`, `"list_adjustments"`, `"bank_status"`,
 /// `"locked_through"`, `"list_contacts"`, `"list_items"`,
-/// `"open_documents"`, `"aging"`) and ten writes (`"upsert_contact"`,
-/// `"upsert_item"`, `"create_document"`, `"save_and_post_document"`,
+/// `"open_documents"`, `"aging"`, `"get_document"`) and thirteen writes
+/// (`"upsert_contact"`, `"upsert_item"`, `"create_document"`,
+/// `"update_document"`, `"void_document"`, `"apply_credit"`,
+/// `"save_and_post_document"`,
 /// `"reverse_entry"`, `"propose_adjustment"`, `"decide_adjustment"`,
 /// `"bank_confirm_proposal"`, `"close_period"`, `"reopen_period"`) — and
 /// `args` is that tool's argument object exactly as `docs/MCP.md`
@@ -462,6 +464,88 @@ mod tests {
         let open = ledger_query(&ledger, COMPANY, "open_documents",
             json!({ "book": "receivable", "as_of": "2026-10-15" })).unwrap();
         assert_eq!(open[0]["open"], json!("-21.27"), "an unapplied credit memo sits open as a negative");
+    }
+
+    /// Editing, voiding and applying a credit exactly as the entry and
+    /// open-items screens send them (pinned by `test/ledger-entry.test.js`
+    /// and `test/ledger-fixture.test.js`): `get_document` to open a saved
+    /// invoice, `buildDocument` plus its `document_id` back through
+    /// `update_document`, `apply_credit` from a customer's open credit memo,
+    /// and `void_document` with a reason.
+    #[test]
+    fn ledger_query_edit_void_and_apply_credit_take_what_the_screens_send() {
+        let ledger = seeded_ledger();
+        for (tool, args) in [
+            ("upsert_contact", json!({ "contact": { "contact_id": "cust-blue-harbor", "kind": "Customer",
+                "display_name": "Blue Harbor Swim Club", "terms_days": 30, "default_class": "foam" } })),
+            ("upsert_item", json!({ "item": { "item_id": "rt-50-red", "sku": "RT-50-RED",
+                "name": "Rescue tube", "item_type": "non_inventory", "income_account": "4100",
+                "expense_account": "5000", "default_class": "foam", "sales_price": "19.95",
+                "is_taxable": true } })),
+        ] {
+            ledger_query(&ledger, COMPANY, tool, args).unwrap();
+        }
+        let line = |qty: &str, amount: &str| json!({ "kind": "Item", "amount": amount,
+            "is_taxable": true, "item_id": "rt-50-red", "qty": qty, "description": "Rescue tube" });
+        let invoice = ledger_query(&ledger, COMPANY, "create_document", json!({ "actor": "dan", "document": {
+            "kind": "Invoice", "txn_date": "2026-10-01",
+            "contact": { "kind": "Customer", "id": "cust-blue-harbor" },
+            "lines": [line("10", "199.50")]
+        }}))
+        .unwrap();
+        let invoice_id = invoice["document_id"].as_str().unwrap().to_string();
+
+        let saved = ledger_query(&ledger, COMPANY, "get_document",
+            json!({ "document_id": invoice_id })).unwrap();
+        assert_eq!(saved["number"], json!("1001"));
+        assert_eq!(saved["lines"][0]["qty"], json!("10"));
+        assert_eq!(saved["lines"][0]["item_id"], json!("rt-50-red"));
+        assert_eq!(saved["total"], json!("212.72"));
+
+        let edited = ledger_query(&ledger, COMPANY, "update_document", json!({ "actor": "dan", "document": {
+            "document_id": invoice_id, "kind": "Invoice", "txn_date": "2026-10-01",
+            "number": "1001", "memo": "two more",
+            "contact": { "kind": "Customer", "id": "cust-blue-harbor" },
+            "lines": [line("12", "239.40")]
+        }}))
+        .unwrap();
+        assert_eq!(edited["version"], json!(2));
+        assert_eq!(edited["number"], json!("1001"));
+        assert_eq!(edited["total"], json!("255.26"));
+        assert_eq!(edited["reversal_entry_ids"].as_array().unwrap().len(), 1);
+
+        let credit = ledger_query(&ledger, COMPANY, "create_document", json!({ "actor": "dan", "document": {
+            "kind": "CreditMemo", "txn_date": "2026-10-05",
+            "contact": { "kind": "Customer", "id": "cust-blue-harbor" },
+            "lines": [line("1", "19.95")]
+        }}))
+        .unwrap();
+        let applied = ledger_query(&ledger, COMPANY, "apply_credit", json!({
+            "credit_id": credit["document_id"], "target_document_id": invoice_id, "actor": "dan"
+        }))
+        .unwrap();
+        assert_eq!(applied["applied"], json!("21.27"));
+        let ar = ledger_query(&ledger, COMPANY, "aging",
+            json!({ "book": "receivable", "as_of": "2026-10-15" })).unwrap();
+        assert_eq!(ar["totals"]["total"], json!("233.99"));
+        let tb = ledger_query(&ledger, COMPANY, "trial_balance",
+            json!({ "as_of": "2026-10-15" })).unwrap();
+        let ar_row = tb["rows"].as_array().unwrap().iter()
+            .find(|row| row["account_id"] == json!("1200")).unwrap();
+        assert_eq!(ar_row["balance"], json!("233.99"), "the aging ties to 1200");
+
+        // The invoice has a credit on it: refused, as a tool error the screen shows.
+        let refused = ledger_query(&ledger, COMPANY, "void_document",
+            json!({ "document_id": invoice_id, "reason": "entered twice", "actor": "dan" }));
+        assert!(matches!(refused, Err(CommandError::Tool { .. })), "{refused:?}");
+        for id in [credit["document_id"].as_str().unwrap(), invoice_id.as_str()] {
+            let voided = ledger_query(&ledger, COMPANY, "void_document",
+                json!({ "document_id": id, "reason": "entered twice", "actor": "dan" })).unwrap();
+            assert_eq!(voided["is_voided"], json!(true));
+        }
+        let ar = ledger_query(&ledger, COMPANY, "aging",
+            json!({ "book": "receivable", "as_of": "2026-10-15" })).unwrap();
+        assert_eq!(ar["totals"]["total"], json!("0.00"));
     }
 
     /// The editors' `contact` and `item` exactly as

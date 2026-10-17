@@ -3,7 +3,7 @@
 // must pick the right backend, and `js/data/ledger/tauri.js` must call
 // `invoke("ledger_query", { tool, args })` with exactly the tool name and
 // argument keys `docs/MCP.md`'s ledger section documents, for all
-// twenty-four tools — a typo here would silently reach the real ledger with
+// twenty-eight tools — a typo here would silently reach the real ledger with
 // the wrong shape and only fail once someone runs it under Tauri.
 
 import { test } from "node:test";
@@ -52,9 +52,13 @@ test("ledger tauri provider calls invoke('ledger_query', ...) for every tool, wi
   await ledger.listItems("tube");
   await ledger.openDocuments("receivable", "2026-10-15");
   await ledger.aging("payable", "2026-10-15");
+  await ledger.getDocument("inv-1088");
   await ledger.upsertContact({ contact_id: "c1" });
   await ledger.upsertItem({ item_id: "i1" });
   await ledger.createDocument({ kind: "Invoice" }, "dan");
+  await ledger.updateDocument({ document_id: "inv-1088", kind: "Invoice" }, "dan");
+  await ledger.voidDocument("inv-1088", "entered twice", "dan");
+  await ledger.applyCredit("cm-1", "inv-1088", "25.00", "dan");
   await ledger.saveAndPostDocument({ document_id: "d1", kind: "Invoice" }, "dan", { i1: { income: "4100", expense: "5000" } });
   await ledger.reverseEntry("je-1", "2026-09-15", "dan");
   await ledger.proposeAdjustment("joel", "why", [{ account: "6100", debit: "1.00" }]);
@@ -63,7 +67,7 @@ test("ledger tauri provider calls invoke('ledger_query', ...) for every tool, wi
   await ledger.closePeriod("2026-08-31", "dan", "close note");
   await ledger.reopenPeriod("2026-08-31", "dan", "reopen note");
 
-  assert.equal(calls.length, 24);
+  assert.equal(calls.length, 28);
   for (const call of calls) assert.equal(call.command, "ledger_query");
 
   const byTool = Object.fromEntries(calls.map((c) => [c.tool, c.args]));
@@ -84,7 +88,11 @@ test("ledger tauri provider calls invoke('ledger_query', ...) for every tool, wi
   assert.deepEqual(byTool[TOOL.aging], { book: "payable", as_of: "2026-10-15" });
   assert.deepEqual(byTool[TOOL.upsertContact], { contact: { contact_id: "c1" } });
   assert.deepEqual(byTool[TOOL.upsertItem], { item: { item_id: "i1" } });
+  assert.deepEqual(byTool[TOOL.getDocument], { document_id: "inv-1088" });
   assert.deepEqual(byTool[TOOL.createDocument], { document: { kind: "Invoice" }, actor: "dan" });
+  assert.deepEqual(byTool[TOOL.updateDocument], { document: { document_id: "inv-1088", kind: "Invoice" }, actor: "dan" });
+  assert.deepEqual(byTool[TOOL.voidDocument], { document_id: "inv-1088", reason: "entered twice", actor: "dan" });
+  assert.deepEqual(byTool[TOOL.applyCredit], { credit_id: "cm-1", target_document_id: "inv-1088", amount: "25.00", actor: "dan" });
   assert.deepEqual(byTool[TOOL.saveAndPostDocument], {
     document: { document_id: "d1", kind: "Invoice" }, actor: "dan",
     items: { i1: { income: "4100", expense: "5000" } },
@@ -106,10 +114,12 @@ test("an omitted optional argument is absent from the call, not sent as undefine
   await ledger.auditTrail();
   await ledger.listAdjustments();
   await ledger.generalLedger("2026-09-01", "2026-09-30");
+  await ledger.applyCredit("cm-1", "inv-1088", undefined, "dan");
 
   assert.deepEqual(calls[0].args, {});
   assert.deepEqual(calls[1].args, {});
   assert.deepEqual(calls[2].args, { from: "2026-09-01", to: "2026-09-30" });
+  assert.deepEqual(calls[3].args, { credit_id: "cm-1", target_document_id: "inv-1088", actor: "dan" });
 });
 
 test("a tool-level failure from invoke becomes a rejected promise carrying the message", async () => {

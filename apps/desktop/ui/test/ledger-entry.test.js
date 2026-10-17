@@ -1,13 +1,16 @@
 // The document-entry form's pure half (`js/screens/ledger/entry.js`): the
 // line arithmetic, the running totals and the draft-to-document mapping
-// `create_document` receives. The screen itself is driven in a browser; this
+// `create_document` receives, and a saved document read back into a draft
+// for `update_document`. The screen itself is driven in a browser; this
 // is the part that has to be exactly right.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { buildDocument, lineAmount, lineForItem, previewTotals } from "../js/screens/ledger/entry.js";
-import { controlDifference } from "../js/screens/ledger/openItems.js";
+import {
+  buildDocument, buildEditedDocument, draftFromDocument, lineAmount, lineForItem, previewTotals,
+} from "../js/screens/ledger/entry.js";
+import { controlDifference, creditTargets } from "../js/screens/ledger/openItems.js";
 
 test("lineAmount is quantity × rate, half away from zero to the cent", () => {
   assert.equal(lineAmount("10", "19.95"), "199.50");
@@ -147,4 +150,64 @@ test("buildItem keeps the asset account on inventory only and leaves moving-aver
   assert.equal(buildItem(form, { item_id: "eva-sheet", unit_cost: "46.28" }, new Set()).unit_cost, "46.28");
   assert.throws(() => buildItem({ ...form, sales_price: "80.005" }, null, new Set()), /sales price/);
   assert.throws(() => buildItem({ ...form, income_account: "" }, null, new Set()), /income account/);
+});
+
+test("draftFromDocument reads a saved document back into the form, recovering the rate, and buildEditedDocument sends it back", () => {
+  const saved = {
+    document_id: "doc-7001", version: 1, kind: "Invoice", number: "21235", txn_date: "2026-10-01",
+    due_date: "2026-10-31", contact: { kind: "customer", id: "cust-blue-harbor" }, header_class: "foam",
+    lines: [
+      { line_no: 1, kind: "Item", amount: "199.50", class: null, item_id: "rt-50-red", account: null, is_taxable: true, qty: "10", description: "Rescue tube" },
+      { line_no: 2, kind: "Shipping", amount: "12.34", class: "foam", item_id: "freight", account: null, is_taxable: false, qty: "3", description: null },
+    ],
+    tax: { total_tax: "13.22", taxable_base: "199.50", rate: "0.06625" }, deposit_to: null, pay_from: null,
+    applications: [], unapplied: "0.00", is_voided: false, memo: "rush", source_ref: null, total: "225.06",
+  };
+  const draft = draftFromDocument(saved);
+  assert.equal(draft.documentId, "doc-7001");
+  assert.equal(draft.contactId, "cust-blue-harbor");
+  assert.equal(draft.number, "21235");
+  assert.deepEqual(draft.lines[0], { itemId: "rt-50-red", account: "", description: "Rescue tube", qty: "10", rate: "19.95", amount: "", cls: "", taxable: true });
+  // 12.34 / 3 doesn't come back exactly: the amount stays as saved.
+  assert.equal(draft.lines[1].amount, "12.34");
+  assert.equal(draft.lines[1].rate, "");
+  assert.equal(draft.lines[1].kind, "Shipping");
+
+  draft.lines[0].qty = "12";
+  assert.deepEqual(buildEditedDocument("Invoice", draft), {
+    document_id: "doc-7001",
+    kind: "Invoice",
+    txn_date: "2026-10-01",
+    contact: { kind: "Customer", id: "cust-blue-harbor" },
+    number: "21235",
+    memo: "rush",
+    lines: [
+      { kind: "Item", amount: "239.40", is_taxable: true, item_id: "rt-50-red", qty: "12", description: "Rescue tube" },
+      { kind: "Shipping", amount: "12.34", is_taxable: false, item_id: "freight", qty: "3", class: "foam" },
+    ],
+  });
+});
+
+test("draftFromDocument keeps a payment's applications and money account, and refuses what the form cannot show", () => {
+  const draft = draftFromDocument({
+    document_id: "pmt-4001", kind: "Payment", txn_date: "2026-08-15", contact: { kind: "customer", id: "c" },
+    lines: [], deposit_to: "1100", applications: [{ target_document_id: "inv-2001", target_kind: "Invoice", amount: "159.94" }],
+  });
+  assert.equal(draft.bank, "1100");
+  assert.deepEqual(draft.applications, [{ documentId: "inv-2001", kind: "Invoice", amount: "159.94" }]);
+  assert.deepEqual(buildEditedDocument("Payment", draft).applications, [{ target_document_id: "inv-2001", target_kind: "Invoice", amount: "159.94" }]);
+  assert.throws(() => draftFromDocument({ kind: "JournalEntry", lines: [] }), /does not edit a JournalEntry/);
+  assert.throws(() => buildEditedDocument("Invoice", { txnDate: "2026-10-01", contactId: "c", lines: [] }), /not a saved document/);
+});
+
+test("creditTargets offers an open credit only the same contact's open documents of the kind it settles", () => {
+  const open = [
+    { document_id: "inv-1", kind: "Invoice", contact_id: "a", open: "100.00" },
+    { document_id: "inv-2", kind: "Invoice", contact_id: "b", open: "50.00" },
+    { document_id: "cm-1", kind: "CreditMemo", contact_id: "a", open: "-20.00" },
+    { document_id: "bill-1", kind: "Bill", contact_id: "a", open: "10.00" },
+  ];
+  assert.deepEqual(creditTargets(open, open[2]).map((d) => d.document_id), ["inv-1"]);
+  assert.deepEqual(creditTargets(open, open[0]), [], "an invoice is not a credit");
+  assert.deepEqual(creditTargets(open, { ...open[2], open: "0.00" }), [], "nothing left to apply");
 });

@@ -25,7 +25,7 @@ import { renderAuditTrail } from "./screens/ledger/auditTrail.js";
 import { renderAdjustments } from "./screens/ledger/adjustments.js";
 import { renderBank } from "./screens/ledger/bank.js";
 import { renderPeriodClose } from "./screens/ledger/periodClose.js";
-import { renderNewDocument } from "./screens/ledger/newDocument.js";
+import { renderEditDocument, renderNewDocument } from "./screens/ledger/newDocument.js";
 import { renderOpenItems } from "./screens/ledger/openItems.js";
 import { isEntryKind } from "./screens/ledger/entry.js";
 import { renderContacts, renderItems } from "./screens/ledger/masters.js";
@@ -232,6 +232,8 @@ async function renderRoute(route) {
     await renderBank(main);
   } else if (route.view === "ledger-new") {
     await renderNewDocument(main, isEntryKind(route.arg) ? route.arg : "Invoice");
+  } else if (route.view === "ledger-edit" && route.arg) {
+    await renderEditDocument(main, route.arg, { fresh: true });
   } else if (route.view === "ledger-contacts") {
     await renderContacts(main, route.arg === "vendor" ? "vendor" : "customer");
   } else if (route.view === "ledger-items") {

@@ -420,19 +420,41 @@ function seedItems() {
 function seedDocuments() {
   const CUST = (id) => ({ kind: "Customer", id });
   const VEND = (id) => ({ kind: "Vendor", id });
-  const doc = (d) => ({ number: null, due_date: null, applications: [], is_voided: false, ...d });
+  const item = (itemId, amount, extra = {}) => ({
+    line_no: 1, kind: "Item", amount, class: null, item_id: itemId, account: null,
+    is_taxable: false, qty: null, unit_cost: null, description: null, posting: null, entity: null, ...extra,
+  });
+  const tax = (total, base) => ({ total_tax: total, taxable_base: base, rate: "0.06625" });
+  // Each seed is a saved document as `create_document` would have filled it
+  // (`payload`), plus the total `open_documents` works from. The opening-era
+  // `ob-*` documents stand for QBO's open items at the slim cutover and carry
+  // no lines of their own.
+  const doc = (d) => {
+    const payload = {
+      number: null, due_date: null, header_class: null, lines: [], tax: null,
+      deposit_to: null, pay_from: null, applications: [], unapplied: "0.00",
+      is_voided: false, source_ref: null, memo: null,
+      ...d,
+    };
+    delete payload.total_cents;
+    return { ...payload, total_cents: d.total_cents, payload };
+  };
   return new Map([
     doc({ document_id: "ob-ar-1", kind: "Invoice", number: "21101", txn_date: "2025-12-12", due_date: "2026-01-11", contact: CUST("cust-fairview"), total_cents: 1200000 }),
     doc({ document_id: "ob-ar-2", kind: "Invoice", number: "21102", txn_date: "2025-12-19", due_date: "2026-01-03", contact: CUST("cust-harborview"), total_cents: 650000 }),
     doc({ document_id: "ob-ap-1", kind: "Bill", number: "SPX-1180", txn_date: "2025-12-20", due_date: "2026-01-19", contact: VEND("vend-spectra"), total_cents: 920000 }),
-    doc({ document_id: "inv-2001", kind: "Invoice", number: "21234", txn_date: "2026-07-14", due_date: "2026-08-13", contact: CUST("cust-blue-harbor"), total_cents: 15994 }),
-    doc({ document_id: "inv-2002", kind: "Invoice", number: "21230", txn_date: "2026-08-04", due_date: "2026-09-03", contact: CUST("cust-fairview"), total_cents: 299000 }),
-    doc({ document_id: "bill-3001", kind: "Bill", number: "BILL-2288", txn_date: "2026-08-10", due_date: "2026-09-09", contact: VEND("vend-spectra"), total_cents: 277680 }),
-    doc({ document_id: "pmt-4001", kind: "Payment", txn_date: "2026-08-15", contact: CUST("cust-blue-harbor"), total_cents: 15994,
+    doc({ document_id: "inv-2001", kind: "Invoice", number: "21234", txn_date: "2026-07-14", due_date: "2026-08-13", contact: CUST("cust-blue-harbor"), total_cents: 15994,
+      header_class: "foam", lines: [item("rt-50-red", "150.00", { is_taxable: true, description: "Rescue tubes" })], tax: tax("9.94", "150.00") }),
+    doc({ document_id: "inv-2002", kind: "Invoice", number: "21230", txn_date: "2026-08-04", due_date: "2026-09-03", contact: CUST("cust-fairview"), total_cents: 299000,
+      header_class: "chairs", lines: [item("lgc-50", "2990.00", { qty: "1", description: "Lifeguard chair 50in" })] }),
+    doc({ document_id: "bill-3001", kind: "Bill", number: "BILL-2288", txn_date: "2026-08-10", due_date: "2026-09-09", contact: VEND("vend-spectra"), total_cents: 277680,
+      lines: [item("eva-sheet", "2776.80", { qty: "60", description: "EVA foam sheet, 2in" })] }),
+    doc({ document_id: "pmt-4001", kind: "Payment", txn_date: "2026-08-15", contact: CUST("cust-blue-harbor"), total_cents: 15994, deposit_to: "1100",
       applications: [{ target_document_id: "inv-2001", target_kind: "Invoice", amount: "159.94" }] }),
-    doc({ document_id: "billpmt-5001", kind: "BillPayment", txn_date: "2026-08-18", contact: VEND("vend-spectra"), total_cents: 277680,
+    doc({ document_id: "billpmt-5001", kind: "BillPayment", txn_date: "2026-08-18", contact: VEND("vend-spectra"), total_cents: 277680, pay_from: "1100",
       applications: [{ target_document_id: "bill-3001", target_kind: "Bill", amount: "2776.80" }] }),
-    doc({ document_id: "inv-2003", kind: "Invoice", number: "21231", txn_date: "2026-09-02", due_date: "2026-09-17", contact: CUST("cust-harborview"), total_cents: 42650 }),
+    doc({ document_id: "inv-2003", kind: "Invoice", number: "21231", txn_date: "2026-09-02", due_date: "2026-09-17", contact: CUST("cust-harborview"), total_cents: 42650,
+      header_class: "signs", lines: [item("sign-custom", "400.00", { is_taxable: true, qty: "1", description: "Custom pool sign" })], tax: tax("26.50", "400.00") }),
   ].map((d) => [d.document_id, d]));
 }
 
@@ -947,6 +969,7 @@ function createBook() {
       total_cents: settles && lines.length === 0 ? applicationsCents(document) : linesCents(lines) + tax,
       applications: document.applications ?? [],
       is_voided: Boolean(document.is_voided),
+      payload: document,
     });
   }
 
@@ -1064,9 +1087,10 @@ function createBook() {
     return candidate;
   }
 
-  /** `mcp.rs::create_document` over `books.rs::prepare_document`. */
-  function createDocument(raw, actor) {
-    if (!actor) throw new LedgerFixtureError('missing "actor"');
+  /** `books.rs::prepare_document`: checks the references against master
+   * data and fills the number, due date, header class and tax. Touches no
+   * book state; the number it allocates is only taken once the caller saves. */
+  function prepareDocument(raw, documentId) {
     if (!raw || typeof raw !== "object") throw new LedgerFixtureError('missing "document"');
     if (!raw.kind) throw new LedgerFixtureError('missing "document.kind"');
     if (!raw.txn_date) throw new LedgerFixtureError('missing "document.txn_date"');
@@ -1075,7 +1099,7 @@ function createBook() {
       deposit_to: null, pay_from: null, source_ref: null, memo: null,
       applications: [], unapplied: "0", is_voided: false,
       ...raw,
-      document_id: raw.document_id ?? `doc-${nextDocumentSeq++}`,
+      document_id: documentId,
       lines: (raw.lines ?? []).map((l, i) => ({
         line_no: i + 1, is_taxable: false, class: null, item_id: null, account: null,
         qty: null, unit_cost: null, description: null, posting: null, entity: null, ...l,
@@ -1142,7 +1166,13 @@ function createBook() {
     if (doc.kind === "BillPayment" && !doc.pay_from) {
       throw new LedgerFixtureError("a BillPayment needs a pay_from account");
     }
+    return { doc, postingItems, allocated };
+  }
 
+  /** `mcp.rs::create_document` over `books.rs::prepare_document`. */
+  function createDocument(raw, actor) {
+    if (!actor) throw new LedgerFixtureError('missing "actor"');
+    const { doc, postingItems, allocated } = prepareDocument(raw, raw?.document_id ?? `doc-${nextDocumentSeq++}`);
     const saved = saveAndPostDocument(doc, actor, postingItems);
     if (allocated != null) sequences.set(doc.kind, allocated + 1);
     const total = documents.get(doc.document_id).total_cents;
@@ -1156,6 +1186,241 @@ function createBook() {
       entry_id: saved.entry_id,
       entry: saved.entry,
     });
+  }
+
+  // --- corrections: edit, void, apply a credit (`books.rs`, §4/§6) --------
+
+  function savedDocument(documentId) {
+    const saved = documents.get(documentId);
+    if (!saved) throw new LedgerFixtureError(`no saved document ${documentId}`);
+    return saved;
+  }
+
+  /** `mcp.rs::document_json`. */
+  function documentJson(saved) {
+    const d = saved.payload;
+    const money = (v) => fromCents(toCents(v));
+    return {
+      document_id: d.document_id,
+      version: documentVersions.get(d.document_id) ?? 1,
+      kind: d.kind,
+      number: d.number ?? null,
+      txn_date: d.txn_date,
+      due_date: d.due_date ?? null,
+      contact: d.contact ? { kind: String(d.contact.kind).toLowerCase(), id: d.contact.id } : null,
+      header_class: d.header_class ?? null,
+      lines: (d.lines ?? []).map((l, i) => ({
+        line_no: l.line_no ?? i + 1, kind: l.kind, amount: money(l.amount), class: l.class ?? null,
+        item_id: l.item_id ?? null, account: l.account ?? null, is_taxable: Boolean(l.is_taxable),
+        qty: l.qty ?? null, description: l.description ?? null,
+      })),
+      tax: d.tax ? { total_tax: money(d.tax.total_tax), taxable_base: money(d.tax.taxable_base), rate: String(d.tax.rate) } : null,
+      deposit_to: d.deposit_to ?? null,
+      pay_from: d.pay_from ?? null,
+      applications: (d.applications ?? []).map((a) => ({ target_document_id: a.target_document_id, target_kind: a.target_kind, amount: money(a.amount) })),
+      unapplied: money(d.unapplied ?? 0),
+      is_voided: Boolean(d.is_voided),
+      memo: d.memo ?? null,
+      source_ref: d.source_ref ?? null,
+      total: fromCents(saved.total_cents),
+    };
+  }
+
+  /** Entries a document holds now: posted, not a reversal, not reversed. */
+  function liveEntries(documentId) {
+    const reversed = new Set(journal.filter((e) => e.reversal_of).map((e) => e.reversal_of));
+    return journal.filter((e) => e.source_id === documentId && !e.reversal_of && !reversed.has(e.entry_id));
+  }
+
+  function bookOf(kind) {
+    return Object.keys(BOOKS).find((b) => kind in BOOKS[b].opens) ?? null;
+  }
+
+  /** Cents applied against `documentId` by saved documents other than `excluding`. */
+  function appliedByOthers(book, documentId, excluding) {
+    let cents = 0;
+    for (const d of documents.values()) {
+      if (d.is_voided || d.document_id === excluding || !BOOKS[book].settles.has(d.kind)) continue;
+      for (const a of d.applications) if (a.target_document_id === documentId) cents += toCents(a.amount);
+    }
+    return cents;
+  }
+
+  function sameLines(entry, lines) {
+    if (entry.lines.length !== lines.length) return false;
+    return entry.lines.every((l, i) => l.account === lines[i].account && (l.class ?? null) === (lines[i].class ?? null)
+      && l.debit_cents === toCents(lines[i].debit) && l.credit_cents === toCents(lines[i].credit));
+  }
+
+  /** `books.rs::commit_revision`: every check first, then reverse the live
+   * entries (dated as each entry reverses), save the version, post the new
+   * entry — so a refusal leaves the fixture book untouched, as the
+   * savepoint does the real one. `mode` is `{ post: items }`,
+   * `{ void: reason }` or `{ keep: true }`. */
+  function commitRevision(old, doc, mode, actor, commandKind) {
+    refuseIfClosed(old.txn_date, "document");
+    refuseIfClosed(doc.txn_date, "document");
+    const live = liveEntries(doc.document_id);
+    for (const e of live) refuseIfClosed(e.entry_date, "reversal");
+    const version = (documentVersions.get(doc.document_id) ?? 0) + 1;
+
+    let newLines = null;
+    let reverse = Boolean(mode.void);
+    if (mode.post && !(doc.kind === "Estimate" || doc.kind === "PurchaseOrder")) {
+      newLines = deriveEntryLines(doc, mode.post).map((l) => ({ ...l, debit: l.debit ?? 0, credit: l.credit ?? 0 }));
+      enforceClassRule(newLines);
+      const debit = newLines.reduce((sum, l) => sum + toCents(l.debit), 0);
+      const credit = newLines.reduce((sum, l) => sum + toCents(l.credit), 0);
+      if (debit !== credit) throw new LedgerFixtureError(`unbalanced journal: debits ${fromCents(debit)} != credits ${fromCents(credit)}`);
+      const memo = doc.memo ?? `${doc.kind} ${doc.document_id}`;
+      if (live.length === 1 && live[0].entry_date === doc.txn_date && live[0].memo === memo && sameLines(live[0], newLines)) {
+        newLines = null;
+      } else {
+        reverse = true;
+      }
+    } else if (mode.post) {
+      reverse = true;
+    }
+
+    const at = new Date().toISOString();
+    const reversals = [];
+    if (reverse) {
+      for (const e of live) {
+        const reversal = buildEntry({
+          id: `je-${nextEntrySeq++}`, date: e.entry_date,
+          memo: mode.void ? `VOID: ${e.memo ?? ""} (${mode.void})` : e.memo,
+          sourceType: e.source_type, sourceId: e.source_id, sourceVersion: e.source_version,
+          reversalOf: e.entry_id, isFlagged: e.is_flagged, actor, commandKind, at,
+          lines: e.lines.map((l) => ({
+            account: l.account, class: l.class, entity: l.entity, memo: l.memo,
+            debit: l.credit_cents / 100, credit: l.debit_cents / 100,
+          })),
+        });
+        journal.push(reversal);
+        reversals.push(reversal.entry_id);
+      }
+    }
+    documentVersions.set(doc.document_id, version);
+    recordDocument(doc);
+    let entry = null;
+    if (newLines) {
+      entry = buildEntry({
+        id: `je-${nextEntrySeq++}`, date: doc.txn_date, memo: doc.memo ?? `${doc.kind} ${doc.document_id}`,
+        sourceType: doc.kind, sourceId: doc.document_id, sourceVersion: version,
+        actor, commandKind, at, lines: newLines,
+      });
+      journal.push(entry);
+    }
+    const saved = documents.get(doc.document_id);
+    return {
+      document_id: doc.document_id,
+      version,
+      number: doc.number ?? null,
+      due_date: doc.due_date ?? null,
+      total: fromCents(saved.total_cents),
+      tax: doc.tax ? doc.tax.total_tax : null,
+      is_voided: Boolean(doc.is_voided),
+      reversal_entry_ids: reversals,
+      entry_id: entry?.entry_id ?? null,
+      entry: entry ? journalEntryJson(entry) : null,
+    };
+  }
+
+  /** `mcp.rs::update_document` over `books.rs::update_document`. */
+  function updateDocument(raw, actor) {
+    if (!actor) throw new LedgerFixtureError('missing "actor"');
+    if (!raw?.document_id) throw new LedgerFixtureError('missing "document.document_id": update_document edits a saved document');
+    const old = savedDocument(raw.document_id);
+    const id = raw.document_id;
+    if (old.is_voided) throw new LedgerFixtureError(`${id} is voided; a voided document cannot be changed`);
+    if (raw.is_voided) throw new LedgerFixtureError("an edit cannot void a document; use void_document");
+    if (raw.kind !== old.kind) throw new LedgerFixtureError(`${id} is a ${old.kind}; an edit cannot make it a ${raw.kind}`);
+    const was = old.contact ? String(old.contact.kind).toLowerCase() : null;
+    const now = raw.contact ? String(raw.contact.kind).toLowerCase() : null;
+    if (was && now && was !== now) throw new LedgerFixtureError(`${id} names a ${was}; an edit cannot make it name a ${now}`);
+    const requested = raw.number ?? null;
+    if (requested != null && NUMBERED.has(old.kind) && requested !== old.number) {
+      throw new LedgerFixtureError(`${old.kind} ${id} keeps its number ${old.number ?? ""}; an edit cannot renumber it to ${requested}`);
+    }
+    // No `applications` keeps the saved ones (`mcp.rs::update_document`).
+    const applications = raw.applications ?? old.payload.applications ?? [];
+    const { doc, postingItems } = prepareDocument({ ...raw, applications, number: requested ?? old.number }, id);
+    if (doc.source_ref == null) doc.source_ref = old.payload.source_ref ?? null;
+
+    const book = bookOf(doc.kind);
+    if (book) {
+      let applied = appliedByOthers(book, id, id);
+      if (BOOKS[book].opens[doc.kind] === true) applied += applicationsCents(doc);
+      const total = linesCents(doc.lines) + (doc.tax ? toCents(doc.tax.total_tax) : 0);
+      if (applied > total) throw new LedgerFixtureError(`${fromCents(applied)} is applied against ${id}; its total cannot fall to ${fromCents(total)}`);
+    }
+    for (const a of doc.applications) {
+      const target = savedDocument(a.target_document_id);
+      if (target.is_voided) throw new LedgerFixtureError(`${target.document_id} is voided; a voided document cannot be changed`);
+      const targetBook = bookOf(target.kind);
+      if (!targetBook) continue;
+      const applied = appliedByOthers(targetBook, target.document_id, id) + toCents(a.amount);
+      if (applied > target.total_cents) {
+        throw new LedgerFixtureError(`${fromCents(applied)} is applied against ${target.document_id}; its total cannot fall to ${fromCents(target.total_cents)}`);
+      }
+    }
+    return withLockedThrough(commitRevision(old, doc, { post: postingItems }, actor, "mcp_update_document"));
+  }
+
+  /** `mcp.rs::void_document` over `books.rs::void_document`. */
+  function voidDocument(documentId, reason, actor) {
+    if (!actor) throw new LedgerFixtureError('missing "actor"');
+    const why = String(reason ?? "").trim();
+    if (!why) throw new LedgerFixtureError('"reason" may not be empty');
+    const old = savedDocument(documentId);
+    if (old.is_voided) throw new LedgerFixtureError(`${documentId} is voided; a voided document cannot be changed`);
+    const book = bookOf(old.kind);
+    if (book) {
+      const applied = appliedByOthers(book, documentId, documentId);
+      if (applied !== 0) {
+        throw new LedgerFixtureError(`${documentId} has ${fromCents(applied)} applied against it; void or edit those payments or credits first`);
+      }
+    }
+    const memo = old.payload.memo ? `Voided: ${why}. ${old.payload.memo}` : `Voided: ${why}`;
+    const doc = { ...old.payload, is_voided: true, memo };
+    return withLockedThrough(commitRevision(old, doc, { void: why }, actor, "mcp_void_document"));
+  }
+
+  /** `mcp.rs::apply_credit` over `books.rs::apply_credit`. */
+  function applyCredit(creditId, targetId, amount, actor) {
+    if (!actor) throw new LedgerFixtureError('missing "actor"');
+    const credit = savedDocument(creditId);
+    const targetKind = { CreditMemo: "Invoice", VendorCredit: "Bill" }[credit.kind];
+    if (!targetKind) throw new LedgerFixtureError(`cannot apply the credit: ${creditId} is a ${credit.kind}, not a credit memo or vendor credit`);
+    if (credit.is_voided) throw new LedgerFixtureError(`${creditId} is voided; a voided document cannot be changed`);
+    const target = savedDocument(targetId);
+    if (target.kind !== targetKind) {
+      throw new LedgerFixtureError(`cannot apply the credit: a ${credit.kind} applies to a ${targetKind}, and ${targetId} is a ${target.kind}`);
+    }
+    if (target.is_voided) throw new LedgerFixtureError(`${targetId} is voided; a voided document cannot be changed`);
+    if (credit.contact?.id !== target.contact?.id) {
+      throw new LedgerFixtureError(`cannot apply the credit: ${creditId} and ${targetId} belong to different contacts`);
+    }
+    const book = bookOf(credit.kind);
+    const open = openDocuments(book, "9999-12-31");
+    const openOf = (id) => Math.abs(toCents(open.find((d) => d.document_id === id)?.open ?? "0"));
+    const creditOpen = openOf(creditId);
+    const targetOpen = openOf(targetId);
+    const cents = amount == null ? Math.min(creditOpen, targetOpen) : toCents(amount);
+    if (cents <= 0) {
+      throw new LedgerFixtureError(`cannot apply the credit: nothing to apply: ${creditId} has ${fromCents(creditOpen)} open and ${targetId} has ${fromCents(targetOpen)} open`);
+    }
+    if (cents > creditOpen || cents > targetOpen) {
+      throw new LedgerFixtureError(`cannot apply the credit: ${fromCents(cents)} is more than is open: ${creditId} has ${fromCents(creditOpen)}, ${targetId} has ${fromCents(targetOpen)}`);
+    }
+    const applications = credit.payload.applications.map((a) => ({ ...a }));
+    const existing = applications.find((a) => a.target_document_id === targetId);
+    if (existing) existing.amount = fromCents(toCents(existing.amount) + cents);
+    else applications.push({ target_document_id: targetId, target_kind: targetKind, amount: fromCents(cents) });
+    const doc = { ...credit.payload, applications };
+    const result = commitRevision(credit, doc, { keep: true }, actor, "mcp_apply_credit");
+    const applied = applications.find((a) => a.target_document_id === targetId).amount;
+    return withLockedThrough({ ...result, target_document_id: targetId, applied });
   }
 
   function contactName(contactRef) {
@@ -1381,12 +1646,20 @@ function createBook() {
         return openDocuments(args.book, args.as_of);
       case "aging":
         return aging(args.book, args.as_of);
+      case "get_document":
+        return documentJson(savedDocument(args.document_id));
       case "upsert_contact":
         return upsertContact(args.contact);
       case "upsert_item":
         return upsertItem(args.item);
       case "create_document":
         return createDocument(args.document, args.actor);
+      case "update_document":
+        return updateDocument(args.document, args.actor);
+      case "void_document":
+        return voidDocument(args.document_id, args.reason, args.actor);
+      case "apply_credit":
+        return applyCredit(args.credit_id, args.target_document_id, args.amount, args.actor);
       case "save_and_post_document":
         return saveAndPostDocument(args.document, args.actor, args.items);
       case "reverse_entry":

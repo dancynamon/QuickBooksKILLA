@@ -44,13 +44,13 @@ whole UI re-renders off the other realm's data.
 ## The ledger provider
 
 `js/data/ledger/provider.js` is the second data-layer contract, over
-`ledger-mcp`'s twenty-four tools (`docs/MCP.md`'s ledger section) rather than
-`qbo-local`'s eleven: fourteen reads (`trialBalance`, `profitAndLoss`,
+`ledger-mcp`'s twenty-eight tools (`docs/MCP.md`'s ledger section) rather than
+`qbo-local`'s eleven: fifteen reads (`trialBalance`, `profitAndLoss`,
 `balanceSheet`, `salesTaxLines`, `generalLedger`, `auditTrail`,
 `entriesForDocument`, `listAdjustments`, `bankStatus`, `lockedThrough`, and
-D28's `listContacts`, `listItems`, `openDocuments`, `aging`) and ten gated
-writes (`upsertContact`, `upsertItem`, `createDocument`,
-`saveAndPostDocument`, `reverseEntry`, `proposeAdjustment`,
+D28's `listContacts`, `listItems`, `openDocuments`, `aging`, `getDocument`)
+and thirteen gated writes (`upsertContact`, `upsertItem`, `createDocument`,
+`updateDocument`, `voidDocument`, `applyCredit`, `saveAndPostDocument`, `reverseEntry`, `proposeAdjustment`,
 `decideAdjustment`, `bankConfirmProposal`, `closePeriod`, `reopenPeriod`). It is its own module (`js/data/ledger/`,
 mirroring `js/data/`'s own shape one level down) rather than folded into the
 qbo-local provider, because `ledger-mcp` is a different server with a
@@ -81,7 +81,7 @@ never `fixture.js` or `tauri.js` directly.
 
 `js/data/ledger/schema.js` is the ledger's schema contract, the same idea
 as `js/data/schema.js` but derived from `apps/ledger/src/mcp.rs`'s own
-`_json` rendering functions field for field, covering all twenty-four tools
+`_json` rendering functions field for field, covering all twenty-eight tools
 including every write's shape (`document_id`/`entry_id`/`entry` and the
 rest, always with `locked_through` alongside).
 
@@ -117,7 +117,18 @@ hand-posted from a form.
 - **Receivables / Payables** (`#ledger-open/receivable`, `/payable`) — the
   own book's aging by customer or vendor and its open documents as of a
   date, with a check that the aging ties to 1200 or 2000 on the trial
-  balance.
+  balance. A document's number opens it for editing; an open credit memo
+  or vendor credit has an Apply control (`apply_credit`) that applies it
+  to one of the same contact's open invoices or bills, all of it or a
+  typed amount.
+- **Edit a document** (`#ledger-edit/<document_id>`) — the New document
+  form over `get_document`/`update_document`: the saved document read back
+  into a draft (a line's rate recovered when quantity × rate gives back
+  its amount), saved as a new version that keeps its number; the book
+  reverses the old entry and posts the new one, or leaves the entry alone
+  when nothing it posts changed. Under it, Void with a reason
+  (`void_document`). A voided document, or a kind or line the form cannot
+  show, opens read-only (Void still offered when it is not voided yet).
 
 - **Trial balance** (`#ledger-tb`) — every account's debit/credit total and
   signed balance as of a date; a wrong-side account is highlighted, a
@@ -186,22 +197,28 @@ different Node version — the directory form may simply work there.)
   keys (stubbing `window.__TAURI__.core.invoke` — there is no real Tauri
   runtime on this machine to test against).
 - `test/ledger-fixture.test.js` — the ledger's own schema contract test:
-  every one of the twenty-four tools against `js/data/ledger/schema.js`,
+  every one of the twenty-eight tools against `js/data/ledger/schema.js`,
   plus behavioural checks — the book balances, a write dated on or before
   `locked_through` is refused, proposing and approving an adjustment moves
   the trial balance, confirming a bank proposal resolves that line, and
   `create_document` fills number/due date/class/tax, refuses bad references
   without consuming a number, and keeps the aging tied to 1200 and 2000
-  through an invoice and a part payment.
+  through an invoice and a part payment; an edit keeps its number and
+  reverses and reposts, a void reverses and leaves the aging, and
+  `apply_credit` nets a credit memo against an invoice, each refused in a
+  closed period or past what is open.
 - `test/ledger-provider.test.js` — the ledger's own provider-selection and
   Tauri-mapping test, the same shape as `test/provider.test.js` but for
   `js/data/ledger/tauri.js`'s `invoke("ledger_query", ...)` calls, all
-  twenty-four tools.
+  twenty-eight tools.
 - `test/ledger-entry.test.js` — the entry form's pure half: quantity ×
   rate, the tax preview's half-to-even rounding and exemption, the exact
-  `document` each kind sends, and the drafts it refuses; and the editors'
+  `document` each kind sends, and the drafts it refuses; a saved document
+  read back into a draft and sent back for `update_document`; which open
+  documents a credit can apply to; and the editors'
   `contact`/`item` mapping. The same payloads go through the real ledger in
-  `commands/src/lib.rs::ledger_query_create_document_takes_what_the_entry_screen_sends`
+  `commands/src/lib.rs::ledger_query_create_document_takes_what_the_entry_screen_sends`,
+  `ledger_query_edit_void_and_apply_credit_take_what_the_screens_send`
   and `ledger_query_upserts_take_what_the_editors_send`.
 - `test/ledger-screens.test.js` — pure-function tests for
   `js/screens/ledger/shared.js`'s `st50Rows` (line 1 = A, line 2 = D, line
