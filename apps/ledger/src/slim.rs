@@ -808,9 +808,14 @@ fn read_documents(
         }
     }
 
-    // AR and AP lines that journal entries and deposits carry for a named
-    // customer or vendor are open items in QBO too.
-    for entity_type in [EntityType::JournalEntry, EntityType::Deposit] {
+    // AR and AP lines that journal entries, deposits and checks or expenses
+    // carry for a named customer or vendor are open items in QBO too (a
+    // refund check against an unapplied payment, a card-paid vendor deposit).
+    for entity_type in [
+        EntityType::JournalEntry,
+        EntityType::Deposit,
+        EntityType::Purchase,
+    ] {
         for entity in entities(replica, realm, entity_type)? {
             let items = control_lines(&entity, ar_ap, warnings);
             let Some(date) = text(&entity.raw_json, "TxnDate")
@@ -832,14 +837,7 @@ fn read_documents(
                 if net.is_zero() {
                     continue;
                 }
-                let base = qbo_document_id(
-                    if entity_type == EntityType::Deposit {
-                        DocKind::Deposit
-                    } else {
-                        DocKind::JournalEntry
-                    },
-                    &entity.qbo_id,
-                );
+                let base = qbo_document_id(source_kind(entity_type), &entity.qbo_id);
                 let document_id = if split {
                     format!("{base}#{contact_id}")
                 } else {
@@ -855,10 +853,10 @@ fn read_documents(
                     (Book::Payable, false) => DocKind::Bill,
                 };
                 let amount = if positive { net } else { net.checked_neg()? };
-                let what = if entity_type == EntityType::Deposit {
-                    "Deposit"
-                } else {
-                    "Journal entry"
+                let what = match entity_type {
+                    EntityType::Deposit => "Deposit",
+                    EntityType::Purchase => "Check or expense",
+                    _ => "Journal entry",
                 };
                 let number = text(&entity.raw_json, "DocNumber");
                 let doc = LedgerDocument {
@@ -904,27 +902,66 @@ fn read_documents(
         }
     }
 
-    // A payment that applies one customer's share of a split journal entry
-    // names the entry; point it at that customer's item.
-    let split_ids: HashSet<String> = docs
+    // A payment that applies one contact's share of a split entry names the
+    // entry; point it at that contact's item. And a synthetic item's
+    // applications take their sign from what the item is, not from how the
+    // translation guessed the entry sat on AR or AP: using up a credit-like
+    // item is negative, paying a debit-like one positive (`books::open_items`).
+    let synthetic: HashMap<String, bool> = docs
         .receivable
         .iter()
         .chain(docs.payable.iter())
-        .filter_map(|doc| {
-            doc.document_id
-                .split_once('#')
-                .map(|(base, _)| base.to_string())
+        .filter(|doc| is_synthetic(&doc.document_id))
+        .map(|doc| {
+            (
+                doc.document_id.clone(),
+                matches!(doc.kind, DocKind::CreditMemo | DocKind::VendorCredit),
+            )
         })
         .collect();
-    for doc in docs.receivable.iter_mut().chain(docs.payable.iter_mut()) {
-        let Some(contact) = doc.contact.clone() else {
-            continue;
-        };
-        for application in &mut doc.applications {
-            if split_ids.contains(&application.target_document_id) {
-                application.target_document_id =
-                    format!("{}#{}", application.target_document_id, contact.id);
+    // QBO states no unapplied amount on a bill payment; it is the total less
+    // the applications, re-signed above.
+    let mut bill_payment_totals: HashMap<String, Money> = HashMap::new();
+    for entity in entities(replica, realm, EntityType::BillPayment)? {
+        if entity.raw_json.get("UnappliedAmt").is_none() {
+            if let Some(total) = money(entity.raw_json.get("TotalAmt")) {
+                bill_payment_totals
+                    .insert(qbo_document_id(DocKind::BillPayment, &entity.qbo_id), total);
             }
+        }
+    }
+    let split_ids: HashSet<String> = synthetic
+        .keys()
+        .filter_map(|id| id.split_once('#').map(|(base, _)| base.to_string()))
+        .collect();
+    for doc in docs.receivable.iter_mut().chain(docs.payable.iter_mut()) {
+        let contact = doc.contact.clone();
+        for application in &mut doc.applications {
+            if let Some(contact) = &contact {
+                if split_ids.contains(&application.target_document_id) {
+                    application.target_document_id =
+                        format!("{}#{}", application.target_document_id, contact.id);
+                }
+            }
+            if let Some(is_credit) = synthetic.get(&application.target_document_id) {
+                let magnitude = abs(application.amount)?;
+                application.amount = if *is_credit {
+                    magnitude.checked_neg()?
+                } else {
+                    magnitude
+                };
+            }
+        }
+    }
+    for doc in docs
+        .payable
+        .iter_mut()
+        .filter(|d| d.kind == DocKind::BillPayment)
+    {
+        if let Some(total) = bill_payment_totals.get(&doc.document_id) {
+            doc.unapplied = total.checked_sub(Money::checked_sum(
+                doc.applications.iter().map(|a| a.amount),
+            )?)?;
         }
     }
 
@@ -937,23 +974,27 @@ fn read_documents(
     Ok(docs)
 }
 
-/// Per (book, contact) the signed net a journal entry or deposit puts on AR
-/// or AP: AR debit-positive, AP debit-positive as well (a vendor credit).
+/// Per (book, contact) the signed net a journal entry, deposit or check puts
+/// on AR or AP, debit-positive on both: an AR debit is owed to us, an AP debit
+/// is owed by the vendor.
 fn control_lines(
     entity: &MirroredEntity,
     ar_ap: &ArApAccounts,
     warnings: &mut Vec<String>,
 ) -> BTreeMap<(Book, ContactKind, String), Money> {
     let mut nets: BTreeMap<(Book, ContactKind, String), Money> = BTreeMap::new();
-    let Some(lines) = entity.raw_json.get("Line").and_then(Value::as_array) else {
+    let raw = &entity.raw_json;
+    let Some(lines) = raw.get("Line").and_then(Value::as_array) else {
         return nets;
     };
-    let is_deposit = entity.entity_type == EntityType::Deposit;
+    // A check or expense debits its lines; a card credit credits them.
+    let purchase_credits = raw.get("Credit").and_then(Value::as_bool) == Some(true);
+    let header_entity = raw.get("EntityRef");
     for line in lines {
-        let detail = if is_deposit {
-            line.get("DepositLineDetail")
-        } else {
-            line.get("JournalEntryLineDetail")
+        let detail = match entity.entity_type {
+            EntityType::Deposit => line.get("DepositLineDetail"),
+            EntityType::Purchase => line.get("AccountBasedExpenseLineDetail"),
+            _ => line.get("JournalEntryLineDetail"),
         };
         let Some(detail) = detail else { continue };
         let Some(account) = reference(detail, "AccountRef") else {
@@ -969,31 +1010,49 @@ fn control_lines(
         let Some(amount) = money(line.get("Amount")) else {
             continue;
         };
-        let signed = if is_deposit {
+        let negated = amount.checked_neg().unwrap_or(amount);
+        let (signed, contact_type, contact_id) = match entity.entity_type {
             // A deposit line is always a credit to the account it names.
-            amount.checked_neg().unwrap_or(amount)
-        } else {
-            match text(detail, "PostingType").as_deref() {
-                Some("Debit") => amount,
-                Some("Credit") => amount.checked_neg().unwrap_or(amount),
-                _ => continue,
+            EntityType::Deposit => {
+                let node = detail.get("Entity");
+                (
+                    negated,
+                    node.and_then(|e| text(e, "type")),
+                    node.and_then(|e| text(e, "value")),
+                )
+            }
+            EntityType::Purchase => {
+                let signed = if purchase_credits { negated } else { amount };
+                match (book, reference(detail, "CustomerRef")) {
+                    (Book::Receivable, Some(customer)) => {
+                        (signed, Some("Customer".to_string()), Some(customer))
+                    }
+                    _ => (
+                        signed,
+                        header_entity.and_then(|e| text(e, "type")),
+                        header_entity.and_then(|e| text(e, "value")),
+                    ),
+                }
+            }
+            _ => {
+                let signed = match text(detail, "PostingType").as_deref() {
+                    Some("Debit") => amount,
+                    Some("Credit") => negated,
+                    _ => continue,
+                };
+                let node = detail.get("Entity");
+                (
+                    signed,
+                    node.and_then(|e| text(e, "Type")),
+                    node.and_then(|e| reference(e, "EntityRef")),
+                )
             }
         };
-        let entity_node = detail.get("Entity");
-        let (contact_type, contact_id) = if is_deposit {
-            (
-                entity_node.and_then(|e| text(e, "type")),
-                entity_node.and_then(|e| text(e, "value")),
-            )
-        } else {
-            (
-                entity_node.and_then(|e| text(e, "Type")),
-                entity_node.and_then(|e| reference(e, "EntityRef")),
-            )
-        };
+        // QBO spells the type "Customer" in one payload and "CUSTOMER" in
+        // another.
         let contact_kind = match contact_type.as_deref() {
-            Some("Customer") => ContactKind::Customer,
-            Some("Vendor") => ContactKind::Vendor,
+            Some(t) if t.eq_ignore_ascii_case("customer") => ContactKind::Customer,
+            Some(t) if t.eq_ignore_ascii_case("vendor") => ContactKind::Vendor,
             _ => {
                 warnings.push(format!(
                     "{} {}: an {} line names no customer or vendor; it is in the opening entry \
@@ -1014,6 +1073,24 @@ fn control_lines(
         *entry = entry.checked_add(signed).unwrap_or(*entry);
     }
     nets
+}
+
+/// The ledger document kind a synthetic open item's source entity names in
+/// its id.
+fn source_kind(entity_type: EntityType) -> DocKind {
+    match entity_type {
+        EntityType::Deposit => DocKind::Deposit,
+        EntityType::Purchase => DocKind::Purchase,
+        _ => DocKind::JournalEntry,
+    }
+}
+
+/// An open item built from an entry's AR/AP lines rather than from a
+/// document of its own.
+fn is_synthetic(document_id: &str) -> bool {
+    ["qbo:JournalEntry:", "qbo:Deposit:", "qbo:Purchase:"]
+        .iter()
+        .any(|prefix| document_id.starts_with(prefix))
 }
 
 /// What will be saved: every document open on the date, in the shape it is
@@ -1086,6 +1163,8 @@ fn plan_open_documents(
             "journal entry line"
         } else if original.document_id.starts_with("qbo:Deposit:") {
             "deposit line"
+        } else if original.document_id.starts_with("qbo:Purchase:") {
+            "check or expense line"
         } else {
             original.kind.as_str()
         };
@@ -1509,11 +1588,10 @@ fn buckets_from_balances(
             )?;
         }
     }
-    for item in open.iter().filter(|item| {
-        item.document_id.starts_with("qbo:JournalEntry:")
-            || item.document_id.starts_with("qbo:Deposit:")
-            || item.kind == DocKind::BillPayment
-    }) {
+    for item in open
+        .iter()
+        .filter(|item| is_synthetic(&item.document_id) || item.kind == DocKind::BillPayment)
+    {
         add_bucket(
             out.entry(item.contact_id.clone()).or_default(),
             (as_of - item.due_date).num_days(),
