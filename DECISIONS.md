@@ -1449,3 +1449,124 @@ mistake the aging exists to prevent. The ledger would keep the money in
 already. If no, the parallel run's aging check compares against QBO's
 aging less unapplied payments, and the difference is explained by W8.
 
+## D42 — QBO sales orders: mirrored from a feed, a `SalesOrder` kind in the book
+
+17 Oct 2026. CUTOVER.md's blocker #1: QBO sales orders were not in the
+replica, so the slim import could not carry the open ones. The
+process-sales-order pipeline creates them today, and its ledger backend
+needs to know what one becomes in the own book.
+
+**What QBO exposes, checked read-only on 17 Oct 2026 (production realm).**
+
+- *Not a v3 entity.* `SELECT * FROM SalesOrder LIMIT 3` through the
+  `quickbooks` MCP server's `list_sales_orders` returns HTTP 400
+  `QueryValidationError: Metadata not found for Entity: SalesOrder`. The
+  server's own source (`qbo-transaction-jumper/qbo_jumper_server.py`) records
+  the same for `GET /salesorder/{id}` ("Operation salesorder is not
+  supported"); its `list_sales_orders` / `get_sales_order` /
+  `find_sales_order_by_po_number` therefore never return an order. CDC never
+  names one either.
+- *Where they live.* QBO Advanced's commerce module. The list is the grid
+  at `/app/salesorders?tab=sales-orders` (rows `tr[data-item-id=<id>]`,
+  columns Order no., Order date, Customer, Channel, Order total, Order
+  status, Invoice status, Fulfillment status; source:
+  `qbo-headless/src/tools/sales-orders.js` `listSalesOrders`, and a live read
+  through `qbo_list_sales_orders`). One order is
+  `/app/commerce/orders/view?detailId=<id>&detailType=salesOrder`. The web
+  app reads and writes them through the commerce GraphQL service
+  (`commercecontrol.api.intuit.com/graphql`, operations `GetSalesOrder`,
+  `CreateSalesOrder`, `UpdateSalesOrder`; `qbo-headless/src/tools/so-form.js`,
+  `so-payload.js`), authenticated by the browser session. Nothing here has
+  shown it accepting our OAuth app's token, so `qbo-local`'s client cannot
+  call it.
+- *Ids.* `detailId` is a ten-digit commerce id (`149` then the sequence),
+  not a v3 id and not the SO number. Item ids on order lines are v3 Item ids
+  (an order's shipping item matched the v3 item on the invoice made from
+  it). The customer's id was not confirmed to be the v3 Customer id: the
+  feed producer must emit the v3 id and should check one.
+- *The model*, read from the order page's own store (`sales-order` slice,
+  plus `lines`): `orderNumber`, `issuedAt` (`YYYY-MM-DDT07:00:00Z`, midnight
+  Pacific), `orderStatus` (`OPEN`), `paymentStatus` — the grid's "Invoice
+  status" (`NOT_INVOICED`, `INVOICED`; the grid also shows Paid, Voided) —
+  `fulfillmentStatus` (`PENDING_FULFILLMENT`), `customerPONumber`,
+  `dueDate`, `shipDate`, `totalAmount`, `totalDiscount`, `totalShipping`,
+  `version`, `freeformBillingAddress`/`freeformShippingAddress`, and per line
+  `id`, `item.id`, `description`, `quantity`, `rate`, `amount`, `taxable`,
+  `quantityConsumedInInvoices`, `openBalance`, and `links.targets` (the
+  invoices that took from the line, type `SALE_INVOICE`, v3 Invoice id).
+- *QBO never closes an order.* All 100 orders on the grid's first page were
+  Order status "Open", invoiced and paid ones included. What says an order
+  is done is the invoice status, and per line the invoiced quantity.
+- *The link is one-way.* The invoice QBO makes from an order carries an empty
+  `LinkedTxn` in v3 (checked on one, 17 Oct): only the order knows its
+  invoices.
+
+**Decisions.**
+
+1. *The replica mirrors sales orders from a feed, on their own path.* A
+   `qbo-sales-orders/1` JSON document (`apps/qbo-local/src/sales_orders.rs`):
+   every order of the realm in the commerce model's own field names, plus
+   `customerId` and per-line `itemId`/`invoiceIds`, `complete: true` when it
+   is every order. `qbo-local sync-sales-orders --feed FILE|URL` applies it
+   in one transaction (unchanged orders untouched, orders missing from a
+   complete feed marked deleted, a feed with one bad order writes nothing)
+   and records the snapshot; `qbo-local sales-orders` lists. Own tables
+   (`sales_orders`, `sales_order_lines`, `sales_order_snapshots`, migration
+   3), not `entities`/`documents`: the id space is the commerce module's, and
+   no CDC, reconciliation or outbox path may ever try one against v3. A
+   periodic full pull, not a delta: a few hundred orders, no change feed.
+2. *Open means something left to invoice.* A line's open quantity is
+   `quantity − quantityConsumedInInvoices`, its open amount that share of the
+   line; an order is open when its status is not closed or cancelled and an
+   open amount remains. An order whose status says invoiced or paid but whose
+   lines carry no invoiced quantities counts as fully invoiced. As of a past
+   date, a line all of whose invoices are dated after it is still open then
+   (invoice dates from the replica; an invoice the replica lacks counts as
+   before).
+3. *The own book gets `DocKind::SalesOrder`* (`sales_order`), beside
+   Estimate: a contract (`DocKind::is_contract`, never posts), numbered in its
+   own series, a customer document taxed like a sale. It carries no status.
+   The invoice made from it carries an `Application` targeting it for the
+   pre-tax subtotal it took — a link, never money: `open_items`, the
+   applied-against checks and `post` ignore applications to a contract, as
+   they already did for estimates. Open = subtotal − linked invoices
+   (non-voided), derived, never stored. `convert_to_invoice` (MCP) builds the
+   invoice from every line, or from named lines at an optional smaller
+   quantity, through `prepare_document` (number, due date, tax) and saves and
+   posts it like `create_document`; it refuses taking more than is open, and
+   "every line" on an order already partly invoiced. Dropping a remainder
+   nobody will invoice is voiding the order; its invoices stay editable.
+4. *The slim import carries open orders* as `SalesOrder` documents under
+   `import_slim_contract`, only the open lines at their open quantities,
+   `PO …` on the memo, the commerce id in `source_ref`, numbering past the
+   feed's highest SO number. **A missing or partial feed fails the run**: the
+   blocker was silent loss, so the check is "a complete sales-order feed is
+   in the replica". A feed captured on or before the as-of date is a warning.
+5. *What the pipeline sends.* `create_document` with `"kind": "SalesOrder"`,
+   the customer, `memo` "PO …", item lines, the shipping charge as a
+   `"kind": "Shipping"` line (docs/MCP.md has the exact JSON); keep the
+   returned `document_id`. At shipment, `convert_to_invoice` with that id and
+   the invoice date.
+
+*Rejected: carrying them as estimates.* An estimate has its own number
+series and no notion of being consumed by an invoice, so an order invoiced
+in part would stay open in full, and the SO numbers customers quote would
+land among estimate numbers.
+
+*Rejected: a status field on `LedgerDocument`, or a links table.* Either is
+a second record of what the invoice's application already says, and the
+status field would touch every constructor of the shared type.
+
+*Rejected: `EntityType::SalesOrder` in qbo-local.* Every sync, reconcile and
+backup loop walks `EntityType::ALL` against v3, which answers 400 for it.
+
+**Open.**
+
+- The feed's producer. It belongs in qbo-headless (aquamentor-mcp): open
+  each order page, read the store, page the grid past its first 100 rows,
+  emit the v3 customer id. Until then a feed can be written by hand for the
+  orders still "Not invoiced" (Dan).
+- Header-level discount and shipping (`totalDiscount`, `totalShipping`) are
+  kept in the raw feed but not carried into the ledger; Aquamentor puts
+  shipping on an item line. An order with either needs a look at conversion.
+- The desktop app has no sales-order screen yet; the parent session adds it.

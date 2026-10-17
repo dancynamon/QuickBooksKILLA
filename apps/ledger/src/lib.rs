@@ -62,6 +62,7 @@ pub mod pipeline;
 pub mod post;
 pub mod render;
 pub mod report;
+pub mod sales_orders;
 pub mod slim;
 pub mod store;
 pub mod types;

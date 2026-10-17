@@ -209,26 +209,30 @@ pub fn translate(
         let charges_customer = matches!(
             doc_kind,
             DocKind::Estimate
+                | DocKind::SalesOrder
                 | DocKind::Invoice
                 | DocKind::SalesReceipt
                 | DocKind::CreditMemo
                 | DocKind::RefundReceipt
         );
-        let is_shipping_item = charges_customer && item.is_some_and(|context| {
-            context.item.name.to_lowercase().contains("shipping")
-                || context
-                    .item
-                    .sku
-                    .as_deref()
-                    .is_some_and(|sku| sku.to_lowercase().contains("shipping"))
-        });
+        let is_shipping_item = charges_customer
+            && item.is_some_and(|context| {
+                context.item.name.to_lowercase().contains("shipping")
+                    || context
+                        .item
+                        .sku
+                        .as_deref()
+                        .is_some_and(|sku| sku.to_lowercase().contains("shipping"))
+            });
 
         // A deposit line that sweeps a payment or sales receipt out of
         // undeposited funds names the payment, not an account, and QBO sends
         // it with no `DetailType` (§1: "Cr 1150 per grouped payment").
         // Practice run, 17 Oct 2026: 33 such lines, 54,472.68, posted nothing.
         let sweeps_undeposited = doc_kind == DocKind::Deposit
-            && detail.and_then(|d| json_reference(d, "AccountRef")).is_none()
+            && detail
+                .and_then(|d| json_reference(d, "AccountRef"))
+                .is_none()
             && raw_line
                 .get("LinkedTxn")
                 .and_then(Value::as_array)
@@ -414,13 +418,8 @@ pub fn translate(
     });
 
     let pay_from = resolve_pay_from(raw, doc_kind, &ctx.accounts, &mut warnings);
-    let applications = collect_applications(
-        raw,
-        doc_kind,
-        doc.contact_id.as_deref(),
-        ctx,
-        &mut warnings,
-    );
+    let applications =
+        collect_applications(raw, doc_kind, doc.contact_id.as_deref(), ctx, &mut warnings);
     let unapplied = match json_money(raw, "UnappliedAmt", &qbo_id)? {
         Some(unapplied) => unapplied,
         // A QBO BillPayment states no unapplied amount: what it paid beyond
@@ -548,6 +547,7 @@ pub fn translate(
 pub fn qbo_document_id(kind: DocKind, qbo_id: &str) -> String {
     let entity = match kind {
         DocKind::Estimate => "Estimate",
+        DocKind::SalesOrder => "SalesOrder",
         DocKind::Invoice => "Invoice",
         DocKind::SalesReceipt => "SalesReceipt",
         DocKind::CreditMemo => "CreditMemo",
@@ -742,7 +742,10 @@ fn resolve_line_class(
 fn deposit_line_entity(detail: &Value) -> Option<ContactRef> {
     let id = json_reference(detail, "Entity")?;
     // QBO spells it "Customer" in some payloads and "CUSTOMER" in others.
-    let kind = match json_nested_text(detail, "Entity", "type")?.to_ascii_lowercase().as_str() {
+    let kind = match json_nested_text(detail, "Entity", "type")?
+        .to_ascii_lowercase()
+        .as_str()
+    {
         "customer" => ContactKind::Customer,
         "vendor" => ContactKind::Vendor,
         _ => return None,
@@ -992,6 +995,7 @@ fn application_is_credit(
 fn map_txn_type(raw: &str) -> Option<DocKind> {
     match raw {
         "Estimate" => Some(DocKind::Estimate),
+        "SalesOrder" => Some(DocKind::SalesOrder),
         "Invoice" => Some(DocKind::Invoice),
         "SalesReceipt" => Some(DocKind::SalesReceipt),
         "CreditMemo" => Some(DocKind::CreditMemo),

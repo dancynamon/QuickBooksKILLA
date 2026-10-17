@@ -125,6 +125,16 @@ fn replica() -> Store {
                 "Entity": { "name": "Swim Club", "type": "CUSTOMER", "value": "31" } } }
         ] }),
     );
+    // D42: the run refuses a replica no sales-order feed has reached. This
+    // book has none open, so an empty, complete feed.
+    let feed = serde_json::from_value(json!({
+        "feed": qbo_local::sales_orders::FEED_FORMAT, "realmId": realm().as_str(),
+        "capturedAt": "2026-07-01T12:00:00Z", "complete": true, "salesOrders": [],
+    }))
+    .unwrap();
+    store
+        .apply_sales_order_feed(&realm(), &feed, "test", now())
+        .unwrap();
     store
 }
 

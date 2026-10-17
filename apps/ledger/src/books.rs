@@ -498,6 +498,7 @@ pub const fn is_numbered(kind: DocKind) -> bool {
     matches!(
         kind,
         DocKind::Estimate
+            | DocKind::SalesOrder
             | DocKind::Invoice
             | DocKind::SalesReceipt
             | DocKind::CreditMemo
@@ -642,6 +643,7 @@ fn number_owner(
 const fn contact_kind_for(kind: DocKind) -> Option<ContactKind> {
     match kind {
         DocKind::Estimate
+        | DocKind::SalesOrder
         | DocKind::Invoice
         | DocKind::SalesReceipt
         | DocKind::CreditMemo
@@ -659,6 +661,7 @@ const fn is_taxed_sale(kind: DocKind) -> bool {
     matches!(
         kind,
         DocKind::Estimate
+            | DocKind::SalesOrder
             | DocKind::Invoice
             | DocKind::SalesReceipt
             | DocKind::CreditMemo
@@ -895,7 +898,7 @@ pub struct OpenDocument {
 
 /// The newest version of every non-voided document of the given types dated
 /// on or before `as_of`.
-fn latest_documents(
+pub(crate) fn latest_documents(
     ledger: &Ledger,
     company: &str,
     kinds: &[DocKind],
@@ -923,7 +926,10 @@ fn latest_documents(
     Ok(docs)
 }
 
-fn contact_names(ledger: &Ledger, company: &str) -> Result<HashMap<String, String>, BooksError> {
+pub(crate) fn contact_names(
+    ledger: &Ledger,
+    company: &str,
+) -> Result<HashMap<String, String>, BooksError> {
     let mut stmt = ledger
         .conn()
         .prepare("SELECT contact_id, display_name FROM contacts WHERE company_id = ?1")?;
@@ -989,11 +995,14 @@ pub fn open_items(
     let mut paid: HashMap<&str, Money> = HashMap::new();
     // A credit's own applications, by the credit itself.
     let mut consumed: HashMap<&str, Money> = HashMap::new();
-    // A link to an estimate or purchase order says where a line came from;
-    // it moves no money.
-    let moves_money =
-        |a: &&crate::types::Application| !matches!(a.target_kind, DocKind::Estimate | DocKind::PurchaseOrder);
-    for doc in docs.iter().filter(in_window).filter(|d| book.settles(d.kind)) {
+    // A link to an estimate, sales order or purchase order says where a
+    // line came from; it moves no money (D42).
+    let moves_money = |a: &&crate::types::Application| !a.target_kind.is_contract();
+    for doc in docs
+        .iter()
+        .filter(in_window)
+        .filter(|d| book.settles(d.kind))
+    {
         for application in doc.applications.iter().filter(moves_money) {
             let entry = paid
                 .entry(application.target_document_id.as_str())
@@ -1112,7 +1121,11 @@ pub struct AgingRow {
 
 impl AgingRow {
     /// Adds `amount` to the bucket `days_past_due` falls in, and to the total.
-    pub fn add(&mut self, days_past_due: i64, amount: Money) -> Result<(), ledger_core::MoneyError> {
+    pub fn add(
+        &mut self,
+        days_past_due: i64,
+        amount: Money,
+    ) -> Result<(), ledger_core::MoneyError> {
         let bucket = match days_past_due {
             i64::MIN..=0 => &mut self.current,
             1..=30 => &mut self.days_1_30,
@@ -1184,7 +1197,7 @@ pub fn aging(
 /// Later than any document's date, for "everything saved so far". Not
 /// `NaiveDate::MAX`, whose string form (`+262142-12-31`) sorts before
 /// `2027-01-01` in the `txn_date <= ?` text comparison.
-fn far_future() -> NaiveDate {
+pub(crate) fn far_future() -> NaiveDate {
     NaiveDate::from_ymd_opt(9999, 12, 31).expect("valid date")
 }
 
@@ -1426,6 +1439,11 @@ pub fn update_document(
     }
     for application in &doc.applications {
         let target = latest_document(ledger, company, &application.target_document_id)?;
+        // A link to a contract (the sales order an invoice was made from)
+        // moves no money; the contract may since have been voided (D42).
+        if target.kind.is_contract() {
+            continue;
+        }
         if target.is_voided {
             return Err(BooksError::Voided(target.document_id));
         }

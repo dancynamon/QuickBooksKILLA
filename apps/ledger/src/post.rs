@@ -1122,8 +1122,8 @@ fn apply_void(mut entry: JournalEntry, is_voided: bool) -> JournalEntry {
 }
 
 /// The posting-rules table (§1), as one function. Pure: everything it needs
-/// beyond the document is in `ctx`. Estimate and PurchaseOrder never post
-/// ([`DocKind::posts`]).
+/// beyond the document is in `ctx`. Estimate, SalesOrder and PurchaseOrder
+/// never post ([`DocKind::posts`]).
 pub fn post(
     doc: &LedgerDocument,
     version: i64,
@@ -1153,7 +1153,7 @@ pub fn post(
             DocKind::RawMaterialReceipt => post_raw_material_receipt(doc)?,
             DocKind::Build => post_build(doc)?,
             DocKind::InventoryAdjustment => post_inventory_adjustment(doc)?,
-            DocKind::Estimate | DocKind::PurchaseOrder => {
+            DocKind::Estimate | DocKind::SalesOrder | DocKind::PurchaseOrder => {
                 unreachable!("DocKind::posts() filtered these out above")
             }
             DocKind::JournalEntry => {
@@ -1326,9 +1326,13 @@ mod tests {
     }
 
     #[test]
-    fn estimate_and_purchase_order_never_post() {
+    fn estimate_sales_order_and_purchase_order_never_post() {
         let ctx = PostingContext::default();
-        for kind in [DocKind::Estimate, DocKind::PurchaseOrder] {
+        for kind in [
+            DocKind::Estimate,
+            DocKind::SalesOrder,
+            DocKind::PurchaseOrder,
+        ] {
             let doc = minimal_doc(kind);
             assert_eq!(post(&doc, 1, &ctx), Ok(Posting::NonPosting));
         }

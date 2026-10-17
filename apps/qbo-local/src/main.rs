@@ -35,6 +35,7 @@ use qbo_local::oauth::{self, OAuthConfig};
 use qbo_local::ratelimit::RealmLimits;
 use qbo_local::reconcile::{ReconcileOptions, ReconcileReport, Reconciler};
 use qbo_local::reports;
+use qbo_local::sales_orders;
 use qbo_local::slice::{self, SliceOptions};
 use qbo_local::store::backup::SnapshotPolicy;
 use qbo_local::store::{latest_version, ProjectedTable, RealmSummary, Store};
@@ -180,6 +181,16 @@ enum Command {
         record: Option<PathBuf>,
         config: Option<PathBuf>,
     },
+    SyncSalesOrders {
+        db: PathBuf,
+        realm: RealmId,
+        feed: String,
+    },
+    SalesOrders {
+        db: PathBuf,
+        realm: RealmId,
+        all: bool,
+    },
     Snapshots {
         realm: RealmId,
         from_year: i32,
@@ -244,6 +255,8 @@ USAGE:
                       (--live [--config PATH] | --replay DIR) [--record DIR]
     qbo-local snapshots --realm ID --from-year YYYY --to-year YYYY --dir DIR
                       (--live [--config PATH] | --replay DIR) [--record DIR]
+    qbo-local sync-sales-orders --db PATH --realm ID --feed URL|PATH
+    qbo-local sales-orders --db PATH --realm ID [--all]
     qbo-local --help
 
 SUBCOMMANDS:
@@ -287,6 +300,14 @@ SUBCOMMANDS:
                 from --from-year to --to-year and write tb-YYYY.csv into
                 --dir — exactly the directory `ledger boundary --snapshots`
                 reads.
+    sync-sales-orders
+                Mirror QBO sales orders from a qbo-sales-orders/1 feed (a file
+                or an http(s) URL; DECISIONS.md D42). Sales orders are not a v3
+                entity, so CDC and the daemon never see them: run this on a
+                schedule. A complete feed marks orders it lacks deleted.
+    sales-orders
+                List the mirrored sales orders still open (--all: every one),
+                with what is left to invoice. Opens the replica read-only.
 
 FLAGS:
     --db PATH               Path to the SQLite replica file.
@@ -325,6 +346,8 @@ FLAGS:
     --pick-seed S           Which contacts a slice picks (default \"slice\").
     --from-year YYYY        First year to snapshot, inclusive (snapshots only).
     --to-year YYYY          Last year to snapshot, inclusive (snapshots only).
+    --feed URL|PATH         Where the sales-order feed is (sync-sales-orders).
+    --all                   Every sales order, not only open ones (sales-orders).
 
 Without --live or --mock, daemon, sweep and record exit 2: choose one.
 Without --live or --replay DIR, report and snapshots exit 2: choose one.
@@ -406,6 +429,8 @@ fn parse(args: &[String]) -> Result<Command, UsageError> {
         "slice" => parse_slice(args),
         "report" => parse_report(args),
         "snapshots" => parse_snapshots(args),
+        "sync-sales-orders" => parse_sync_sales_orders(args),
+        "sales-orders" => parse_sales_orders(args),
         other => Err(UsageError::unknown_subcommand(other)),
     }
 }
@@ -689,6 +714,44 @@ fn parse_replay(mut args: Args<'_>) -> Result<Command, UsageError> {
     })
 }
 
+fn parse_sync_sales_orders(mut args: Args<'_>) -> Result<Command, UsageError> {
+    let mut db = None;
+    let mut realm = None;
+    let mut feed = None;
+    while let Some(flag) = args.next() {
+        match flag.as_str() {
+            "--db" => db = Some(PathBuf::from(next_value(&mut args, "--db")?)),
+            "--realm" => realm = Some(parse_realm(&next_value(&mut args, "--realm")?)?),
+            "--feed" => feed = Some(next_value(&mut args, "--feed")?),
+            other => return Err(UsageError::unknown_flag(other)),
+        }
+    }
+    Ok(Command::SyncSalesOrders {
+        db: db.ok_or_else(|| UsageError::missing_flag("--db"))?,
+        realm: realm.ok_or_else(|| UsageError::missing_flag("--realm"))?,
+        feed: feed.ok_or_else(|| UsageError::missing_flag("--feed"))?,
+    })
+}
+
+fn parse_sales_orders(mut args: Args<'_>) -> Result<Command, UsageError> {
+    let mut db = None;
+    let mut realm = None;
+    let mut all = false;
+    while let Some(flag) = args.next() {
+        match flag.as_str() {
+            "--db" => db = Some(PathBuf::from(next_value(&mut args, "--db")?)),
+            "--realm" => realm = Some(parse_realm(&next_value(&mut args, "--realm")?)?),
+            "--all" => all = true,
+            other => return Err(UsageError::unknown_flag(other)),
+        }
+    }
+    Ok(Command::SalesOrders {
+        db: db.ok_or_else(|| UsageError::missing_flag("--db"))?,
+        realm: realm.ok_or_else(|| UsageError::missing_flag("--realm"))?,
+        all,
+    })
+}
+
 fn parse_slice(mut args: Args<'_>) -> Result<Command, UsageError> {
     let mut db = None;
     let mut realm = None;
@@ -699,9 +762,7 @@ fn parse_slice(mut args: Args<'_>) -> Result<Command, UsageError> {
             "--db" => db = Some(PathBuf::from(next_value(&mut args, "--db")?)),
             "--realm" => realm = Some(parse_realm(&next_value(&mut args, "--realm")?)?),
             "--dir" => dir = Some(PathBuf::from(next_value(&mut args, "--dir")?)),
-            "--customers" => {
-                options.customers = parse_usize(&next_value(&mut args, flag)?, flag)?
-            }
+            "--customers" => options.customers = parse_usize(&next_value(&mut args, flag)?, flag)?,
             "--vendors" => options.vendors = parse_usize(&next_value(&mut args, flag)?, flag)?,
             "--customer" => options.customer_ids.push(next_value(&mut args, flag)?),
             "--vendor" => options.vendor_ids.push(next_value(&mut args, flag)?),
@@ -752,7 +813,8 @@ fn parse_report(mut args: Args<'_>) -> Result<Command, UsageError> {
             "--name" => {
                 let raw = next_value(&mut args, "--name")?;
                 name = Some(
-                    ReportKind::parse(&raw).ok_or_else(|| UsageError::invalid_value("--name", &raw))?,
+                    ReportKind::parse(&raw)
+                        .ok_or_else(|| UsageError::invalid_value("--name", &raw))?,
                 );
             }
             "--as-of" => as_of = Some(parse_date(&next_value(&mut args, "--as-of")?, "--as-of")?),
@@ -792,10 +854,16 @@ fn parse_snapshots(mut args: Args<'_>) -> Result<Command, UsageError> {
         match flag.as_str() {
             "--realm" => realm = Some(parse_realm(&next_value(&mut args, "--realm")?)?),
             "--from-year" => {
-                from_year = Some(parse_i32(&next_value(&mut args, "--from-year")?, "--from-year")?)
+                from_year = Some(parse_i32(
+                    &next_value(&mut args, "--from-year")?,
+                    "--from-year",
+                )?)
             }
             "--to-year" => {
-                to_year = Some(parse_i32(&next_value(&mut args, "--to-year")?, "--to-year")?)
+                to_year = Some(parse_i32(
+                    &next_value(&mut args, "--to-year")?,
+                    "--to-year",
+                )?)
             }
             "--dir" => dir = Some(PathBuf::from(next_value(&mut args, "--dir")?)),
             "--live" => live = true,
@@ -898,6 +966,8 @@ fn execute(command: Command) -> Result<(), CommandError> {
             config,
         } => run_record(&db, &realm, &dir, mock, live, config.as_deref()),
         Command::Replay { db, realm, dir } => run_replay(&db, &realm, &dir),
+        Command::SyncSalesOrders { db, realm, feed } => run_sync_sales_orders(&db, &realm, &feed),
+        Command::SalesOrders { db, realm, all } => run_sales_orders(&db, &realm, all),
         Command::Slice {
             db,
             realm,
@@ -975,9 +1045,7 @@ fn build_http_client(
 /// keychain on macOS), plus a one-line description for messages. Every path
 /// that reads or writes tokens goes through here so `auth`, `import-token`,
 /// `status` and `--live` can never disagree about where tokens live.
-fn open_token_store(
-    config: &LocalConfig,
-) -> Result<(Box<dyn TokenStore>, String), CommandError> {
+fn open_token_store(config: &LocalConfig) -> Result<(Box<dyn TokenStore>, String), CommandError> {
     match config.token_store_kind() {
         TokenStoreKind::File => Ok((
             Box::new(FileTokenStore::new(&config.tokens_dir)),
@@ -1080,9 +1148,18 @@ fn print_token_status(config: Option<&Path>) -> Result<(), CommandError> {
                 let current = &generations.current;
                 println!("    {realm} : {state}");
                 println!("      refresh token     : {}", current.fingerprint());
-                println!("      access expires    : {}", current.access_expires_at().to_rfc3339());
-                println!("      refresh expires   : {}", current.refresh_expires_at().to_rfc3339());
-                println!("      generations kept  : {}", 1 + generations.previous.len());
+                println!(
+                    "      access expires    : {}",
+                    current.access_expires_at().to_rfc3339()
+                );
+                println!(
+                    "      refresh expires   : {}",
+                    current.refresh_expires_at().to_rfc3339()
+                );
+                println!(
+                    "      generations kept  : {}",
+                    1 + generations.previous.len()
+                );
             }
         }
     }
@@ -1260,7 +1337,10 @@ fn run_import_token(
     }
 
     let mut line = String::new();
-    std::io::stdin().lock().read_line(&mut line).map_err(runtime)?;
+    std::io::stdin()
+        .lock()
+        .read_line(&mut line)
+        .map_err(runtime)?;
     let refresh_token = line.trim();
     if refresh_token.is_empty() {
         return Err(CommandError::Runtime(
@@ -1438,6 +1518,81 @@ fn run_replay(db: &Path, realm: &RealmId, dir: &Path) -> Result<(), CommandError
     Ok(())
 }
 
+// -- sales orders (D42) -----------------------------------------------------
+
+/// Apply one sales-order feed to the replica. The realm must already be
+/// registered (`init`); the feed is read in full and checked before anything
+/// is written.
+fn run_sync_sales_orders(db: &Path, realm: &RealmId, feed: &str) -> Result<(), CommandError> {
+    let parsed = sales_orders::fetch_feed(feed, realm).map_err(runtime)?;
+    let store = Store::open(db).map_err(runtime)?;
+    let summary = store
+        .apply_sales_order_feed(realm, &parsed, feed, Utc::now())
+        .map_err(runtime)?;
+    println!(
+        "sales-order feed captured {}",
+        parsed.captured_at.to_rfc3339()
+    );
+    println!("  complete  : {}", parsed.complete);
+    println!("  seen      : {}", summary.seen);
+    println!("  inserted  : {}", summary.inserted);
+    println!("  updated   : {}", summary.updated);
+    println!("  unchanged : {}", summary.unchanged);
+    println!("  deleted   : {}", summary.deleted);
+    println!("  open now  : {}", summary.open);
+    Ok(())
+}
+
+fn run_sales_orders(db: &Path, realm: &RealmId, all: bool) -> Result<(), CommandError> {
+    let store = Store::open_read_only(db).map_err(runtime)?;
+    match store.sales_order_snapshot(realm).map_err(runtime)? {
+        Some(snapshot) => println!(
+            "last feed: captured {}, synced {}, {} orders{}",
+            snapshot.captured_at.to_rfc3339(),
+            snapshot.synced_at.to_rfc3339(),
+            snapshot.order_count,
+            if snapshot.complete { "" } else { " (partial)" }
+        ),
+        None => {
+            println!("no sales-order feed has been applied to realm {realm}");
+            return Ok(());
+        }
+    }
+    let orders = store.list_sales_orders(realm, !all).map_err(runtime)?;
+    println!(
+        "{:<8} {:<10} {:<10} {:>12} {:>12}  {:<18} customer",
+        "number", "date", "id", "total", "to invoice", "invoice status"
+    );
+    for order in &orders {
+        println!(
+            "{:<8} {:<10} {:<10} {:>12} {:>12}  {:<18} {}",
+            order.doc_number.as_deref().unwrap_or("-"),
+            order.txn_date,
+            order.qbo_id,
+            money_text(order.total),
+            money_text(order.open_amount),
+            order.invoice_status.as_deref().unwrap_or("-"),
+            order.customer_id.as_deref().unwrap_or("-"),
+        );
+    }
+    println!(
+        "{} {}",
+        orders.len(),
+        if all {
+            "sales orders"
+        } else {
+            "open sales orders"
+        }
+    );
+    Ok(())
+}
+
+fn money_text(money: ledger_core::Money) -> String {
+    let minor = money.minor();
+    let sign = if minor < 0 { "-" } else { "" };
+    format!("{sign}{}.{:02}", (minor / 100).abs(), (minor % 100).abs())
+}
+
 // -- slice ------------------------------------------------------------------
 
 /// `HANDOFF.md` §2.6, D31: record a small, referentially closed slice of the
@@ -1462,10 +1617,19 @@ fn run_slice(
         }
     }
     println!("seed contacts    : {}", report.seed_contacts.len());
-    println!("pruned links     : {} (to deposits outside the slice)", report.pruned_links);
-    println!("unresolvable refs: {} (targets the replica does not hold)", report.unresolvable_refs);
+    println!(
+        "pruned links     : {} (to deposits outside the slice)",
+        report.pruned_links
+    );
+    println!(
+        "unresolvable refs: {} (targets the replica does not hold)",
+        report.unresolvable_refs
+    );
     println!("deny-list names  : {}", report.deny_names.len());
-    println!("recorded to      : {} ({entries} manifest entries)", dir.display());
+    println!(
+        "recorded to      : {} ({entries} manifest entries)",
+        dir.display()
+    );
     println!();
     println!("This is real data. Scrub it before anything leaves .local/ — see");
     println!("tools/make-real-fixture.sh and HANDOFF.md §2.6.");
@@ -1492,9 +1656,14 @@ fn run_report(
     config: Option<&Path>,
 ) -> Result<(), CommandError> {
     match (live, replay, record) {
-        (true, None, None) => {
-            report_with_client(build_http_client(config, realm)?, realm, name, as_of, start, out)
-        }
+        (true, None, None) => report_with_client(
+            build_http_client(config, realm)?,
+            realm,
+            name,
+            as_of,
+            start,
+            out,
+        ),
         (true, None, Some(dir)) => report_with_client(
             RecordingQbo::new(build_http_client(config, realm)?, dir),
             realm,
@@ -1621,9 +1790,8 @@ fn snapshots_with_client<C: QboClient>(
     to_year: i32,
     dir: &Path,
 ) -> Result<(), CommandError> {
-    let written =
-        reports::write_year_end_snapshots(&mut client, realm, from_year..=to_year, dir)
-            .map_err(runtime)?;
+    let written = reports::write_year_end_snapshots(&mut client, realm, from_year..=to_year, dir)
+        .map_err(runtime)?;
     for path in &written {
         println!("wrote {}", path.display());
     }
@@ -2500,7 +2668,10 @@ mod tests {
             "--out",
             "tb.csv",
         ];
-        assert!(parse(&args(&base)).is_err(), "neither given must be refused");
+        assert!(
+            parse(&args(&base)).is_err(),
+            "neither given must be refused"
+        );
 
         let mut both = base.to_vec();
         both.extend(["--live", "--replay", "fx"]);

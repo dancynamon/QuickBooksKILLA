@@ -925,8 +925,10 @@ mod tests {
             "list_contacts",
             "list_items",
             "open_documents",
+            "open_sales_orders",
             "aging",
             "get_document",
+            "open_sales_orders",
             // Write PDFs to disk, never to the book.
             "render_document",
             "render_statement",
@@ -937,7 +939,7 @@ mod tests {
             .filter(|name| !reads.contains(&name.as_str()))
             .collect();
         // If a tool is added, it must be classified here deliberately.
-        assert_eq!(writes.len(), 15, "{writes:?}");
+        assert_eq!(writes.len(), 16, "{writes:?}");
 
         let before = std::fs::read(pack.dir.join(SNAPSHOT_FILE)).unwrap();
         let mut server = mcp::new_server(&snapshot, COMPANY.to_string());
