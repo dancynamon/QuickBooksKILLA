@@ -934,7 +934,7 @@ mod tests {
             .filter(|name| !reads.contains(&name.as_str()))
             .collect();
         // If a tool is added, it must be classified here deliberately.
-        assert_eq!(writes.len(), 14, "{writes:?}");
+        assert_eq!(writes.len(), 15, "{writes:?}");
 
         let before = std::fs::read(pack.dir.join(SNAPSHOT_FILE)).unwrap();
         let mut server = mcp::new_server(&snapshot, COMPANY.to_string());
