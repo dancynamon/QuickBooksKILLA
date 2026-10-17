@@ -433,6 +433,20 @@ QBO's aging with these.
 { "name": "aging", "arguments": { "book": "receivable", "as_of": "2026-10-15" } }
 ```
 
+### `get_document`
+
+The newest saved version of one document, as an editor needs it back: every
+field a person typed or the book filled (`kind`, `number`, `txn_date`,
+`due_date`, `contact`, `header_class`, `lines`, `tax`, `deposit_to`,
+`pay_from`, `applications`, `unapplied`, `is_voided`, `memo`, `source_ref`),
+money as two-place strings, plus `version` (how many versions are saved) and
+`total`. The desktop app opens a document from Receivables/Payables into the
+entry form with this, then sends it back through `update_document`.
+
+```json
+{ "name": "get_document", "arguments": { "document_id": "019a…" } }
+```
+
 ## Write tools
 
 ### `save_and_post_document`
@@ -483,6 +497,96 @@ item must exist. A document the posting rules refuse leaves nothing saved.
 
 Returns `{ document_id, version, number, due_date, total, tax, entry_id,
 entry, locked_through }`.
+
+### `update_document`
+
+Edits a saved document. A correction is a reversal, never an overwrite
+(`LEDGER-DESIGN.md` §4/§6): `document` is what `create_document` takes, with
+the saved `document_id`; it is checked and filled the same way and saved as
+the next version in `document_versions` (every earlier version stays). When
+what it posts changed, the old entry is reversed — dated as the entry it
+reverses, so nothing is left at the old figure — and the new entry posted;
+when it did not (a memo or due-date edit), the entry stands untouched. The
+reversal, the version and the new entry commit as one unit
+(`Ledger::atomically`, a SQLite savepoint): a refusal part way leaves the
+book exactly as it was.
+
+The number is kept: leave it out, or send the one it has. Refused, with
+nothing changed:
+
+- a voided document (it stays voided), or an edit that sets `is_voided`
+  (use `void_document`);
+- a change of `kind`, or of contact type (customer to vendor or back) —
+  another customer is fine;
+- renumbering a document the book numbers (a bill's vendor number may
+  change);
+- a total below what payments and credits already apply against it, or an
+  application beyond what is left on its target;
+- the old date or the new date on or before `locked_through`.
+
+```json
+{
+  "name": "update_document",
+  "arguments": {
+    "actor": "dan",
+    "document": {
+      "document_id": "019a…",
+      "kind": "Invoice",
+      "txn_date": "2026-09-13",
+      "contact": { "kind": "Customer", "id": "cust-blue-harbor" },
+      "lines": [
+        { "kind": "Item", "item_id": "rt-50-red", "qty": "12", "amount": "239.40",
+          "is_taxable": true }
+      ]
+    }
+  }
+}
+```
+
+Returns `{ document_id, version, number, due_date, total, tax, is_voided,
+reversal_entry_ids, entry_id, entry, locked_through }` — `entry_id` is `null`
+when nothing new posted.
+
+### `void_document`
+
+Voids a saved document: it posts a reversal rather than vanishing (§6). A
+new version is saved with `is_voided` true and `Voided: <reason>` leading its
+memo, and every live entry is reversed as of its own date with
+`VOID: <memo> (<reason>)` on the reversal. A voided invoice or bill drops off
+`open_documents` and `aging`; a voided payment or credit memo releases what
+it applied. `reason` is required. Refused: a document already voided; an
+invoice or bill something is still applied against (void or edit that payment
+or credit first); a closed period. Returns the same fields as
+`update_document`.
+
+```json
+{
+  "name": "void_document",
+  "arguments": { "document_id": "019a…", "reason": "entered twice", "actor": "dan" }
+}
+```
+
+### `apply_credit`
+
+Applies an open credit memo to an open invoice of the same customer (or an
+open vendor credit to an open bill of the same vendor). The application goes
+on the credit, as a new version of it, and `open_documents` and `aging` net
+it on both sides. A credit posts the same whatever it is applied to, so no
+entry moves and AR still ties to 1200. `amount` (decimal string or minor
+units) defaults to the smaller of the two open balances and may not exceed
+either. Refused on a voided document, a different contact, the wrong kind of
+target, and a credit dated on or before `locked_through` (applying it would
+change a closed period's aging). Returns the `update_document` fields plus
+`target_document_id` and `applied` (how much of the credit now sits on that
+target).
+
+```json
+{
+  "name": "apply_credit",
+  "arguments": { "credit_id": "019b…", "target_document_id": "019a…",
+                 "amount": "25.00", "actor": "dan" }
+}
+```
 
 ### `reverse_entry`
 

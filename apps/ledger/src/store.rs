@@ -748,6 +748,52 @@ pub struct BankLineRow {
     pub matched_at: Option<String>,
 }
 
+/// One write unit on the ledger's connection, as a SQLite savepoint rather
+/// than `BEGIN`: outside any transaction it starts one, and inside another
+/// [`WriteTx`] it nests, so [`Ledger::atomically`] can wrap several writes
+/// (reverse an entry, save a version, post the new entry) that each open
+/// their own. Dropped without [`WriteTx::commit`], it rolls back to where it
+/// began and leaves an enclosing unit untouched.
+pub(crate) struct WriteTx<'a> {
+    conn: &'a Connection,
+    finished: bool,
+}
+
+impl<'a> WriteTx<'a> {
+    fn begin(conn: &'a Connection) -> rusqlite::Result<Self> {
+        conn.execute_batch("SAVEPOINT ledger_write")?;
+        Ok(WriteTx {
+            conn,
+            finished: false,
+        })
+    }
+
+    pub(crate) fn commit(mut self) -> rusqlite::Result<()> {
+        self.finished = true;
+        self.conn.execute_batch("RELEASE ledger_write")
+    }
+}
+
+impl std::ops::Deref for WriteTx<'_> {
+    type Target = Connection;
+
+    fn deref(&self) -> &Connection {
+        self.conn
+    }
+}
+
+impl Drop for WriteTx<'_> {
+    fn drop(&mut self) {
+        if !self.finished {
+            // Nothing useful to do with a failure here: the connection is
+            // already in error, and the caller is returning its own.
+            let _ = self
+                .conn
+                .execute_batch("ROLLBACK TO ledger_write; RELEASE ledger_write");
+        }
+    }
+}
+
 /// The ledger. Owns the connection; nothing outside this module can reach it.
 pub struct Ledger {
     connection: Connection,
@@ -833,6 +879,26 @@ impl Ledger {
         )?)
     }
 
+    /// A nesting-aware write unit; see [`WriteTx`].
+    pub(crate) fn write_tx(&self) -> rusqlite::Result<WriteTx<'_>> {
+        WriteTx::begin(&self.connection)
+    }
+
+    /// Runs `f` as one all-or-nothing unit: every write it makes through this
+    /// ledger commits together, or none does. `LEDGER-DESIGN.md` §4: an edit
+    /// or a void reverses the old entry, saves the new version and posts the
+    /// new entry, and a failure part way (a closed period, a missing class)
+    /// must leave the book exactly as it was.
+    pub fn atomically<T, E>(&self, f: impl FnOnce() -> Result<T, E>) -> Result<T, E>
+    where
+        E: From<LedgerError>,
+    {
+        let tx = self.write_tx().map_err(LedgerError::from)?;
+        let value = f()?;
+        tx.commit().map_err(LedgerError::from)?;
+        Ok(value)
+    }
+
     /// Read access for [`crate::report`], which is read-only by construction
     /// and queries this same connection directly rather than duplicating
     /// every accessor here.
@@ -869,7 +935,7 @@ impl Ledger {
         realm_id: Option<&str>,
         now: DateTime<Utc>,
     ) -> Result<(), LedgerError> {
-        let tx = self.connection.unchecked_transaction()?;
+        let tx = self.write_tx()?;
 
         tx.execute(
             "INSERT INTO companies (company_id, display_name, realm_id, created_at)
@@ -1053,7 +1119,7 @@ impl Ledger {
         now: DateTime<Utc>,
     ) -> Result<(), LedgerError> {
         let snapshot_id = self.snapshot_trial_balance(company, period_end, now)?;
-        let tx = self.connection.unchecked_transaction()?;
+        let tx = self.write_tx()?;
 
         let moved_from = locked_through_in(&tx, company)?;
 
@@ -1094,7 +1160,7 @@ impl Ledger {
         note: &str,
         now: DateTime<Utc>,
     ) -> Result<(), LedgerError> {
-        let tx = self.connection.unchecked_transaction()?;
+        let tx = self.write_tx()?;
 
         let was_closed: i64 = tx.query_row(
             "SELECT COUNT(*) FROM periods
@@ -1177,7 +1243,7 @@ impl Ledger {
         command: CommandMeta,
         now: DateTime<Utc>,
     ) -> Result<DocumentVersionId, LedgerError> {
-        let tx = self.connection.unchecked_transaction()?;
+        let tx = self.write_tx()?;
 
         let previous_version: i64 = tx.query_row(
             "SELECT COALESCE(MAX(version), 0) FROM document_versions
@@ -1331,7 +1397,7 @@ impl Ledger {
             return Err(LedgerError::Unbalanced);
         }
 
-        let tx = self.connection.unchecked_transaction()?;
+        let tx = self.write_tx()?;
 
         for line in &entry.lines {
             check_class_rule(&tx, company, line)?;
