@@ -41,3 +41,7 @@ path = "src/main.rs"
 [[bin]]
 name = "ledger-mcp"
 path = "src/bin/ledger-mcp.rs"
+
+[[bin]]
+name = "ledger-aging"
+path = "src/bin/ledger-aging.rs"

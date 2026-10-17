@@ -184,7 +184,7 @@ for d in 2026-07-31 2026-08-31 2026-09-30 2026-10-16; do
   ledger nightly --db "$S/ledger.db" --company aquamentor \
       --replica "$S/replica-d37.db" --realm "$REALM" \
       --qbo-csv "$S/qbo/tb-$d.csv" --out "$S/nightly" --from 2026-07-01 --as-of $d
-  target/release/examples/aging_csv --db "$S/ledger.db" --company aquamentor \
+  target/release/ledger-aging --db "$S/ledger.db" --company aquamentor \
       --as-of $d --out "$S/ledger-aging"
 done
 ```
