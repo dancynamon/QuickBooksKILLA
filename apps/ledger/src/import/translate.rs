@@ -421,7 +421,21 @@ pub fn translate(
         ctx,
         &mut warnings,
     );
-    let unapplied = json_money(raw, "UnappliedAmt", &qbo_id)?.unwrap_or(Money::ZERO);
+    let unapplied = match json_money(raw, "UnappliedAmt", &qbo_id)? {
+        Some(unapplied) => unapplied,
+        // A QBO BillPayment states no unapplied amount: what it paid beyond
+        // its applications (a vendor prepayment, or the cash side of a
+        // payment that also used a credit) is its total less them.
+        None if doc_kind == DocKind::BillPayment => {
+            match json_money(raw, "TotalAmt", &qbo_id)? {
+                Some(total) => total.checked_sub(Money::checked_sum(
+                    applications.iter().map(|application| application.amount),
+                )?)?,
+                None => Money::ZERO,
+            }
+        }
+        None => Money::ZERO,
+    };
 
     // D37: the three QBO entities with no line form of their own.
     match entity.entity_type {
@@ -718,9 +732,10 @@ fn resolve_line_class(
 
 fn deposit_line_entity(detail: &Value) -> Option<ContactRef> {
     let id = json_reference(detail, "Entity")?;
-    let kind = match json_nested_text(detail, "Entity", "type")?.as_str() {
-        "Customer" => ContactKind::Customer,
-        "Vendor" => ContactKind::Vendor,
+    // QBO spells it "Customer" in some payloads and "CUSTOMER" in others.
+    let kind = match json_nested_text(detail, "Entity", "type")?.to_ascii_lowercase().as_str() {
+        "customer" => ContactKind::Customer,
+        "vendor" => ContactKind::Vendor,
         _ => return None,
     };
     Some(ContactRef { kind, id })

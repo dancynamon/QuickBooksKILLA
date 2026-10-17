@@ -1125,3 +1125,137 @@ fn without_qbo_aging_and_no_later_activity_the_balance_fields_are_the_reference(
         .iter()
         .any(|c| c.name.contains("Balance fields") && c.passed));
 }
+
+// ---------------------------------------------------------------------------
+// Shapes the first live rehearsal (30 Sep 2026, docs/CUTOVER.md) turned up
+// ---------------------------------------------------------------------------
+
+/// On top of the base replica: a deposit crediting AR whose entity type QBO
+/// spells `CUSTOMER`, a payment left unapplied and then refunded by check
+/// (the check's line debits AR), a card payment to a vendor posted straight
+/// to AP, and a bill payment with no bill behind it. QBO states no unapplied
+/// amount on a bill payment, so the last two are vendor prepayments the
+/// import has to work out.
+fn replica_with_rehearsal_shapes() -> Store {
+    let store = replica(false);
+    seed(
+        &store,
+        EntityType::Deposit,
+        "D1",
+        json!({ "Id": "D1", "TxnDate": "2026-11-10", "TotalAmt": 60,
+                "DepositToAccountRef": { "value": "BANK1" },
+                "Line": [{ "Id": "1", "Amount": 60, "DetailType": "DepositLineDetail",
+                           "DepositLineDetail": { "AccountRef": { "value": "AR1" },
+                             "Entity": { "value": "32", "name": "Lakeside YMCA", "type": "CUSTOMER" } } }] }),
+    );
+    payment(&store, "P6", "31", "2026-12-01", 40.0, 40.0, &[]);
+    seed(
+        &store,
+        EntityType::Purchase,
+        "K1",
+        json!({ "Id": "K1", "TxnDate": "2026-12-05", "PaymentType": "Check", "TotalAmt": 40,
+                "AccountRef": { "value": "BANK1" }, "EntityRef": { "value": "31", "type": "Customer" },
+                "Line": [{ "Id": "1", "Amount": 40, "DetailType": "AccountBasedExpenseLineDetail",
+                           "AccountBasedExpenseLineDetail": { "AccountRef": { "value": "AR1" },
+                             "CustomerRef": { "value": "31" } } }] }),
+    );
+    seed(
+        &store,
+        EntityType::Purchase,
+        "K2",
+        json!({ "Id": "K2", "TxnDate": "2026-12-10", "PaymentType": "CreditCard", "Credit": false,
+                "TotalAmt": 100, "AccountRef": { "value": "BANK1" },
+                "EntityRef": { "value": "77", "type": "Vendor" },
+                "Line": [{ "Id": "1", "Amount": 100, "DetailType": "AccountBasedExpenseLineDetail",
+                           "AccountBasedExpenseLineDetail": { "AccountRef": { "value": "AP1" } } }] }),
+    );
+    seed(
+        &store,
+        EntityType::BillPayment,
+        "BP2",
+        json!({ "Id": "BP2", "TxnDate": "2026-12-12", "VendorRef": { "value": "77" }, "TotalAmt": 30,
+                "PayType": "Check", "CheckPayment": { "BankAccountRef": { "value": "BANK1" } },
+                "Line": [] }),
+    );
+    store
+}
+
+#[test]
+fn checks_deposits_and_bill_payments_that_move_ar_or_ap_are_open_items_too() {
+    let store = replica_with_rehearsal_shapes();
+    // The bank pays out 40 + 100 + 30 and takes in 60; AR loses the 60
+    // deposit (the refund and the payment it refunds cancel); AP is relieved
+    // by the 130 of prepayments.
+    let mut tb = qbo_tb(false);
+    for row in &mut tb {
+        let delta = match row.qbo_account_id.as_str() {
+            "BANK1" => -11_000,
+            "UDF1" => 4_000,
+            "AR1" => -6_000,
+            "AP1" => 13_000,
+            _ => 0,
+        };
+        row.balance = usd(row.balance.minor() + delta);
+    }
+    let mut ar = qbo_ar(false);
+    ar[1].days_31_60 = usd(-6_000);
+    ar[1].total = usd(ar[1].total.minor() - 6_000);
+    let ap = vec![aging_row(
+        "77",
+        "Foam Supply Co",
+        [60_000, -13_000, 0, 0, 0],
+    )];
+    let opts = SlimOptions {
+        as_of: as_of(),
+        qbo_tb: tb,
+        qbo_ar: Some(ar),
+        qbo_ap: Some(ap),
+    };
+
+    let ledger = book();
+    let report = run(&ledger, &store, &opts);
+    assert!(report.passed(), "{}", report.render_text(CO));
+    assert!(
+        !report
+            .warnings
+            .iter()
+            .any(|w| w.contains("names no customer")),
+        "{:?}",
+        report.warnings
+    );
+
+    let ar_items = books::open_documents(&ledger, CO, Book::Receivable, as_of()).unwrap();
+    let open = |items: &[books::OpenDocument], id: &str| {
+        items
+            .iter()
+            .find(|d| d.document_id == id)
+            .map(|d| d.open.minor())
+    };
+    assert_eq!(open(&ar_items, "qbo:Deposit:D1"), Some(-6_000));
+    assert_eq!(open(&ar_items, "qbo:Purchase:K1"), Some(4_000));
+    let ap_items = books::open_documents(&ledger, CO, Book::Payable, as_of()).unwrap();
+    assert_eq!(open(&ap_items, "qbo:Purchase:K2"), Some(-10_000));
+    assert_eq!(open(&ap_items, "qbo:BillPayment:BP2"), Some(-3_000));
+    assert_eq!(report.unapplied_reclass, usd(11_500));
+}
+
+#[test]
+fn the_translation_works_out_what_a_bill_payment_left_unapplied() {
+    let store = replica_with_rehearsal_shapes();
+    let mut unapplied = std::collections::HashMap::new();
+    ledger::import::run(
+        &store,
+        &realm(),
+        &ledger::types::CompanyId(CO.into()),
+        &ImportOptions::with_d28_fallback(None, None),
+        &mut |t| {
+            if t.document.kind == DocKind::BillPayment {
+                unapplied.insert(t.document.document_id.clone(), t.document.unapplied.minor());
+            }
+            Ok(())
+        },
+    )
+    .unwrap();
+    assert_eq!(unapplied["qbo:BillPayment:BP2"], 3_000);
+    assert_eq!(unapplied["qbo:BillPayment:BP1"], 0);
+}
