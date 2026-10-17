@@ -720,3 +720,56 @@ the switch possible.
 *Rejected: drop history entirely.* The replica already answers every
 historical lookup, so nothing is lost by not replaying it, and dropping the
 replica would lose it.
+
+### D28 addendum — how the open items and the opening entry share AR and AP
+
+17 Oct 2026, the slim import as built (`ledger import-slim`,
+`apps/ledger/src/slim.rs`, runbook `docs/CUTOVER.md`). Numbered as an
+addendum because D29 and D30 are taken on other branches.
+
+**The opening entry carries the control accounts; the open documents carry
+the detail and never post.** The entry takes 1200 and 2000 straight from
+QBO's trial balance. Each document open on the as-of date is saved (oplog
+kind `import_slim_open_item`) and never posted, so its AR or AP is counted
+once, in the opening entry. `books::open_documents` reads saved documents and
+their applications, not entries, so it sees them like any other: the aging
+is the sum of the open items, and the import checks that this equals 1200
+and 2000 to the cent, then that each customer's and vendor's buckets equal
+QBO's aging report. After cutover a payment applied to one of them relieves
+it in the aging and credits 1200 in the GL, so the tie holds.
+
+Three things make that true:
+
+1. **Unapplied customer payments go to 2300.** QBO nets them into AR; the
+   ledger's posting rule parks them in 2300 (W8). The opening entry moves
+   their total from 1200 to 2300, so 1200 equals the open invoices less open
+   credits, and §7's AR group (1200+2300) still equals QBO's AR. The aging
+   check adds them back per customer to compare with QBO.
+2. **Open on the date, from the documents.** An invoice is open for its total
+   less every application dated on or before the as-of date, the rule
+   `books::open_items` (now pure, shared with the ledger's own aging) applies
+   everywhere. QBO's `Balance` field is today's balance, so a re-run after
+   January payments would otherwise drop invoices that were open on
+   31 December. A partly paid document is saved as one line at its open
+   balance; a fully open one keeps its lines.
+3. **Imported applications target imported ids.** Translated payments named
+   their targets by bare QBO id (`1045`) while imported documents are keyed
+   `qbo:Invoice:1045`, so the Q1 replay's payments would never have relieved
+   anything. `translate::qbo_document_id` now builds both. In passing,
+   `open_items` now reads a payment's application to a credit memo (recorded
+   negative) as using the credit up, counts a bill payment's unapplied
+   remainder as a negative AP item (`post` debits it to 2000), and ignores
+   links to estimates and purchase orders.
+
+**Guard.** Posting a new version of a carried document would book its AR or
+AP a second time, so `ledger import` rejects it and `ledger-mcp` refuses it,
+both naming the reason (`books::carried_by_opening`).
+
+**Not imported: QBO sales orders.** The replica does not mirror them.
+
+*Rejected: post the open documents and leave AR/AP out of the opening entry.*
+An invoice posts income; posting 2026 invoices again would double FY2026
+income, and reversing that would need a second plug per document.
+*Rejected: unapplied payments as negative AR items.* It would make the
+imported book disagree with the ledger's own rule for every payment entered
+after cutover.

@@ -576,6 +576,14 @@ fourteen years of known answers.
 
 ### Full history from where, opening balances before
 
+> **Superseded for the cutover path (D28, D29).** The cutover book is built by
+> the slim import: masters, one opening entry as of 31 December 2026 and the
+> documents open on that date, with Q1 2027 replayed under the full posting
+> gate. `docs/CUTOVER.md` is the runbook; the D28 addendum is the design. The
+> full-history replay and the boundary walk below stay in the code but leave
+> the cutover path.
+
+
 **Recommended: full history from 1 January of the earliest year where the QBO
 trial balance and the replayed one agree, and a single opening balance entry as
 of 31 December of the year before that.**

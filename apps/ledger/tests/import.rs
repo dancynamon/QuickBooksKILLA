@@ -423,7 +423,7 @@ fn the_import_translates_every_document_shape_and_reports_the_precision_failure(
     assert_eq!(payment.document.applications.len(), 2);
     assert_eq!(
         payment.document.applications[0].target_document_id,
-        "INV-418"
+        "qbo:Invoice:INV-418"
     );
     assert_eq!(
         payment.document.applications[0].target_kind,
@@ -435,7 +435,7 @@ fn the_import_translates_every_document_shape_and_reports_the_precision_failure(
     );
     assert_eq!(
         payment.document.applications[1].target_document_id,
-        "INV-999"
+        "qbo:Invoice:INV-999"
     );
     assert_eq!(
         payment.document.applications[1].amount,

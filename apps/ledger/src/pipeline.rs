@@ -265,7 +265,7 @@ pub fn import_replica(
 /// written through `add_account`; existing rows are left alone. Returns the
 /// count created and `"<number> <name>"` for every account that
 /// `needs_mapping`, present or new.
-fn materialize_accounts(
+pub(crate) fn materialize_accounts(
     ledger: &Ledger,
     company: &str,
     mapping: &AccountMapping,
@@ -330,7 +330,7 @@ fn materialize_accounts(
 /// An import fallback class (D28), added to the company's class list if
 /// absent, named from the chart when it is the standard one. Returns whether
 /// it was added.
-fn ensure_class(ledger: &Ledger, company: &str, id: &str) -> Result<bool, PipelineError> {
+pub(crate) fn ensure_class(ledger: &Ledger, company: &str, id: &str) -> Result<bool, PipelineError> {
     let name = if id == chart::IMPORT_FALLBACK_CLASS.0 {
         chart::IMPORT_FALLBACK_CLASS.1
     } else {
@@ -350,7 +350,7 @@ fn ensure_class(ledger: &Ledger, company: &str, id: &str) -> Result<bool, Pipeli
 /// As [`materialize_accounts`], for classes: every mapped class not already
 /// present is written through `add_class`; existing rows (the seed six, or a
 /// class a previous run already added) are left alone.
-fn materialize_classes(
+pub(crate) fn materialize_classes(
     ledger: &Ledger,
     company: &str,
     mapping: &ClassMapping,
@@ -450,6 +450,28 @@ fn process_document(
 ) {
     let doc = &translated.document;
     let document_id = doc.document_id.clone();
+
+    // D28: an open item the slim cutover import brought across has its AR or
+    // AP in the opening entry. Posting a QBO edit of it would book it twice.
+    match crate::books::carried_by_opening(ledger, company, &document_id) {
+        Ok(false) => {}
+        Ok(true) => {
+            report.rejected.push(Rejected {
+                document_id,
+                reason: "carried by the slim import's opening entry (D28); \
+                         change it in the ledger, not by re-importing it"
+                    .to_string(),
+            });
+            return;
+        }
+        Err(err) => {
+            report.rejected.push(Rejected {
+                document_id,
+                reason: err.to_string(),
+            });
+            return;
+        }
+    }
 
     // Estimate and PurchaseOrder never post, so they never leave a posted
     // entry behind for the check below to key on. Compare the payload
@@ -564,7 +586,7 @@ fn process_document(
 /// never matters) the same document already saved as the latest version of
 /// `document_id`. `false` on any read or parse failure — an ambiguous
 /// comparison always takes the safer "something changed" path.
-fn document_unchanged(
+pub(crate) fn document_unchanged(
     ledger: &Ledger,
     company: &str,
     document_id: &str,
@@ -608,7 +630,7 @@ pub struct OpeningReport {
 /// opening balance needs no replica and no realm: the only accounts a QBO
 /// trial balance row can possibly land on are the ones already in this
 /// company's chart.
-fn account_mapping_from_ledger(
+pub(crate) fn account_mapping_from_ledger(
     ledger: &Ledger,
     company: &str,
 ) -> Result<AccountMapping, PipelineError> {
@@ -651,7 +673,24 @@ pub fn apply_opening_balance(
 ) -> Result<OpeningReport, PipelineError> {
     let company_id = CompanyId(company.to_string());
     let mapping = account_mapping_from_ledger(ledger, company)?;
-    let (doc, mut entry) = import::opening_balance_entry(&company_id, as_of, qbo_tb, &mapping)?;
+    let (doc, entry) = import::opening_balance_entry(&company_id, as_of, qbo_tb, &mapping)?;
+    apply_flagged_entry(ledger, company, &doc, entry, "opening_balance", now)
+}
+
+/// Save `doc` and post `entry` (built from it, flagged), the way
+/// [`apply_opening_balance`] does: skipped when a posted version with the
+/// same payload exists, otherwise every posted entry for the document is
+/// reversed as of the document's date and the new version posted in its
+/// place. Shared with the slim cutover import (`crate::slim`), whose opening
+/// entry is this one plus its unapplied-payment reclass.
+pub(crate) fn apply_flagged_entry(
+    ledger: &Ledger,
+    company: &str,
+    doc: &LedgerDocument,
+    mut entry: crate::types::JournalEntry,
+    kind: &str,
+    now: DateTime<Utc>,
+) -> Result<OpeningReport, PipelineError> {
     if entry.lines.iter().any(|line| line.class.is_some()) {
         ensure_class(ledger, company, chart::IMPORT_FALLBACK_CLASS.0)?;
     }
@@ -663,7 +702,7 @@ pub fn apply_opening_balance(
         .filter(|(_, _, posted)| *posted)
         .collect();
 
-    if !posted_existing.is_empty() && document_unchanged(ledger, company, &document_id, &doc) {
+    if !posted_existing.is_empty() && document_unchanged(ledger, company, &document_id, doc) {
         return Ok(OpeningReport {
             document_id,
             skipped_unchanged: true,
@@ -673,15 +712,15 @@ pub fn apply_opening_balance(
 
     let replaced = !posted_existing.is_empty();
     for (entry_id, _entry, _posted) in &posted_existing {
-        ledger.reverse_entry(company, entry_id, as_of, now)?;
+        ledger.reverse_entry(company, entry_id, doc.txn_date, now)?;
     }
 
     let version = ledger.save_document(
         company,
-        &doc,
+        doc,
         CommandMeta {
-            actor_id: "opening_balance".to_string(),
-            kind: "opening_balance".to_string(),
+            actor_id: kind.to_string(),
+            kind: kind.to_string(),
             hlc: now.to_rfc3339(),
         },
         now,
