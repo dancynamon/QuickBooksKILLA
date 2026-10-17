@@ -13,6 +13,12 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 uuid = { workspace = true }
+ureq = { version = "2.12", optional = true }
+
+[features]
+# The real HTTP transport. Off by default so `cargo test` has no way to reach
+# Intuit and compiles no TLS stack.
+live = ["dep:ureq"]
 
 [dev-dependencies]
 proptest = { workspace = true }

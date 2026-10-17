@@ -15,12 +15,16 @@
 //! - [`ratelimit`]— §4.4: per-realm token buckets
 //! - [`outbox`]   — §6: the write queue and its state machine
 //! - [`client`]   — the QBO API boundary, plus an in-memory double
+//! - [`http`]     — the HTTP implementation of that boundary
+//! - [`oauth`]    — §5: authorisation, refresh, rotation against Intuit
 //! - [`worker`]   — §6.3-6.5: draining the outbox, dependency resolution
 
 pub mod auth;
 pub mod client;
 pub mod domain;
 pub mod driver;
+pub mod http;
+pub mod oauth;
 pub mod outbox;
 pub mod project;
 pub mod ratelimit;

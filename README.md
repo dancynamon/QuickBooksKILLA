@@ -31,9 +31,13 @@ than engineering judgement.
 ## Build
 
 ```sh
-cargo test          # 128 tests, all offline
+cargo test          # 217 tests, all offline
 cargo clippy --all-targets
 cargo run --bin qbo-local
+
+# Live commands (need Intuit credentials; see HANDOFF.md §1.1)
+cargo run --features live --bin qbo-local -- authorize
+cargo run --features live --bin qbo-local -- sync --realm <id>
 ```
 
 The test suite never touches the network. That is a requirement rather than a
@@ -56,8 +60,13 @@ Built and tested:
 - The drain worker: per-entity ordering, dependency resolution, local-id
   rewriting, query-before-create adoption, convergence property test
 
-Not built yet: the HTTP transport behind the client trait, the OAuth flow, the
-reconciliation sweep, the Tauri shell, the React UI.
+- HTTP client behind the trait: request building, Intuit fault mapping,
+  one reactive token refresh on 401; real transport behind the `live` feature
+- OAuth: authorize URL, loopback callback with state check, code exchange,
+  refresh with generation fallback and persist-before-use
+
+Not built yet: the keychain token backend, the reconciliation sweep, the Tauri
+shell, the React UI.
 
 The first live authentication run should happen wherever the OAuth credentials
 already live, rather than moving them onto another machine.

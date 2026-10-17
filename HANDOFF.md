@@ -43,7 +43,7 @@ backend in §2.1. Never in the repo, never in a dotfile Dropbox syncs.
 
 ## 1. Where the work stands
 
-`cargo test` — 128 tests, all offline, all green. `cargo clippy --all-targets` —
+`cargo test` — 217 tests, all offline, all green. `cargo clippy --all-targets` —
 clean.
 
 Built and tested:
@@ -59,12 +59,32 @@ Built and tested:
 | `outbox` | State machine with enforced transitions |
 | `client` | The QBO trait boundary + `MockQbo` double |
 | `worker` | Drain loop, dependency resolution, local-id rewriting |
+| `http` | `HttpQboClient`: request building, fault-code mapping, 401 → one refresh + resend; `live::UreqTransport` behind `--features live` |
+| `oauth` | Authorize URL, loopback callback (state-checked), code exchange, `TokenManager` (persist-before-use, generation fallback on `invalid_grant` only, JSONL rotation log) |
+| `driver` | Initial sweep, CDC poll, truncation backfill |
 
-**Not built:** the HTTP transport behind `QboClient`, the OAuth authorisation
-flow, the keychain token backend, the initial-sync driver, the CDC poll loop,
-the reconciliation sweep, the Tauri shell, the React UI.
+**Not built:** the keychain token backend (§2.1), the reconciliation sweep, the
+Tauri shell, the React UI. M0 needs only the first; tokens currently land in
+`FileTokenStore` under the app home, mode 0700, never inside Dropbox.
 
-M0 needs the first five of those. The last two are M1.
+### 1.1 Running M0 on the Mac
+
+```sh
+export QBO_CLIENT_ID=...  QBO_CLIENT_SECRET=...      # from the Intuit app; never in a file in the repo
+cargo run --release --features live --bin qbo-local -- authorize            # redirect URI http://localhost:8765/callback must be registered
+cargo run --release --features live --bin qbo-local -- sync --realm <id>    # initial sweep; prints per-type counts and wall clock
+cargo run --release --features live --bin qbo-local -- sync --realm <id> --watch 300   # CDC poll loop
+```
+
+App home is `~/Library/Application Support/qbo-local` (override with
+`QBO_LOCAL_HOME`; any path containing "dropbox" is refused). It holds the token
+file, `rotation-log.jsonl` and `replica-<realm>.db`.
+
+**Unverified mappings in `http.rs`, check against the first live run:** fault
+codes 5010 (stale), 610 (not found), 3200 (auth), 003001 (throttle);
+`ORDERBY MetaData.LastUpdatedTime` tie ordering under `STARTPOSITION` paging;
+CDC response nesting `CDCResponse[].QueryResponse[].<Entity>[]`. Each is one
+constant or one function; the tests pin today's assumption.
 
 ---
 
@@ -92,7 +112,7 @@ dies between Intuit invalidating the old refresh token and the new one reaching
 disk, and that case is the difference between a hiccup and re-authorising by
 hand at 3am.
 
-### 2.2 OAuth authorisation flow
+### 2.2 OAuth authorisation flow — BUILT (`oauth.rs`)
 
 One-time, per realm. Local loopback redirect. Store the result via 2.1.
 
@@ -104,7 +124,7 @@ Every rotation appends an `auth::RotationLogEntry` to a JSONL file. Log the
 fingerprint, never the token — `TokenSet::fingerprint()` already does the right
 thing.
 
-### 2.3 `HttpQboClient`
+### 2.3 `HttpQboClient` — BUILT (`http.rs`)
 
 Implement `client::QboClient`. The trait is the seam — nothing above it changes.
 
@@ -141,7 +161,7 @@ Mapping obligations:
 mock disagree about any of the above, the mock is what the worker's 20-odd
 tests were written against — reconcile deliberately, don't just change the mock.
 
-### 2.4 Initial sync driver
+### 2.4 Initial sync driver — BUILT (`driver.rs`)
 
 Per realm, walk `EntityType::m0_scope()` — masters before documents, which the
 ordering in `EntityType::ALL` already guarantees and a test enforces.
@@ -155,7 +175,7 @@ Report actual row counts and wall-clock time. The brief is explicit that these
 are measured and reported, never asserted. Expect roughly nine thousand invoices
 and tens of thousands of documents in total, going back to 2012.
 
-### 2.5 CDC poll loop
+### 2.5 CDC poll loop — BUILT (`driver.rs`, `sync --watch`)
 
 15 seconds focused, 5 minutes idle, both configurable.
 

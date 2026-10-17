@@ -39,12 +39,24 @@ pub enum QboError {
     Network(String),
     #[error("not found")]
     NotFound,
+    /// Intuit refused the bearer token even after a refresh. Transient: the
+    /// write behind it is still valid, and rejecting a good invoice because
+    /// auth broke at 3am would be the wrong failure.
+    #[error("unauthorized: {0}")]
+    Unauthorized(String),
+    /// A response arrived but could not be understood — not JSON, or an entity
+    /// without an `Id`. Not transient: the same bytes will not parse next time.
+    #[error("unreadable response: {0}")]
+    Protocol(String),
 }
 
 impl QboError {
     /// Whether retrying unchanged could plausibly succeed.
     pub fn is_transient(&self) -> bool {
-        matches!(self, QboError::RateLimited | QboError::Network(_))
+        matches!(
+            self,
+            QboError::RateLimited | QboError::Network(_) | QboError::Unauthorized(_)
+        )
     }
 }
 
@@ -592,5 +604,7 @@ mod tests {
         assert!(!QboError::StaleSyncToken.is_transient());
         assert!(!QboError::Validation("bad".into()).is_transient());
         assert!(!QboError::NotFound.is_transient());
+        assert!(QboError::Unauthorized("refused".into()).is_transient());
+        assert!(!QboError::Protocol("garbled".into()).is_transient());
     }
 }
