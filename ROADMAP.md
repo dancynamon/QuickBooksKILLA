@@ -57,7 +57,7 @@ Everything **not** built needs credentials, Intuit's docs, or a UI toolchain:
 | Fixture recorder and scrubber (HANDOFF §2.6) | A | **built 13 Sep**; slice + amount scrubbing 17 Oct (D31); a synthetic set is committed, a real scrubbed slice needs one run of `tools/make-real-fixture.sh` and Dan's review |
 | Verify the four ⚠️ API facts (DESIGN §0, §12) | A, gates C | **done 28 Sep, D25**; RequestId Customer/Item scope only settles in a sandbox |
 | Read-only query API over `Store` | B | **built 11 Sep** |
-| UI shell and read screens | B | **UI built 13 Sep** in `apps/desktop` (every §B1 screen, 13 node tests, driven in headless Chromium); the Tauri shell compiles on the Mac |
+| UI shell and read screens | B | **UI built 13 Sep** in `apps/desktop` (every §B1 screen, 13 node tests, driven in headless Chromium); the Tauri shell builds and launches on the Mac (17 Oct: `tools/desktop.sh`, unsigned `.app` via `make app`) |
 | `LEDGER-DESIGN.md` | B | **drafted 11 Sep**; Dan's six gating items decided 12 Sep (D20, D21); Joel's sixteen open |
 | Ledger engine, import from replica | B' | **built 12 Sep**: store, posting rules, reports, importer, opening balances, boundary walk, `ledger` CLI; first real run waits on a live replica |
 | Write UI into own store, export via outbox | D | C |

@@ -12,7 +12,7 @@ apps/desktop/
   ui/            the whole frontend: static HTML/CSS/JS, no build step
   commands/      qbo-desktop-commands — the Tauri command's entire body,
                  in the workspace, builds and tests on this machine
-  src-tauri/     the Tauri v2 scaffold — NOT in the workspace (see below)
+  src-tauri/     the Tauri v2 shell — NOT in the workspace (see below)
   README.md      this file
 ```
 
@@ -269,39 +269,83 @@ screen — a customer, vendor, or item page is reached by search
 (`⌘K`) or by following a document's party link, matching
 `contact_detail`/`item_detail`'s own one-record-at-a-time shape.
 
-## What the Mac session still has to do
+## Building and running the app
 
-Everything in `src-tauri/` is scaffold, not working code — the Tauri
-toolchain and the system libraries it links against are not installed in
-this environment, so none of it has been compiled or run:
+The Tauri shell builds and launches on the Mac (macOS 26, Apple Silicon,
+Command Line Tools only — no full Xcode, no signing). One script does all of
+it; it puts the rustup toolchain and `~/.cargo/bin` on `PATH` itself:
 
-1. `cargo tauri dev` from `apps/desktop/src-tauri/` (needs the Tauri CLI
-   installed; `frontendDist` already points at `../ui`, and there is
-   deliberately no `devUrl` — the UI has no dev server, no bundler, and
-   under the shipped `tauri.conf.json`'s CSP (`connect-src 'none'`), no
-   network at all).
-2. Set `QBO_LOCAL_DB` to a real replica path, and `LEDGER_DB`/
-   `LEDGER_COMPANY` to a real ledger `.sqlite` path and a company id
-   (`"aquamentor"` or `"waterline"`), before running — `main.rs` panics
-   with a clear message if any of the three is unset, the same contract
-   `qbo-local-mcp` and `ledger-mcp` already have (`docs/MCP.md`). The
-   ledger is opened read-write (`Ledger::open`), not read-only like the
-   replica, because the write screens (Adjustments, Bank reconciliation,
-   Period close) have nowhere else to post to.
-3. Everything either command does — argument parsing, dispatch, error
-   shaping — is already written and tested in `apps/desktop/commands`
-   (`cargo test -p qbo-desktop-commands`). `src-tauri/src/main.rs`'s
-   `query` and `ledger_query` commands are each a few lines: take the
-   relevant lock, call `qbo_desktop_commands::query` or
-   `qbo_desktop_commands::ledger_query`, map the error to a string. There
-   should be nothing left to debug in either command itself — only
-   whatever Tauri's own build (icons, bundle identifiers, code signing for
-   a `.dmg`) turns up.
-4. `apps/desktop/commands` (which now depends on `ledger` as well as
-   `qbo-local`) is in the repo's workspace `members` and builds here;
-   `apps/desktop/src-tauri` is deliberately not (its `Cargo.toml` says
-   why) — add it to `members` once building on macOS with the Tauri
-   toolchain installed is the normal case, not this one.
+```sh
+tools/desktop.sh              # debug build, then run the window
+tools/desktop.sh --selftest   # run it against a throwaway ledger; the webview
+                              # calls both commands and prints one SELFTEST line
+tools/desktop.sh --bundle     # unsigned release .app (also: make app)
+tools/desktop.sh --open       # open that .app (builds it first if missing)
+```
+
+The `.app` lands at
+`apps/desktop/src-tauri/target/release/bundle/macos/BunzBooks.app` (about
+14 MB, unsigned — fine on this Mac; Gatekeeper objects to an unsigned app
+that was downloaded, not one built here). It can be double-clicked or
+dragged to `/Applications`; opened from Finder it uses the defaults below.
+`--bundle` installs `tauri-cli` with `cargo install tauri-cli --locked` if
+`cargo tauri` is missing. The release build prints a harmless warning that
+`rust-objcopy` could not strip debug info (the rustup toolchain's
+`rust-objcopy` cannot find `libLLVM.dylib`); the bundle is fine.
+
+Plain cargo works too, with no Tauri CLI:
+
+```sh
+export PATH="$HOME/.rustup/toolchains/stable-aarch64-apple-darwin/bin:$PATH"
+cd apps/desktop/src-tauri && cargo build && ./target/debug/bunzbooks-desktop
+```
+
+`src-tauri/` has its own `[workspace]` table, `Cargo.lock` and `target/` —
+it is deliberately not a member of the repo's workspace (its `Cargo.toml`
+says why). `cargo tauri dev` also works from `src-tauri/`, but there is no
+dev server to watch: `frontendDist` is `../ui`, so a UI change only needs
+the app restarted.
+
+### What it opens
+
+All environment variables are optional:
+
+| Variable | Default | Opened as |
+|---|---|---|
+| `QBO_LOCAL_DB` | the main checkout's `.local/replica.db` (found from a worktree build too) | `SQLITE_OPEN_READ_ONLY` — the `qbo-local daemon` owns every write. Not `immutable=1`: the daemon writes the file while the window is open, and an immutable open would skip the WAL and locking |
+| `LEDGER_DB` | `~/Library/Application Support/QuickBooksKILLA/scratch-ledger.sqlite` | read-write — the ledger screens post here |
+| `LEDGER_COMPANY` | `aquamentor` | |
+
+The ledger default is a **scratch** book, created and seeded with the chart
+and classes (`Ledger::create_company`) on first launch. Nothing ever
+defaults to a real book: a real one is opened only when `LEDGER_DB` names
+it, and an existing book named that way is never seeded or renamed. With no
+replica at all the window still opens; every replica call returns an error
+saying so.
+
+The realm switcher shows the replica's own realms: `main.rs` reads them
+with `Store::list_realms` and injects them as `window.__BUNZBOOKS_REALMS__`
+before any page script runs, and `js/data/realms.js` prefers that list over
+its invented one (which the fixture and the plain-browser run keep using).
+`tauri.conf.json` sets `withGlobalTauri` (what puts `window.__TAURI__` on
+the page) and `"create": false` on the window, so `main.rs` builds the
+window itself with that initialization script attached.
+
+### The self-test
+
+`BUNZBOOKS_SELFTEST=1` (what `--selftest` sets) adds a page script that,
+after load, calls through the real `window.__TAURI__.core.invoke`:
+`query sync_status` for the first realm, `ledger_query trial_balance`, an
+`upsert_contact` + `upsert_item` + `create_document` invoice, and the trial
+balance again; then it switches to the trial balance screen and prints one
+line to stdout, `SELFTEST {"ok":true,"steps":{...}}`.
+`BUNZBOOKS_SELFTEST_EXIT_AFTER=<secs>` quits that many seconds later with
+status 0 or 1. The `selftest_report` command refuses outside self-test mode.
+`--selftest` always points `LEDGER_DB` at a fresh temp file, so it never
+adds a test invoice to the scratch book. A passing run on 17 Oct 2026, both
+from the debug binary and from the bundled `.app`: the replica's realm with
+67,840 mirrored entities and writes disabled; invoice `1001` for 20.00
+posted; trial balance 0.00/0.00 before, 20.00/20.00 after.
 
 ## Screens carried over from the prototype, and screens that stay there
 

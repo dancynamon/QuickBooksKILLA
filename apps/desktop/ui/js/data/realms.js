@@ -11,10 +11,21 @@
 // (`prototype/README.md`: "invent nothing real") — not the operator's real
 // companies, which never belong in this repository.
 
-export const REALMS = Object.freeze([
+//
+// Under Tauri, `src-tauri/src/main.rs` injects the replica's own realm list
+// as `window.__BUNZBOOKS_REALMS__` before any page script runs; the
+// invented list stays the fixture's (and the browser's) only list.
+const INVENTED_REALMS = [
   { id: "1234567890123456", name: "Harborworks, Inc." },
   { id: "9876543210123456", name: "Tidewater CNC Works" },
-]);
+];
+const INJECTED_REALMS =
+  typeof window !== "undefined" && Array.isArray(window.__BUNZBOOKS_REALMS__) &&
+  window.__BUNZBOOKS_REALMS__.length > 0
+    ? window.__BUNZBOOKS_REALMS__
+    : null;
+
+export const REALMS = Object.freeze(INJECTED_REALMS ?? INVENTED_REALMS);
 
 export const DEFAULT_REALM_ID = REALMS[0].id;
 
