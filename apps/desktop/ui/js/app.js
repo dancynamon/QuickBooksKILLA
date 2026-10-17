@@ -25,6 +25,9 @@ import { renderAuditTrail } from "./screens/ledger/auditTrail.js";
 import { renderAdjustments } from "./screens/ledger/adjustments.js";
 import { renderBank } from "./screens/ledger/bank.js";
 import { renderPeriodClose } from "./screens/ledger/periodClose.js";
+import { renderNewDocument } from "./screens/ledger/newDocument.js";
+import { renderOpenItems } from "./screens/ledger/openItems.js";
+import { isEntryKind } from "./screens/ledger/entry.js";
 
 const main = document.getElementById("main");
 
@@ -56,8 +59,12 @@ const REPORTS = [
 // (`apps/desktop/ui/js/data/ledger/provider.js`). No "new journal entry"
 // item here or anywhere else in this rail (`LEDGER-DESIGN.md` §4) — every
 // entry in this book is generated from a document or an accountant's
-// decided adjustment, never hand-posted from a button.
+// decided adjustment, never hand-posted from a button. "New document" is
+// the D28 entry path: a document, which the book then posts.
 const LEDGER_NAV = [
+  { view: "ledger-new", arg: "Invoice", label: "New document", glyph: "+" },
+  { view: "ledger-open", arg: "receivable", label: "Receivables", glyph: "▨" },
+  { view: "ledger-open", arg: "payable", label: "Payables", glyph: "▨" },
   { view: "ledger-tb", label: "Trial balance", glyph: "≡" },
   { view: "ledger-pnl", label: "Profit and loss", glyph: "▤" },
   { view: "ledger-bs", label: "Balance sheet", glyph: "▦" },
@@ -75,7 +82,8 @@ function railHref(item) {
 
 function renderRail(route) {
   const rail = document.getElementById("rail");
-  const isCurrent = (item) => route.view === item.view && (item.arg ?? null) === route.arg;
+  const isCurrent = (item) => route.view === item.view
+    && (item.view === "ledger-new" || (item.arg ?? null) === route.arg);
 
   function section(label, items) {
     const head = `<div class="rail-head lbl">${esc(label)}</div>`;
@@ -218,6 +226,10 @@ async function renderRoute(route) {
     await renderAdjustments(main);
   } else if (route.view === "ledger-bank") {
     await renderBank(main);
+  } else if (route.view === "ledger-new") {
+    await renderNewDocument(main, isEntryKind(route.arg) ? route.arg : "Invoice");
+  } else if (route.view === "ledger-open") {
+    await renderOpenItems(main, route.arg === "payable" ? "payable" : "receivable");
   } else if (route.view === "ledger-close") {
     await renderPeriodClose(main);
   } else {

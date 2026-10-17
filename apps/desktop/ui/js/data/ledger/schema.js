@@ -1,17 +1,18 @@
 // The ledger schema contract. `docs/MCP.md`'s ledger section documents
-// seventeen tools (ten reads, seven gated writes); this file is that
+// twenty-four tools (fourteen reads, ten gated writes); this file is that
 // documentation turned into something a test can check — derived by reading
 // the `_json` rendering functions in `apps/ledger/src/mcp.rs` field by field
 // (`tb_row_json`, `pnl_json`, `bs_row_json`, `sales_tax_lines_json`,
 // `gl_line_json`/`gl_section_json`/`gl_detail_json`, `audit_row_json`,
 // `journal_line_json`/`journal_entry_json`, `adjustment_request_json`,
-// `bank_statement_json`/`bank_line_json`) and the dispatch in
+// `bank_statement_json`/`bank_line_json`, `contact_json`, `item_json`,
+// `open_document_json`, `aging_row_json`) and the dispatch in
 // `LedgerToolSet::call_tool`.
 //
 // `test/ledger-fixture.test.js` uses `checkShape` (`../js/data/schema.js`'s
 // `firstMissingField`, reused rather than duplicated) to assert the fixture
 // provider's output actually has these fields for every one of the
-// seventeen tools — the same "missing/renamed field" check the qbo-local
+// twenty-four tools — the same "missing/renamed field" check the qbo-local
 // schema makes, not a formatting nuance.
 
 // `mcp.rs::journal_line_json`
@@ -85,6 +86,32 @@ export const BANK_LINE_FIELDS = [
   "match_kind", "matched_at",
 ];
 
+// `mcp.rs::contact_json`
+export const CONTACT_FIELDS = [
+  "contact_id", "kind", "display_name", "company_name", "email", "phone",
+  "bill_address", "ship_address", "terms_days", "is_tax_exempt",
+  "default_class", "is_active", "source_ref",
+];
+
+// `mcp.rs::item_json`
+export const ITEM_FIELDS = [
+  "item_id", "sku", "name", "description", "item_type", "income_account",
+  "expense_account", "asset_account", "default_class", "sales_price",
+  "purchase_cost", "unit_cost", "is_taxable", "is_active", "source_ref",
+];
+
+// `mcp.rs::open_document_json`
+export const OPEN_DOCUMENT_FIELDS = [
+  "document_id", "kind", "number", "contact_id", "contact_name", "txn_date",
+  "due_date", "total", "applied", "open",
+];
+
+// `mcp.rs::aging_row_json`
+export const AGING_ROW_FIELDS = [
+  "contact_id", "contact_name", "current", "days_1_30", "days_31_60",
+  "days_61_90", "over_90", "total",
+];
+
 /** Every write tool's result carries the company's current `locked_through`
  * (`docs/MCP.md` "The write gate", rule 2) alongside whatever the tool
  * itself returns. */
@@ -147,8 +174,44 @@ export const SCHEMA = {
     result: "object",
     top: ["locked_through"],
   },
+  list_contacts: {
+    result: "array",
+    row: CONTACT_FIELDS,
+  },
+  list_items: {
+    result: "array",
+    row: ITEM_FIELDS,
+  },
+  open_documents: {
+    result: "array",
+    row: OPEN_DOCUMENT_FIELDS,
+  },
+  aging: {
+    result: "object",
+    top: ["book", "as_of", "rows", "totals"],
+    row: AGING_ROW_FIELDS,
+  },
 
   // --- writes — every one carries WITH_LOCKED_THROUGH -------------------
+  upsert_contact: {
+    result: "object",
+    top: ["contact", ...WITH_LOCKED_THROUGH],
+    contact: CONTACT_FIELDS,
+  },
+  upsert_item: {
+    result: "object",
+    top: ["item", ...WITH_LOCKED_THROUGH],
+    item: ITEM_FIELDS,
+  },
+  create_document: {
+    result: "object",
+    top: [
+      "document_id", "version", "number", "due_date", "total", "tax",
+      "entry_id", "entry", ...WITH_LOCKED_THROUGH,
+    ],
+    entry: JOURNAL_ENTRY_FIELDS,
+    line: JOURNAL_LINE_FIELDS,
+  },
   save_and_post_document: {
     result: "object",
     top: ["document_id", "version", "entry_id", "entry", ...WITH_LOCKED_THROUGH],

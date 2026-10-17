@@ -3,7 +3,7 @@
 // must pick the right backend, and `js/data/ledger/tauri.js` must call
 // `invoke("ledger_query", { tool, args })` with exactly the tool name and
 // argument keys `docs/MCP.md`'s ledger section documents, for all
-// seventeen tools — a typo here would silently reach the real ledger with
+// twenty-four tools — a typo here would silently reach the real ledger with
 // the wrong shape and only fail once someone runs it under Tauri.
 
 import { test } from "node:test";
@@ -48,6 +48,13 @@ test("ledger tauri provider calls invoke('ledger_query', ...) for every tool, wi
   await ledger.listAdjustments("proposed");
   await ledger.bankStatus("stmt-2026-08");
   await ledger.lockedThrough();
+  await ledger.listContacts("customer", "pool", true);
+  await ledger.listItems("tube");
+  await ledger.openDocuments("receivable", "2026-10-15");
+  await ledger.aging("payable", "2026-10-15");
+  await ledger.upsertContact({ contact_id: "c1" });
+  await ledger.upsertItem({ item_id: "i1" });
+  await ledger.createDocument({ kind: "Invoice" }, "dan");
   await ledger.saveAndPostDocument({ document_id: "d1", kind: "Invoice" }, "dan", { i1: { income: "4100", expense: "5000" } });
   await ledger.reverseEntry("je-1", "2026-09-15", "dan");
   await ledger.proposeAdjustment("joel", "why", [{ account: "6100", debit: "1.00" }]);
@@ -56,7 +63,7 @@ test("ledger tauri provider calls invoke('ledger_query', ...) for every tool, wi
   await ledger.closePeriod("2026-08-31", "dan", "close note");
   await ledger.reopenPeriod("2026-08-31", "dan", "reopen note");
 
-  assert.equal(calls.length, 17);
+  assert.equal(calls.length, 24);
   for (const call of calls) assert.equal(call.command, "ledger_query");
 
   const byTool = Object.fromEntries(calls.map((c) => [c.tool, c.args]));
@@ -71,6 +78,13 @@ test("ledger tauri provider calls invoke('ledger_query', ...) for every tool, wi
   assert.deepEqual(byTool[TOOL.listAdjustments], { state: "proposed" });
   assert.deepEqual(byTool[TOOL.bankStatus], { statement_id: "stmt-2026-08" });
   assert.deepEqual(byTool[TOOL.lockedThrough], {});
+  assert.deepEqual(byTool[TOOL.listContacts], { kind: "customer", query: "pool", include_inactive: true });
+  assert.deepEqual(byTool[TOOL.listItems], { query: "tube" });
+  assert.deepEqual(byTool[TOOL.openDocuments], { book: "receivable", as_of: "2026-10-15" });
+  assert.deepEqual(byTool[TOOL.aging], { book: "payable", as_of: "2026-10-15" });
+  assert.deepEqual(byTool[TOOL.upsertContact], { contact: { contact_id: "c1" } });
+  assert.deepEqual(byTool[TOOL.upsertItem], { item: { item_id: "i1" } });
+  assert.deepEqual(byTool[TOOL.createDocument], { document: { kind: "Invoice" }, actor: "dan" });
   assert.deepEqual(byTool[TOOL.saveAndPostDocument], {
     document: { document_id: "d1", kind: "Invoice" }, actor: "dan",
     items: { i1: { income: "4100", expense: "5000" } },

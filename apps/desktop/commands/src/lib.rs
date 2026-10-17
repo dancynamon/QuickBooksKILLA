@@ -141,11 +141,13 @@ pub fn query(store: &Store, tool: &str, args: Value) -> Result<Value, CommandErr
 /// `docs/MCP.md`'s ledger section documents for that tool, the same value
 /// `apps/desktop/ui/js/data/ledger/tauri.js` expects back from `invoke`.
 ///
-/// `tool` is one of the seventeen names [`ledger::mcp::tools`] lists — ten
-/// reads (`"trial_balance"`, `"profit_and_loss"`, `"balance_sheet"`,
+/// `tool` is one of the twenty-four names [`ledger::mcp::tools`] lists —
+/// fourteen reads (`"trial_balance"`, `"profit_and_loss"`, `"balance_sheet"`,
 /// `"sales_tax_lines"`, `"general_ledger"`, `"audit_trail"`,
 /// `"entries_for_document"`, `"list_adjustments"`, `"bank_status"`,
-/// `"locked_through"`) and seven writes (`"save_and_post_document"`,
+/// `"locked_through"`, `"list_contacts"`, `"list_items"`,
+/// `"open_documents"`, `"aging"`) and ten writes (`"upsert_contact"`,
+/// `"upsert_item"`, `"create_document"`, `"save_and_post_document"`,
 /// `"reverse_entry"`, `"propose_adjustment"`, `"decide_adjustment"`,
 /// `"bank_confirm_proposal"`, `"close_period"`, `"reopen_period"`) — and
 /// `args` is that tool's argument object exactly as `docs/MCP.md`
@@ -369,6 +371,65 @@ mod tests {
             "source_ref": null,
             "memo": "test invoice"
         })
+    }
+
+    /// Exactly the `document`s `js/screens/ledger/entry.js::buildDocument`
+    /// sends (pinned by `test/ledger-entry.test.js`), through the same
+    /// `ledger_query` the Tauri window calls: the entry screen's wire shape
+    /// is the real `create_document`'s, not only the fixture's.
+    #[test]
+    fn ledger_query_create_document_takes_what_the_entry_screen_sends() {
+        let ledger = seeded_ledger();
+        for (tool, args) in [
+            ("upsert_contact", json!({ "contact": { "contact_id": "cust-blue-harbor", "kind": "Customer",
+                "display_name": "Blue Harbor Swim Club", "terms_days": 30, "default_class": "foam" } })),
+            ("upsert_contact", json!({ "contact": { "contact_id": "vend-spectra", "kind": "Vendor",
+                "display_name": "Spectra EVA", "terms_days": 30 } })),
+            ("upsert_item", json!({ "item": { "item_id": "rt-50-red", "sku": "RT-50-RED",
+                "name": "Rescue tube", "item_type": "non_inventory", "income_account": "4100",
+                "expense_account": "5000", "default_class": "foam", "sales_price": "19.95",
+                "is_taxable": true } })),
+        ] {
+            ledger_query(&ledger, COMPANY, tool, args).unwrap();
+        }
+
+        let invoice = ledger_query(&ledger, COMPANY, "create_document", json!({ "actor": "dan", "document": {
+            "kind": "Invoice", "txn_date": "2026-10-01",
+            "contact": { "kind": "Customer", "id": "cust-blue-harbor" },
+            "lines": [{ "kind": "Item", "amount": "199.50", "is_taxable": true,
+                        "item_id": "rt-50-red", "qty": "10", "description": "Rescue tube" }]
+        }}))
+        .unwrap();
+        assert_eq!(invoice["tax"], json!("13.22"));
+        assert_eq!(invoice["total"], json!("212.72"));
+        assert_eq!(invoice["due_date"], json!("2026-10-31"));
+        assert!(!invoice["entry_id"].is_null());
+
+        let bill = ledger_query(&ledger, COMPANY, "create_document", json!({ "actor": "dan", "document": {
+            "kind": "Bill", "txn_date": "2026-10-01", "number": "SPX-2001",
+            "contact": { "kind": "Vendor", "id": "vend-spectra" },
+            "lines": [{ "kind": "Account", "amount": "84.10", "is_taxable": false,
+                        "account": "6100", "class": "foam" }]
+        }}))
+        .unwrap();
+        assert_eq!(bill["number"], json!("SPX-2001"));
+        assert_eq!(bill["total"], json!("84.10"));
+
+        ledger_query(&ledger, COMPANY, "create_document", json!({ "actor": "dan", "document": {
+            "kind": "Payment", "txn_date": "2026-10-10",
+            "contact": { "kind": "Customer", "id": "cust-blue-harbor" },
+            "applications": [{ "target_document_id": invoice["document_id"],
+                               "target_kind": "Invoice", "amount": "212.72" }],
+            "deposit_to": "1100"
+        }}))
+        .unwrap();
+
+        let ar = ledger_query(&ledger, COMPANY, "aging",
+            json!({ "book": "receivable", "as_of": "2026-10-15" })).unwrap();
+        assert_eq!(ar["totals"]["total"], json!("0.00"));
+        let ap = ledger_query(&ledger, COMPANY, "aging",
+            json!({ "book": "payable", "as_of": "2026-10-15" })).unwrap();
+        assert_eq!(ap["totals"]["current"], json!("84.10"));
     }
 
     #[test]

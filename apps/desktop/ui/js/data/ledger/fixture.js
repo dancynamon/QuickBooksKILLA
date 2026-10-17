@@ -187,9 +187,15 @@ function deriveEntryLines(document, items) {
       return lines;
     }
     case "Payment": {
+      // A payment entered through `create_document` carries applications and
+      // no lines, and lands in 1150 undeposited funds unless it names a
+      // `deposit_to` (W8) — `post.rs::post_payment`'s rule.
+      const fromApplications = document.lines.length === 0;
+      const cents = fromApplications ? applicationsCents(document) : lineTotalCents;
+      const debitAccount = document.deposit_to ?? (fromApplications ? "1150" : "1100");
       return [
-        { account: "1100", debit: lineTotalCents / 100, entity },
-        { account: "1200", credit: lineTotalCents / 100, entity },
+        { account: debitAccount, debit: cents / 100, entity },
+        { account: "1200", credit: cents / 100, entity },
       ];
     }
     case "Bill":
@@ -198,9 +204,10 @@ function deriveEntryLines(document, items) {
       return [...debitExpenseLines(), { account: creditAccount, credit: lineTotalCents / 100, entity }];
     }
     case "BillPayment": {
+      const cents = document.lines.length === 0 ? applicationsCents(document) : lineTotalCents;
       return [
-        { account: "2000", debit: lineTotalCents / 100, entity },
-        { account: "1100", credit: lineTotalCents / 100, entity },
+        { account: "2000", debit: cents / 100, entity },
+        { account: document.pay_from ?? "1100", credit: cents / 100, entity },
       ];
     }
     case "JournalEntry": {
@@ -215,6 +222,10 @@ function deriveEntryLines(document, items) {
     default:
       return [...debitExpenseLines(), { account: "2000", credit: lineTotalCents / 100, entity }];
   }
+}
+
+function applicationsCents(document) {
+  return (document.applications ?? []).reduce((sum, a) => sum + toCents(a.amount), 0);
 }
 
 function enforceClassRule(lines) {
@@ -360,6 +371,117 @@ function seedDocumentVersions() {
   );
 }
 
+// ---------------------------------------------------------------------------
+// master data and documents (D28) — `books.rs`'s contacts, items and saved
+// documents, so `list_contacts`, `list_items`, `create_document`,
+// `open_documents` and `aging` derive from the same book the journal above
+// is. The three opening-era documents (`ob-*`, dated December 2025) are what
+// the opening entry's 1200 and 2000 balances are made of, so the aging ties
+// to the trial balance exactly as `books.rs`'s does.
+// ---------------------------------------------------------------------------
+
+function seedContacts() {
+  const contact = (c) => ({
+    company_name: null, email: null, phone: null, bill_address: null, ship_address: null,
+    terms_days: null, is_tax_exempt: false, default_class: null, is_active: true, source_ref: null,
+    ...c,
+  });
+  return new Map([
+    contact({ contact_id: "cust-blue-harbor", kind: "customer", display_name: "Blue Harbor Swim Club", email: "office@blueharbor.example", terms_days: 30, default_class: "foam" }),
+    contact({ contact_id: "cust-fairview", kind: "customer", display_name: "Fairview County Parks", company_name: "County of Fairview", terms_days: 30, is_tax_exempt: true, default_class: "chairs" }),
+    contact({ contact_id: "cust-harborview", kind: "customer", display_name: "Harborview Signs", terms_days: 15, default_class: "signs" }),
+    contact({ contact_id: "vend-spectra", kind: "vendor", display_name: "Spectra EVA", terms_days: 30 }),
+  ].map((c) => [c.contact_id, c]));
+}
+
+function seedItems() {
+  const item = (i) => ({
+    sku: null, description: null, asset_account: null, default_class: null,
+    sales_price: null, purchase_cost: null, unit_cost: null, is_taxable: false, is_active: true, source_ref: null,
+    ...i,
+  });
+  return new Map([
+    item({ item_id: "rt-50-red", sku: "RT-50-RED", name: "Rescue tube 50in, red", item_type: "non_inventory", income_account: "4100", expense_account: "5000", default_class: "foam", sales_price: "19.95", is_taxable: true }),
+    item({ item_id: "lgc-50", sku: "LGC-50", name: "Lifeguard chair 50in", item_type: "non_inventory", income_account: "4100", expense_account: "5000", default_class: "chairs", sales_price: "2990.00", is_taxable: true }),
+    item({ item_id: "sign-custom", name: "Custom pool sign", item_type: "service", income_account: "4100", expense_account: "5000", default_class: "signs", sales_price: "400.00", is_taxable: true }),
+    item({ item_id: "eva-sheet", sku: "EVA-SHEET-2IN", name: "EVA foam sheet, 2in", item_type: "inventory", income_account: "4100", expense_account: "5000", asset_account: "1300", default_class: "foam", purchase_cost: "46.28", unit_cost: "46.28" }),
+  ].map((i) => [i.item_id, i]));
+}
+
+function seedDocuments() {
+  const CUST = (id) => ({ kind: "Customer", id });
+  const VEND = (id) => ({ kind: "Vendor", id });
+  const doc = (d) => ({ number: null, due_date: null, applications: [], is_voided: false, ...d });
+  return new Map([
+    doc({ document_id: "ob-ar-1", kind: "Invoice", number: "21101", txn_date: "2025-12-12", due_date: "2026-01-11", contact: CUST("cust-fairview"), total_cents: 1200000 }),
+    doc({ document_id: "ob-ar-2", kind: "Invoice", number: "21102", txn_date: "2025-12-19", due_date: "2026-01-03", contact: CUST("cust-harborview"), total_cents: 650000 }),
+    doc({ document_id: "ob-ap-1", kind: "Bill", number: "SPX-1180", txn_date: "2025-12-20", due_date: "2026-01-19", contact: VEND("vend-spectra"), total_cents: 920000 }),
+    doc({ document_id: "inv-2001", kind: "Invoice", number: "21234", txn_date: "2026-07-14", due_date: "2026-08-13", contact: CUST("cust-blue-harbor"), total_cents: 15994 }),
+    doc({ document_id: "inv-2002", kind: "Invoice", number: "21230", txn_date: "2026-08-04", due_date: "2026-09-03", contact: CUST("cust-fairview"), total_cents: 299000 }),
+    doc({ document_id: "bill-3001", kind: "Bill", number: "BILL-2288", txn_date: "2026-08-10", due_date: "2026-09-09", contact: VEND("vend-spectra"), total_cents: 277680 }),
+    doc({ document_id: "pmt-4001", kind: "Payment", txn_date: "2026-08-15", contact: CUST("cust-blue-harbor"), total_cents: 15994,
+      applications: [{ target_document_id: "inv-2001", target_kind: "Invoice", amount: "159.94" }] }),
+    doc({ document_id: "billpmt-5001", kind: "BillPayment", txn_date: "2026-08-18", contact: VEND("vend-spectra"), total_cents: 277680,
+      applications: [{ target_document_id: "bill-3001", target_kind: "Bill", amount: "2776.80" }] }),
+    doc({ document_id: "inv-2003", kind: "Invoice", number: "21231", txn_date: "2026-09-02", due_date: "2026-09-17", contact: CUST("cust-harborview"), total_cents: 42650 }),
+  ].map((d) => [d.document_id, d]));
+}
+
+/** `books.rs::contact_kind_for`. */
+const CONTACT_KIND_FOR = {
+  Estimate: "customer", Invoice: "customer", SalesReceipt: "customer", CreditMemo: "customer",
+  RefundReceipt: "customer", Payment: "customer",
+  PurchaseOrder: "vendor", Bill: "vendor", BillPayment: "vendor", VendorCredit: "vendor",
+};
+/** `books.rs::is_numbered`. */
+const NUMBERED = new Set(["Estimate", "Invoice", "SalesReceipt", "CreditMemo", "RefundReceipt", "PurchaseOrder"]);
+/** `books.rs::is_taxed_sale`. */
+const TAXED_SALE = new Set(["Estimate", "Invoice", "SalesReceipt", "CreditMemo", "RefundReceipt"]);
+/** `books.rs::FIRST_NUMBER`. */
+const FIRST_NUMBER = 1001;
+/** `PostingConfig::default().sales_tax_rate`, as a fraction over 100000. */
+const NJ_RATE = "0.06625";
+const NJ_RATE_PER_100K = 6625;
+
+/** `books.rs::Book`: which kinds open an item on the book (`true` for a
+ * credit, carried as a negative), and which settle one. */
+const BOOKS = {
+  receivable: { opens: { Invoice: false, CreditMemo: true }, settles: new Set(["Payment", "CreditMemo"]) },
+  payable: { opens: { Bill: false, VendorCredit: true }, settles: new Set(["BillPayment", "VendorCredit"]) },
+};
+
+/** base × 6.625%, rounded half to even (`RoundingPolicy::TaxCalculation`),
+ * in integer cents so no float ever touches the result. */
+function taxCents(baseCents) {
+  const num = baseCents * NJ_RATE_PER_100K;
+  const sign = num < 0 ? -1 : 1;
+  const abs = Math.abs(num);
+  let q = Math.floor(abs / 100000);
+  const r = abs % 100000;
+  if (r * 2 > 100000 || (r * 2 === 100000 && q % 2 === 1)) q += 1;
+  return sign * q;
+}
+
+/** `books.rs::document_total`'s line half: items, shipping and account
+ * lines add, discounts subtract, description and journal lines don't count. */
+function linesCents(lines) {
+  return lines.reduce((sum, l) => {
+    if (l.kind === "Discount") return sum - toCents(l.amount);
+    if (l.kind === "Description" || l.kind === "Journal") return sum;
+    return sum + toCents(l.amount);
+  }, 0);
+}
+
+function addDays(isoDate, days) {
+  const d = new Date(`${isoDate}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + days);
+  return d.toISOString().slice(0, 10);
+}
+
+function daysBetween(fromIso, toIso) {
+  return Math.round((Date.parse(`${toIso}T00:00:00Z`) - Date.parse(`${fromIso}T00:00:00Z`)) / 86_400_000);
+}
+
 /** `docs/ACCOUNTANT.md`'s "how a request flows" — one posted, one still
  * proposed, one rejected. */
 function seedAdjustments() {
@@ -440,6 +562,12 @@ function createBook() {
   const bankStatement = seedBankStatement();
   const bankLines = seedBankLines();
   const documentVersions = seedDocumentVersions();
+  const contacts = seedContacts();
+  const items = seedItems();
+  const documents = seedDocuments();
+  /** kind -> next number, seeded on first use (`books.rs::next_number`). */
+  const sequences = new Map();
+  let nextDocumentSeq = 7001;
   let nextEntrySeq = 1008; // seeded entries use je-1000..je-1007
   let nextRequestSeq = 9004; // seeded adjustments use adj-9001..adj-9003
   let lockedThrough = "2026-07-31";
@@ -766,6 +894,7 @@ function createBook() {
 
     if (kind === "Estimate" || kind === "PurchaseOrder") {
       documentVersions.set(documentId, version);
+      recordDocument(document);
       return withLockedThrough({ document_id: documentId, version, entry_id: null, entry: null });
     }
 
@@ -787,7 +916,312 @@ function createBook() {
     });
     journal.push(entry);
     documentVersions.set(documentId, version);
+    recordDocument(document);
     return withLockedThrough({ document_id: documentId, version, entry_id: entry.entry_id, entry: journalEntryJson(entry) });
+  }
+
+  // --- master data, numbering and open items (D28, `books.rs`) -----------
+
+  /** Keep the newest version of a saved document, with its total worked
+   * out once, for `open_documents`, `aging` and the number sequences. */
+  function recordDocument(document) {
+    const lines = document.lines ?? [];
+    const tax = document.tax ? toCents(document.tax.total_tax) : 0;
+    const settles = document.kind === "Payment" || document.kind === "BillPayment";
+    documents.set(document.document_id, {
+      document_id: document.document_id,
+      kind: document.kind,
+      number: document.number ?? null,
+      txn_date: document.txn_date,
+      due_date: document.due_date ?? null,
+      contact: document.contact ?? null,
+      total_cents: settles && lines.length === 0 ? applicationsCents(document) : linesCents(lines) + tax,
+      applications: document.applications ?? [],
+      is_voided: Boolean(document.is_voided),
+    });
+  }
+
+  function contactJson(c) {
+    return {
+      contact_id: c.contact_id, kind: c.kind, display_name: c.display_name,
+      company_name: c.company_name, email: c.email, phone: c.phone,
+      bill_address: c.bill_address, ship_address: c.ship_address,
+      terms_days: c.terms_days, is_tax_exempt: c.is_tax_exempt,
+      default_class: c.default_class, is_active: c.is_active, source_ref: c.source_ref,
+    };
+  }
+
+  function itemJson(i) {
+    return {
+      item_id: i.item_id, sku: i.sku, name: i.name, description: i.description,
+      item_type: i.item_type, income_account: i.income_account,
+      expense_account: i.expense_account, asset_account: i.asset_account,
+      default_class: i.default_class, sales_price: i.sales_price,
+      purchase_cost: i.purchase_cost, unit_cost: i.unit_cost,
+      is_taxable: i.is_taxable, is_active: i.is_active, source_ref: i.source_ref,
+    };
+  }
+
+  function matches(query, ...fields) {
+    if (!query) return true;
+    const q = String(query).toLowerCase();
+    return fields.some((f) => f != null && String(f).toLowerCase().includes(q));
+  }
+
+  function byName(a, b, key) {
+    return a[key].toLowerCase().localeCompare(b[key].toLowerCase());
+  }
+
+  function listContacts(kind, query, includeInactive) {
+    if (kind != null && kind !== "customer" && kind !== "vendor") {
+      throw new LedgerFixtureError(`"kind" must be "customer" or "vendor", got ${JSON.stringify(kind)}`);
+    }
+    return [...contacts.values()]
+      .filter((c) => (kind == null || c.kind === kind) && (includeInactive || c.is_active))
+      .filter((c) => matches(query, c.display_name, c.company_name, c.email))
+      .sort((a, b) => byName(a, b, "display_name"))
+      .map(contactJson);
+  }
+
+  function listItems(query, includeInactive) {
+    return [...items.values()]
+      .filter((i) => includeInactive || i.is_active)
+      .filter((i) => matches(query, i.name, i.sku, i.description))
+      .sort((a, b) => byName(a, b, "name"))
+      .map(itemJson);
+  }
+
+  function upsertContact(raw) {
+    if (!raw || typeof raw !== "object") throw new LedgerFixtureError('missing "contact"');
+    // `ContactKind` deserialises as "Customer"/"Vendor" and `contact_json`
+    // renders it lowercase; take either, keep lowercase.
+    raw = { ...raw, kind: typeof raw.kind === "string" ? raw.kind.toLowerCase() : raw.kind };
+    if (!raw.contact_id || !raw.display_name || (raw.kind !== "customer" && raw.kind !== "vendor")) {
+      throw new LedgerFixtureError('invalid "contact": contact_id, kind and display_name are required');
+    }
+    const clash = [...contacts.values()].find((c) => c.kind === raw.kind && c.contact_id !== raw.contact_id
+      && c.display_name.toLowerCase() === raw.display_name.toLowerCase());
+    if (clash) {
+      throw new LedgerFixtureError(`a ${raw.kind} named ${JSON.stringify(raw.display_name)} already exists (${clash.contact_id})`);
+    }
+    const contact = {
+      company_name: null, email: null, phone: null, bill_address: null, ship_address: null,
+      terms_days: null, is_tax_exempt: false, default_class: null, is_active: true, source_ref: null,
+      ...raw,
+    };
+    contacts.set(contact.contact_id, contact);
+    return withLockedThrough({ contact: contactJson(contact) });
+  }
+
+  function upsertItem(raw) {
+    if (!raw || typeof raw !== "object") throw new LedgerFixtureError('missing "item"');
+    if (!raw.item_id || !raw.name || !raw.item_type || !raw.income_account || !raw.expense_account) {
+      throw new LedgerFixtureError('invalid "item": item_id, name, item_type, income_account and expense_account are required');
+    }
+    for (const account of [raw.income_account, raw.expense_account, raw.asset_account].filter(Boolean)) {
+      accountOrThrow(account);
+    }
+    if ((raw.item_type === "inventory") !== Boolean(raw.asset_account)) {
+      throw new LedgerFixtureError(`an inventory item needs an asset account, and only an inventory item may have one: ${raw.item_id}`);
+    }
+    const item = {
+      sku: null, description: null, asset_account: null, default_class: null,
+      sales_price: null, purchase_cost: null, unit_cost: null, is_taxable: false, is_active: true, source_ref: null,
+      ...raw,
+    };
+    items.set(item.item_id, item);
+    return withLockedThrough({ item: itemJson(item) });
+  }
+
+  function numberOwner(kind, number) {
+    for (const d of documents.values()) {
+      if (d.kind === kind && d.number === number) return d.document_id;
+    }
+    return null;
+  }
+
+  /** `books.rs::next_number`: seeded once per kind from the highest numeric
+   * number saved, else FIRST_NUMBER; a number in use is skipped. The fixture
+   * only advances the sequence when the document actually saves. */
+  function peekNumber(kind) {
+    let candidate = sequences.get(kind);
+    if (candidate == null) {
+      const highest = [...documents.values()]
+        .filter((d) => d.kind === kind && /^\d+$/.test(d.number ?? ""))
+        .reduce((max, d) => Math.max(max, Number(d.number)), 0);
+      candidate = highest ? highest + 1 : FIRST_NUMBER;
+    }
+    while (numberOwner(kind, String(candidate))) candidate += 1;
+    return candidate;
+  }
+
+  /** `mcp.rs::create_document` over `books.rs::prepare_document`. */
+  function createDocument(raw, actor) {
+    if (!actor) throw new LedgerFixtureError('missing "actor"');
+    if (!raw || typeof raw !== "object") throw new LedgerFixtureError('missing "document"');
+    if (!raw.kind) throw new LedgerFixtureError('missing "document.kind"');
+    if (!raw.txn_date) throw new LedgerFixtureError('missing "document.txn_date"');
+    const doc = {
+      number: null, due_date: null, contact: null, header_class: null, tax: null,
+      deposit_to: null, pay_from: null, source_ref: null, memo: null,
+      applications: [], unapplied: "0", is_voided: false,
+      ...raw,
+      document_id: raw.document_id ?? `doc-${nextDocumentSeq++}`,
+      lines: (raw.lines ?? []).map((l, i) => ({
+        line_no: i + 1, is_taxable: false, class: null, item_id: null, account: null,
+        qty: null, unit_cost: null, description: null, posting: null, entity: null, ...l,
+      })),
+    };
+
+    let contact = null;
+    const expected = CONTACT_KIND_FOR[doc.kind];
+    if (expected) {
+      if (!doc.contact) throw new LedgerFixtureError(`a ${doc.kind} needs a contact`);
+      contact = contacts.get(doc.contact.id);
+      if (!contact) throw new LedgerFixtureError(`unknown ${expected} ${doc.contact.id}`);
+      const given = String(doc.contact.kind).toLowerCase();
+      if (contact.kind !== expected || given !== expected) {
+        throw new LedgerFixtureError(`a ${doc.kind} needs a ${expected}, but ${doc.contact.id} is a ${contact.kind}`);
+      }
+      if (!contact.is_active) throw new LedgerFixtureError(`${contact.display_name} is inactive`);
+    }
+
+    const postingItems = {};
+    for (const line of doc.lines.filter((l) => l.item_id)) {
+      const item = items.get(line.item_id);
+      if (!item) throw new LedgerFixtureError(`unknown item ${line.item_id}`);
+      if (!item.is_active) throw new LedgerFixtureError(`item ${line.item_id} is inactive`);
+      postingItems[item.item_id] = {
+        income: item.income_account, expense: item.expense_account,
+        asset: item.asset_account, default_class: item.default_class,
+      };
+    }
+
+    let allocated = null;
+    if (NUMBERED.has(doc.kind)) {
+      if (doc.number == null) {
+        allocated = peekNumber(doc.kind);
+        doc.number = String(allocated);
+      } else {
+        const other = numberOwner(doc.kind, doc.number);
+        if (other && other !== doc.document_id) {
+          throw new LedgerFixtureError(`${doc.kind} number ${doc.number} is already used by document ${other}`);
+        }
+      }
+    }
+    if (contact) {
+      if (doc.due_date == null && (doc.kind === "Invoice" || doc.kind === "Bill")) {
+        doc.due_date = addDays(doc.txn_date, Math.max(contact.terms_days ?? 0, 0));
+      }
+      if (doc.header_class == null) doc.header_class = contact.default_class;
+    }
+    if (doc.tax == null && TAXED_SALE.has(doc.kind)) {
+      const taxable = doc.lines.filter((l) => l.is_taxable);
+      const counted = taxable.filter((l) => l.kind === "Item" || l.kind === "Shipping" || l.kind === "Account");
+      if (counted.length > 0) {
+        const base = linesCents(taxable);
+        doc.tax = {
+          total_tax: fromCents(contact?.is_tax_exempt ? 0 : taxCents(base)),
+          taxable_base: fromCents(base),
+          rate: NJ_RATE,
+        };
+      }
+    }
+    if ((doc.kind === "Payment" || doc.kind === "BillPayment") && toCents(doc.unapplied) !== 0) {
+      throw new LedgerFixtureError("this fixture book has no account for an unapplied amount");
+    }
+    if (doc.kind === "BillPayment" && !doc.pay_from) {
+      throw new LedgerFixtureError("a BillPayment needs a pay_from account");
+    }
+
+    const saved = saveAndPostDocument(doc, actor, postingItems);
+    if (allocated != null) sequences.set(doc.kind, allocated + 1);
+    const total = documents.get(doc.document_id).total_cents;
+    return withLockedThrough({
+      document_id: saved.document_id,
+      version: saved.version,
+      number: doc.number,
+      due_date: doc.due_date,
+      total: fromCents(total),
+      tax: doc.tax ? doc.tax.total_tax : null,
+      entry_id: saved.entry_id,
+      entry: saved.entry,
+    });
+  }
+
+  function contactName(contactRef) {
+    return contacts.get(contactRef?.id)?.display_name ?? contactRef?.id ?? "";
+  }
+
+  /** `books.rs::open_documents`: total less every application to it from a
+   * settling document dated on or before `asOf`, oldest first. */
+  function openDocuments(book, asOf) {
+    const spec = BOOKS[book];
+    if (!spec) throw new LedgerFixtureError(`"book" must be "receivable" or "payable", got ${JSON.stringify(book)}`);
+    if (!asOf) throw new LedgerFixtureError('missing "as_of"');
+    const docs = [...documents.values()]
+      .filter((d) => !d.is_voided && d.txn_date <= asOf && (d.kind in spec.opens || spec.settles.has(d.kind)))
+      .sort((a, b) => (a.txn_date === b.txn_date ? a.document_id.localeCompare(b.document_id) : a.txn_date.localeCompare(b.txn_date)));
+    const applied = new Map();
+    const add = (id, cents) => applied.set(id, (applied.get(id) ?? 0) + cents);
+    for (const d of docs.filter((x) => spec.settles.has(x.kind))) {
+      const used = d.applications.reduce((sum, a) => sum + toCents(a.amount), 0);
+      for (const a of d.applications) add(a.target_document_id, toCents(a.amount));
+      if (spec.opens[d.kind] === true) add(d.document_id, used);
+    }
+    const out = [];
+    for (const d of docs) {
+      const isCredit = spec.opens[d.kind];
+      if (isCredit === undefined) continue;
+      const used = applied.get(d.document_id) ?? 0;
+      const remaining = d.total_cents - used;
+      if (remaining === 0) continue;
+      const sign = isCredit ? -1 : 1;
+      out.push({
+        document_id: d.document_id,
+        kind: d.kind,
+        number: d.number,
+        contact_id: d.contact?.id ?? "",
+        contact_name: contactName(d.contact),
+        txn_date: d.txn_date,
+        due_date: d.due_date ?? d.txn_date,
+        total: fromCents(sign * d.total_cents),
+        applied: fromCents(sign * used),
+        open: fromCents(sign * remaining),
+      });
+    }
+    return out;
+  }
+
+  /** `books.rs::aging`: per contact, current and 1-30/31-60/61-90/over-90
+   * days past due. */
+  function aging(book, asOf) {
+    const blank = (id, name) => ({ contact_id: id, contact_name: name, current: 0, days_1_30: 0, days_31_60: 0, days_61_90: 0, over_90: 0, total: 0 });
+    const rows = new Map();
+    const totals = blank("", "Total");
+    for (const d of openDocuments(book, asOf)) {
+      const row = rows.get(d.contact_id) ?? blank(d.contact_id, d.contact_name);
+      rows.set(d.contact_id, row);
+      const days = daysBetween(d.due_date, asOf);
+      const bucket = days <= 0 ? "current" : days <= 30 ? "days_1_30" : days <= 60 ? "days_31_60" : days <= 90 ? "days_61_90" : "over_90";
+      for (const r of [row, totals]) {
+        r[bucket] += toCents(d.open);
+        r.total += toCents(d.open);
+      }
+    }
+    const json = (r) => ({
+      contact_id: r.contact_id, contact_name: r.contact_name,
+      current: fromCents(r.current), days_1_30: fromCents(r.days_1_30), days_31_60: fromCents(r.days_31_60),
+      days_61_90: fromCents(r.days_61_90), over_90: fromCents(r.over_90), total: fromCents(r.total),
+    });
+    return {
+      book,
+      as_of: asOf,
+      rows: [...rows.values()].filter((r) => r.total !== 0)
+        .sort((a, b) => byName(a, b, "contact_name") || a.contact_id.localeCompare(b.contact_id))
+        .map(json),
+      totals: json(totals),
+    };
   }
 
   function reverseEntry(entryId, on, actor) {
@@ -930,6 +1364,20 @@ function createBook() {
       }
       case "locked_through":
         return { locked_through: lockedThrough };
+      case "list_contacts":
+        return listContacts(args.kind, args.query, args.include_inactive);
+      case "list_items":
+        return listItems(args.query, args.include_inactive);
+      case "open_documents":
+        return openDocuments(args.book, args.as_of);
+      case "aging":
+        return aging(args.book, args.as_of);
+      case "upsert_contact":
+        return upsertContact(args.contact);
+      case "upsert_item":
+        return upsertItem(args.item);
+      case "create_document":
+        return createDocument(args.document, args.actor);
       case "save_and_post_document":
         return saveAndPostDocument(args.document, args.actor, args.items);
       case "reverse_entry":

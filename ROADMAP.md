@@ -238,6 +238,15 @@ If C is ever built, its spec is unchanged:
 Invoice, PO, estimate, bill, receive payment. Keyboard-first. Class on every
 line, enforced at the boundary.
 
+**Built 17 Oct 2026 (D28):** the desktop UI's *New document* screen enters all
+five into the own book through `ledger-mcp`'s `create_document`, against the
+book's own customers, vendors and items; *Receivables* and *Payables* show the
+own aging, checked against 1200 and 2000. Proven against the fixture book and,
+for the exact payloads the form sends, against the real `create_document`
+(`apps/desktop/README.md`). Not yet: editing or voiding a saved document,
+credit memos, sales receipts, bill payments, and a contact/item editor screen
+(the `upsert_*` tools exist).
+
 The change from the first draft: **a save commits to your own document store
 and posts to your own ledger**, then enqueues the outbox record that mirrors it
 to QBO. The "not yet in QBO" state the prototype shows is now literally true and

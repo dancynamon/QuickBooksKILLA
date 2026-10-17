@@ -1,6 +1,6 @@
 // Ledger schema contract test — the sibling of `test/fixture.test.js` for
 // the ledger provider (`apps/desktop/README.md`'s ledger section). Asserts
-// the fixture provider's output for all seventeen `ledger-mcp` tools
+// the fixture provider's output for all twenty-four `ledger-mcp` tools
 // (`docs/MCP.md`) satisfies `js/data/ledger/schema.js` — derived from
 // `apps/ledger/src/mcp.rs`'s own `_json` rendering functions — plus a few
 // behavioural checks: the write gate refuses a write dated on or before
@@ -197,4 +197,151 @@ test("confirming a bank proposal resolves that line and posts an entry", async (
 test("decide_adjustment refuses to decide an already-decided request", async () => {
   const ledger = createFixtureProvider();
   await assert.rejects(() => ledger.decideAdjustment("adj-9001", "dan", true, "again"));
+});
+
+// --- master data, create_document, open items and aging (D28) -------------
+
+test("ledger fixture provider satisfies the schema for the D28 master-data and open-item tools", async () => {
+  const ledger = createFixtureProvider();
+
+  const customers = await ledger.listContacts("customer");
+  assert.ok(customers.length > 0);
+  for (const c of customers) assertRow(c, SCHEMA.list_contacts.row, "list_contacts[]");
+  assert.ok(customers.every((c) => c.kind === "customer"));
+
+  const items = await ledger.listItems();
+  assert.ok(items.length > 0);
+  for (const i of items) assertRow(i, SCHEMA.list_items.row, "list_items[]");
+
+  for (const book of ["receivable", "payable"]) {
+    const open = await ledger.openDocuments(book, "2026-10-15");
+    for (const d of open) assertRow(d, SCHEMA.open_documents.row, `open_documents(${book})[]`);
+    const aging = await ledger.aging(book, "2026-10-15");
+    assertRow(aging, SCHEMA.aging.top, `aging(${book})`);
+    for (const r of [...aging.rows, aging.totals]) assertRow(r, SCHEMA.aging.row, `aging(${book}) row`);
+  }
+
+  const contact = await ledger.upsertContact({ contact_id: "cust-new", kind: "customer", display_name: "Lakeside Y", terms_days: 10, default_class: "foam" });
+  assertWithLockedThrough(contact, SCHEMA.upsert_contact, "upsert_contact");
+  assertRow(contact.contact, SCHEMA.upsert_contact.contact, "upsert_contact.contact");
+
+  const item = await ledger.upsertItem({ item_id: "kb-1", name: "Kickboard", item_type: "non_inventory", income_account: "4100", expense_account: "5000", default_class: "foam", sales_price: "12.00", is_taxable: true });
+  assertWithLockedThrough(item, SCHEMA.upsert_item, "upsert_item");
+  assertRow(item.item, SCHEMA.upsert_item.item, "upsert_item.item");
+
+  const created = await ledger.createDocument({
+    kind: "Invoice", txn_date: "2026-10-01", contact: { kind: "Customer", id: "cust-new" },
+    lines: [{ kind: "Item", item_id: "kb-1", qty: "5", amount: "60.00", is_taxable: true }],
+  }, "dan");
+  assertWithLockedThrough(created, SCHEMA.create_document, "create_document");
+  assertJournalEntry(created.entry, SCHEMA.create_document, "create_document.entry");
+});
+
+test("create_document fills number, due date, header class and banker's-rounded tax from master data", async () => {
+  const ledger = createFixtureProvider();
+  const created = await ledger.createDocument({
+    kind: "Invoice", txn_date: "2026-10-01", contact: { kind: "Customer", id: "cust-blue-harbor" },
+    lines: [{ kind: "Item", item_id: "sign-custom", amount: "100.00", is_taxable: true }],
+  }, "dan");
+  // Next after the seeded 21234; Net 30; 100.00 × 6.625% = 6.625 -> 6.62 (half to even).
+  assert.equal(created.number, "21235");
+  assert.equal(created.due_date, "2026-10-31");
+  assert.equal(created.tax, "6.62");
+  assert.equal(created.total, "106.62");
+  const income = created.entry.lines.find((l) => l.account === "4100");
+  assert.equal(income.class, "signs", "an item's default class beats the customer's");
+
+  const next = await ledger.createDocument({
+    kind: "Invoice", txn_date: "2026-10-02", contact: { kind: "Customer", id: "cust-blue-harbor" },
+    lines: [{ kind: "Item", item_id: "rt-50-red", amount: "19.95" }],
+  }, "dan");
+  assert.equal(next.number, "21236");
+  assert.equal(next.tax, null, "no taxable line, no tax");
+
+  const estimate = await ledger.createDocument({
+    kind: "Estimate", txn_date: "2026-10-02", contact: { kind: "Customer", id: "cust-blue-harbor" },
+    lines: [{ kind: "Item", item_id: "rt-50-red", amount: "19.95" }],
+  }, "dan");
+  assert.equal(estimate.number, "1001", "a kind with nothing saved starts at FIRST_NUMBER");
+  assert.equal(estimate.entry_id, null, "an estimate posts nothing");
+});
+
+test("an exempt customer is charged no tax", async () => {
+  const ledger = createFixtureProvider();
+  const created = await ledger.createDocument({
+    kind: "Invoice", txn_date: "2026-10-01", contact: { kind: "Customer", id: "cust-fairview" },
+    lines: [{ kind: "Item", item_id: "lgc-50", amount: "2990.00", is_taxable: true }],
+  }, "dan");
+  assert.equal(created.tax, "0.00");
+  assert.equal(created.total, "2990.00");
+});
+
+test("create_document refuses unknown, wrong-kind and duplicate references and saves nothing", async () => {
+  const ledger = createFixtureProvider();
+  const invoice = (contact, extra = {}) => ({
+    kind: "Invoice", txn_date: "2026-10-01", contact,
+    lines: [{ kind: "Item", item_id: "rt-50-red", amount: "19.95" }], ...extra,
+  });
+  await assert.rejects(ledger.createDocument(invoice({ kind: "Customer", id: "nobody" }), "dan"), /unknown customer nobody/);
+  await assert.rejects(ledger.createDocument(invoice({ kind: "Vendor", id: "vend-spectra" }), "dan"), /needs a customer/);
+  await assert.rejects(ledger.createDocument(invoice({ kind: "Customer", id: "cust-blue-harbor" }, { number: "21234" }), "dan"), /already used by document inv-2001/);
+  await assert.rejects(ledger.createDocument({
+    kind: "Invoice", txn_date: "2026-10-01", contact: { kind: "Customer", id: "cust-blue-harbor" },
+    lines: [{ kind: "Item", item_id: "no-such-item", amount: "1.00" }],
+  }, "dan"), /unknown item no-such-item/);
+  await assert.rejects(ledger.createDocument(invoice({ kind: "Customer", id: "cust-blue-harbor" }, { txn_date: "2026-07-01" }), "dan"), /closed/);
+
+  const created = await ledger.createDocument(invoice({ kind: "Customer", id: "cust-blue-harbor" }), "dan");
+  assert.equal(created.number, "21235", "no refused document consumed a number");
+});
+
+test("the aging ties to 1200 and 2000, and a payment takes an invoice out of it", async () => {
+  const ledger = createFixtureProvider();
+  const asOf = "2026-10-15";
+  const control = async (number) => (await ledger.trialBalance(asOf)).rows.find((r) => r.number === number).balance;
+
+  let ar = await ledger.aging("receivable", asOf);
+  assert.equal(ar.totals.total, await control("1200"));
+  const ap = await ledger.aging("payable", asOf);
+  assert.equal(`-${ap.totals.total}`, await control("2000"));
+
+  const created = await ledger.createDocument({
+    kind: "Invoice", txn_date: "2026-10-01", contact: { kind: "Customer", id: "cust-blue-harbor" },
+    lines: [{ kind: "Item", item_id: "sign-custom", amount: "100.00", is_taxable: true }],
+  }, "dan");
+  ar = await ledger.aging("receivable", asOf);
+  assert.equal(ar.totals.total, await control("1200"));
+  const blue = ar.rows.find((r) => r.contact_id === "cust-blue-harbor");
+  assert.equal(blue.current, "106.62", "due 31 Oct, so current on 15 Oct");
+
+  await ledger.createDocument({
+    kind: "Payment", txn_date: "2026-10-10", contact: { kind: "Customer", id: "cust-blue-harbor" },
+    applications: [{ target_document_id: created.document_id, target_kind: "Invoice", amount: "50.00" }],
+  }, "dan");
+  const open = (await ledger.openDocuments("receivable", asOf)).find((d) => d.document_id === created.document_id);
+  assert.equal(open.applied, "50.00");
+  assert.equal(open.open, "56.62");
+  ar = await ledger.aging("receivable", asOf);
+  assert.equal(ar.totals.total, await control("1200"), "the payment's 1200 credit and the application agree");
+
+  // As of the day before the payment, the invoice is still open in full.
+  const before = (await ledger.openDocuments("receivable", "2026-10-09")).find((d) => d.document_id === created.document_id);
+  assert.equal(before.open, "106.62");
+});
+
+test("upsert_contact refuses a second customer with the same name; upsert_item enforces the asset-account rule", async () => {
+  const ledger = createFixtureProvider();
+  await assert.rejects(
+    ledger.upsertContact({ contact_id: "cust-dup", kind: "customer", display_name: "blue harbor swim club" }),
+    /already exists/,
+  );
+  await ledger.upsertContact({ contact_id: "vend-dup", kind: "vendor", display_name: "Blue Harbor Swim Club" });
+  await assert.rejects(
+    ledger.upsertItem({ item_id: "x", name: "X", item_type: "inventory", income_account: "4100", expense_account: "5000" }),
+    /asset account/,
+  );
+  await assert.rejects(
+    ledger.upsertItem({ item_id: "y", name: "Y", item_type: "service", income_account: "4100", expense_account: "5000", asset_account: "1300" }),
+    /asset account/,
+  );
 });

@@ -720,3 +720,24 @@ the switch possible.
 *Rejected: drop history entirely.* The replica already answers every
 historical lookup, so nothing is lost by not replaying it, and dropping the
 replica would lose it.
+
+## D29 — D24's dates stand under D28
+
+17 Oct 2026, Dan. Settles D28's open item.
+
+- **Books open 1 January 2027; cutover 1 April 2027**, rolling quarterly on a
+  no-go; go/no-go ~15 March 2027. Unchanged from D24.
+- **The slim import (D28) runs as of 31 December 2026**: chart and masters,
+  one opening-balance entry from QBO's `TrialBalance` at 12/31/26, and the
+  documents open on that date. It is re-run after Joel's FY2026 close, as D24
+  already required of the opening balances.
+- **Q1 2027 is the one replayed quarter.** QBO stays the entry point through
+  March, and the nightly `ledger import` backfills January–March 2027 into
+  the new books, checked by `ledger tbdiff` and the AR/AP aging. That window
+  is held to the full posting gate: D28's fallback class covers only lines
+  dated before 1 January 2027, so every Q1 2027 line needs a class in QBO.
+- **W21** (one opening-balance entry for everything before the books open)
+  applies to 1 January 2027.
+
+Why: keeps FY2027 whole in the new books and QBO the single entry point
+until cutover, with one quarter of replay instead of fourteen years.

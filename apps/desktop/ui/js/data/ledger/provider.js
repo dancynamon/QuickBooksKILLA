@@ -1,8 +1,8 @@
 // The ledger provider contract. `docs/MCP.md`'s ledger section documents
-// seventeen `ledger-mcp` tools (ten reads, seven gated writes); this file is
-// the one place that knows their wire names and argument shapes, so
+// twenty-four `ledger-mcp` tools (fourteen reads, ten gated writes); this
+// file is the one place that knows their wire names and argument shapes, so
 // `fixture.js` and `tauri.js` each supply only a `callTool(tool, args)`
-// function and get the same seventeen typed methods for free.
+// function and get the same twenty-four typed methods for free.
 //
 // Unlike `js/data/provider.js` (the qbo-local provider), there is no
 // `realm_id` here: `ledger-mcp` is bound to one company for the life of its
@@ -29,6 +29,13 @@ export const TOOL = Object.freeze({
   listAdjustments: "list_adjustments",
   bankStatus: "bank_status",
   lockedThrough: "locked_through",
+  listContacts: "list_contacts",
+  listItems: "list_items",
+  openDocuments: "open_documents",
+  aging: "aging",
+  upsertContact: "upsert_contact",
+  upsertItem: "upsert_item",
+  createDocument: "create_document",
   saveAndPostDocument: "save_and_post_document",
   reverseEntry: "reverse_entry",
   proposeAdjustment: "propose_adjustment",
@@ -90,10 +97,35 @@ export function createProvider(callTool) {
     lockedThrough() {
       return callTool(TOOL.lockedThrough, {});
     },
+    // The book's own master data and open items (D28).
+    listContacts(kind, query, includeInactive) {
+      return callTool(TOOL.listContacts, args({ kind, query, include_inactive: includeInactive }));
+    },
+    listItems(query, includeInactive) {
+      return callTool(TOOL.listItems, args({ query, include_inactive: includeInactive }));
+    },
+    /** `book` is `"receivable"` or `"payable"`. */
+    openDocuments(book, asOf) {
+      return callTool(TOOL.openDocuments, { book, as_of: asOf });
+    },
+    aging(book, asOf) {
+      return callTool(TOOL.aging, { book, as_of: asOf });
+    },
 
     // --- writes ------------------------------------------------------------
     // Every write's result carries `locked_through` (`docs/MCP.md`'s write
     // gate, rule 2) — nothing to add here, the tool result already has it.
+    upsertContact(contact) {
+      return callTool(TOOL.upsertContact, { contact });
+    },
+    upsertItem(item) {
+      return callTool(TOOL.upsertItem, { item });
+    },
+    /** The standalone entry path (D28): send what a person typed; the book
+     * fills the number, due date, header class and sales tax. */
+    createDocument(document, actor) {
+      return callTool(TOOL.createDocument, { document, actor });
+    },
     saveAndPostDocument(document, actor, items) {
       return callTool(TOOL.saveAndPostDocument, args({ document, actor, items }));
     },
