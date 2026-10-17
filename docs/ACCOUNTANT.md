@@ -2,12 +2,14 @@
 
 `LEDGER-DESIGN.md` §8, `DECISIONS.md` D7, D17. What Joel gets, how a request
 flows from him to the book, what QBO's accountant toolbox has that this
-deliberately does not, and the one open deployment question (W24).
+deliberately does not, and how Joel reaches it (W24 — proposed, awaiting
+Joel).
 
 Everything below is implemented in `apps/ledger/src/accountant.rs`: GL
 detail and the audit trail, CSV exports and the year-end pack, the
 adjusting-entry request queue, and `AccountantView`, the type Joel's process
-actually gets. Nothing here is a second way to change the book — every write
+actually gets. The handoff pack Joel receives — a read-only snapshot of the
+book plus every export — is `apps/ledger/src/handoff.rs`. Nothing here is a second way to change the book — every write
 still goes through `crate::store::Ledger::post_entry`, the same period gate
 and class rule as every other posting.
 
@@ -29,15 +31,17 @@ A period-locked, read-only view of one or both companies' books:
   `is_flagged`, since every manual and imported entry carries that flag.
 - **Close history** — the full `close_history` log, reopens flagged,
   readable and not writable through this role.
-- **CSV exports** — a stable, two-decimal CSV per report, and `ledger export`
-  writes a five-file year-end pack (`tb-`, `pnl-`, `bs-`, `gl-`,
-  `close-history.csv`) into one directory. **There is no PDF yet.** §8 calls
-  for a PDF alongside the CSV — "the CSV is the one Joel's software imports;
-  the PDF is the one that goes in the file" — but that arrives with the UI,
-  which does not exist yet. AR/AP aging (summary and detail) is also in
-  scope per §8's table but has no report in `crate::report` today, so there
-  is nothing yet to export for it either — both are gaps to close before
-  the PDF and aging land, not decisions to leave open.
+- **CSV exports** — a stable, two-decimal CSV per report. `ledger export`
+  writes the five-file year-end CSV set (`tb-`, `pnl-`, `bs-`, `gl-`,
+  `close-history.csv`) into one directory; `ledger accountant pack` writes
+  the full handoff pack (below), which adds P&L by class, the audit trail,
+  the adjustment queue, **AR and AP aging by contact** (`books::aging`, D28),
+  and the §9 sales tax lines for each quarter. **There is no PDF yet.** §8
+  calls for a PDF alongside the CSV — "the CSV is the one Joel's software
+  imports; the PDF is the one that goes in the file" — but that arrives
+  with the UI, which does not exist yet. Aging is summary by contact only;
+  aging *detail* (one line per open document) is `open_documents`, which
+  the MCP server exposes but the pack does not yet export.
 - **The adjusting-entry request queue** — see below.
 - **The reclassify tool** — a specialised request that reclassifies one
   posted line to a different account or class, always produced as a
@@ -132,22 +136,102 @@ discovered in January:
   control; the period lock rejects instead of asking nicely.
 - **No write-off tool.** Bad debt is one document Dan creates, not an
   accountant-side action.
-- **No PDF export yet**, and **no AR/AP aging report yet** — see "What Joel
-  gets" above. Both are named in §8's scope and neither exists; the PDF
-  waits on the UI, and aging waits on a report that has not been built.
+- **No PDF export yet** — see "What Joel gets" above. Named in §8's scope;
+  it waits on the UI. (AR/AP aging summary is in the pack; aging detail is
+  not yet exported.)
 
-## Open: how Joel reaches this (W24)
+## How Joel reaches this (W24 — proposed, awaiting Joel)
 
-Unresolved, and explicitly a deployment question rather than an API one —
-`AccountantView` is the same type either way:
+**Proposed answer: a local install reading a dated, read-only snapshot**,
+handed to Joel on request. Built and tested; it becomes the answer when Joel
+accepts it in writing (`LEDGER-DESIGN.md` §13, W24 — a go/no-go item).
 
 | Option | What it costs | What it risks |
 |---|---|---|
-| **Local install, read-only copy** (recommended in `LEDGER-DESIGN.md` §8) | One signed build plus a scripted export producing a dated, read-only SQLite snapshot handed to Joel on request. Days of work, no running cost. | Joel sees an as-of copy, not a live one — fine for year-end, wrong for a question about last week. |
-| **Hosted read-only view** | A server, an auth story, TLS, a security posture for a machine holding both companies' complete books, a monthly bill. Weeks of work, and the first thing in this project that is not local-first. | A new thing to keep running before the cutover, for a use case (year-end handoff) that does not need it to be live. |
+| **Local install, read-only snapshot** (proposed) | One signed build plus `ledger accountant pack`. No running cost. | Joel sees an as-of copy, not a live one — fine for year-end, wrong for a question about last week. |
+| Hosted read-only view | A server, an auth story, TLS, a security posture for a machine holding both companies' complete books, a monthly bill. Weeks of work, and the first thing in this project that is not local-first. | A new thing to keep running before the cutover, for a use case (year-end handoff) that does not need it to be live. |
 
-The recommendation stands: the local install, because the handoff is a
-scheduled event rather than a live conversation, and because it is the
-cheaper, reversible choice — a hosted view can be built later over the same
-read-only role if the snapshot turns out to be the wrong shape. Whichever
-way Joel reaches it, what he gets when he does is `AccountantView`.
+The handoff is a scheduled event rather than a live conversation, and the
+local copy is the cheaper, reversible choice — a hosted view can be built
+later over the same `AccountantView` if the snapshot turns out to be the
+wrong shape.
+
+### Dan: make a pack
+
+```bash
+ledger accountant pack --db .local/ledger.sqlite --company aquamentor --as-of 2026-12-31 --out ~/Desktop/for-joel
+```
+
+Run it once per company (`--company waterline` for WaterLine CNC). It writes
+`~/Desktop/for-joel/aquamentor-2026-12-31/` and refuses if that folder
+already exists — a pack is never written over; move the old one aside to
+make a new one. Zip the folder and send it however Joel takes files.
+
+What is in it:
+
+| File | What |
+|---|---|
+| `book.sqlite` | A `VACUUM INTO` copy of the **whole** ledger file as it stood when the pack was made (both companies, everything posted so far, not cut off at `--as-of`). Rollback-journal mode, so it opens without writing `-wal`/`-shm` files. |
+| `tb-<as-of>.csv` | Trial balance as of the date. |
+| `pnl-<year>.csv` | P&L year to date by account. |
+| `pnl-by-class-<year>.csv` | Income, COGS and expense year to date by account and class. |
+| `bs-<as-of>.csv` | Balance sheet as of the date. |
+| `gl-<year>.csv` | GL detail for the year, with running balances. |
+| `audit-trail.csv` | Every posting since the last close, with actor, command and timestamp. |
+| `close-history.csv` | Every close and reopen. |
+| `adjustments.csv` | The adjustment request queue, one line per proposed journal line. |
+| `ar-aging-<as-of>.csv`, `ap-aging-<as-of>.csv` | Aging by contact in QBO's buckets, with a `TOTAL` line that ties to 1200 and to 2000 on the trial balance. |
+| `sales-tax-<year>.csv` | §9 lines A–D, plus line E and the E − C variance, for each quarter that has ended by `--as-of`. |
+| `manifest.json` | Company, as-of, generated-at, schema version, tax rate, the trial balance totals, every table's row count in the snapshot, and each file's SHA-256, size and CSV row count. |
+| `SHA256SUMS` | The same hashes (plus the manifest's) in `shasum -a 256 -c` form. |
+
+Every CSV is rendered **from the snapshot**, not from the live book, so the
+folder and the file cannot disagree. Two packs of the same book for the same
+`--as-of` are byte-identical apart from `generated_at` (and so the
+manifest's own line in `SHA256SUMS`).
+
+### Joel: open it
+
+```bash
+ledger accountant open --pack aquamentor-2026-12-31
+```
+
+This re-hashes every file against `manifest.json`, opens `book.sqlite`
+read-only, checks its trial balance still totals what the manifest says, and
+prints the trial balance and how far the books are closed. Without the
+`ledger` binary, the hashes alone check with:
+
+```bash
+shasum -a 256 -c SHA256SUMS
+```
+
+Every report reads the snapshot directly — `tb`, `pnl`, `bs`, `tax`, `gl`,
+`audit` and `adjust list` open a write-protected `--db` read-only:
+
+```bash
+ledger gl --db aquamentor-2026-12-31/book.sqlite --company aquamentor --from 2026-01-01 --to 2026-12-31
+```
+
+and so does the MCP server, for asking Claude about the books:
+`LEDGER_DB=aquamentor-2026-12-31/book.sqlite LEDGER_COMPANY=aquamentor ledger-mcp`.
+
+### Why Joel's copy cannot post
+
+Three layers, any one of which is enough, all tested
+(`handoff::tests::every_write_is_refused_against_a_snapshot`):
+
+1. Every file in the pack is mode `0444`.
+2. `Ledger::open_read_only` opens the snapshot `SQLITE_OPEN_READ_ONLY` and
+   sets `PRAGMA query_only`, and runs no migration — SQLite refuses every
+   write statement, so `post_entry`, `close_period` and even
+   `AccountantView::propose_adjustment` fail. A snapshot made by an older
+   build is refused rather than read against the wrong schema.
+3. The MCP server's write gate refuses all fourteen write tools up front
+   with "this ledger is a read-only accountant snapshot".
+
+So on the snapshot Joel reads everything and proposes nothing. His adjusting
+entries reach Dan as he sends them today (email, his own workpapers), and
+Dan enters each one on the live book with `ledger adjust propose` and then
+decides it — the request queue above is unchanged. If that round trip turns
+out to be the friction point, the fix is a proposals file the pack can
+import, not write access to the copy.

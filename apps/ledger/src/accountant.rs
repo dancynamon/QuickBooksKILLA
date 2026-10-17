@@ -6,9 +6,11 @@
 //!    read-only reports over what [`crate::store`] and [`crate::report`]
 //!    already hold. Nothing here writes.
 //! 2. **CSV exports** ([`export_csv`], [`export_pack`]): a stable, two-decimal
-//!    CSV per report, and a five-file pack for a year end handoff. **No PDF**
-//!    — that arrives with the UI (§8 "Exports": "the PDF is the one that goes
-//!    in the file"), and there is no UI yet.
+//!    CSV per report, and a five-file pack for a year end handoff, which
+//!    [`crate::handoff`] wraps with a read-only snapshot, aging, the tax
+//!    lines and a manifest. **No PDF** — that arrives with the UI (§8
+//!    "Exports": "the PDF is the one that goes in the file"), and there is no
+//!    UI yet.
 //! 3. **The adjusting-entry request queue** ([`propose_adjustment`],
 //!    [`propose_reclassify`], [`list_adjustments`], [`decide_adjustment`]):
 //!    the one write path this module has. An accountant proposes; Dan
@@ -26,10 +28,10 @@
 //!    — there is no `post_entry`, `close_period`, `reopen_period` or
 //!    `save_document` method on it, so a period-locked, read-only role is a
 //!    compile-time fact about the type rather than a runtime permission check
-//!    that something could bypass. **Open (W24):** whether Joel reaches this
-//!    through a local read-only SQLite copy or a hosted view is a deployment
-//!    question, not an API one, and is unresolved — see `LEDGER-DESIGN.md`
-//!    §8 "How Joel reaches it".
+//!    that something could bypass. **W24 (proposed, awaiting Joel):** Joel
+//!    reaches this through a dated, read-only SQLite snapshot
+//!    ([`crate::handoff`]), not a hosted view — see `LEDGER-DESIGN.md` §8
+//!    "How Joel reaches it".
 //!
 //! Every proposal is validated here before it is stored, so a rejection is
 //! immediate rather than discovered at approval time (§8: "checked here so
@@ -245,10 +247,9 @@ pub fn audit_trail(
 
 /// A report that renders as one CSV with a stable header row. Implemented
 /// for [`TrialBalance`], [`Pnl`], [`BalanceSheet`] and [`GlDetail`] — the
-/// four §8 "Exports" names this crate's `report` module has. There is no
-/// `AgingReport` in [`crate::report`] today (AR/AP aging is listed in §8's
-/// scope table but not yet built), so it is skipped here rather than
-/// invented; add an `impl ToCsv for AgingReport` alongside it when it exists.
+/// four §8 "Exports" names this crate's `report` module has. AR/AP aging
+/// lives in [`crate::books::aging`] (D28) and its CSV in [`crate::handoff`],
+/// which is the only place that exports it.
 pub trait ToCsv {
     fn to_csv(&self) -> String;
 }
@@ -258,7 +259,7 @@ pub fn export_csv<T: ToCsv + ?Sized>(report: &T) -> String {
     report.to_csv()
 }
 
-fn csv_field(raw: &str) -> String {
+pub(crate) fn csv_field(raw: &str) -> String {
     if raw.contains(',') || raw.contains('"') || raw.contains('\n') {
         format!("\"{}\"", raw.replace('"', "\"\""))
     } else {
@@ -266,7 +267,7 @@ fn csv_field(raw: &str) -> String {
     }
 }
 
-fn csv_money(amount: Money) -> String {
+pub(crate) fn csv_money(amount: Money) -> String {
     let minor = amount.minor();
     let sign = if minor < 0 { "-" } else { "" };
     let abs = minor.unsigned_abs();
@@ -854,11 +855,12 @@ pub fn decide_adjustment(
 /// surface, checked by the compiler wherever `AccountantView` is used,
 /// rather than a runtime role check that a bug could route around.
 ///
-/// **Open (W24):** how Joel's process reaches this — a local install reading
-/// a read-only SQLite copy, versus a hosted view — is unresolved; see
-/// `LEDGER-DESIGN.md` §8 "How Joel reaches it". This type is the same either
-/// way; only what process constructs it, and against what copy of the file,
-/// differs.
+/// **W24 (proposed, awaiting Joel):** Joel's process constructs this over
+/// the handoff snapshot ([`crate::handoff::verify_pack`], opened with
+/// [`crate::store::Ledger::open_read_only`]), so the `propose_*` methods fail
+/// there — SQLite refuses the insert — and Joel's proposals reach Dan out of
+/// band, to be entered on the live book. Over the live book the type is
+/// unchanged.
 pub struct AccountantView<'a> {
     ledger: &'a Ledger,
     company: String,
