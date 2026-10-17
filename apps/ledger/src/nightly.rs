@@ -88,7 +88,7 @@ pub fn run_nightly(
         replica,
         realm,
         company,
-        &ImportOptions::default(),
+        &ImportOptions::with_d28_fallback(None, None),
         now,
     )?;
 

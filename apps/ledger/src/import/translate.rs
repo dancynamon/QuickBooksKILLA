@@ -49,6 +49,29 @@ pub struct TranslateContext {
     pub classes: ClassMapping,
     pub items: HashMap<String, ItemContext>,
     pub customers_exempt: HashSet<String>,
+    /// D28: the import-only last link of §3's default chain. A document dated
+    /// before `before` whose line still has no class after the payload, the
+    /// item default and the header takes `class` instead of being rejected.
+    /// `None` (the default) means no fallback: every unclassed line is left
+    /// for the posting gate to refuse, which is also what happens to any
+    /// document dated on or after `before`.
+    pub class_fallback: Option<ClassFallback>,
+    /// For every JournalEntry that touches AR or AP, the side it posts there
+    /// (net across its AR/AP lines). A Payment or BillPayment line linked to
+    /// a JournalEntry carries no sign of its own, so this is what says
+    /// whether the entry acts like an invoice/bill (applied, positive) or
+    /// like a credit (applied, negative). Built by the driver.
+    /// Keyed `(je_id, entity_id)`, plus `(je_id, "")` for the whole entry.
+    pub journal_ar_ap_sides: HashMap<(String, String), Side>,
+}
+
+/// D28: the import-only class for history QBO never classed.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ClassFallback {
+    pub class: ClassId,
+    /// Documents dated strictly before this take the fallback. 1 Jan 2027,
+    /// the new books' opening (D24), for the live import.
+    pub before: NaiveDate,
 }
 
 /// Where a line's class came from — §3's default chain, made visible on every
@@ -61,6 +84,9 @@ pub enum ClassSource {
     ItemDefault,
     /// Neither the line nor its item carried a class; the header's did.
     Header,
+    /// Nothing in the chain carried a class and the document predates the
+    /// cut date, so D28's import-only fallback class was used.
+    ImportFallback,
 }
 
 /// The result of translating one replica document.
@@ -163,10 +189,17 @@ pub fn translate(
         let detail_type = json_text(raw_line, "DetailType");
         let detail = detail_of(raw_line, detail_type.as_deref());
 
-        let item = parsed_line
-            .item_id
-            .as_deref()
-            .and_then(|id| ctx.items.get(id));
+        // QBO's automated shipping and card-surcharge lines name pseudo items
+        // (`SHIPPING_ITEM_ID`, `SURCHARGE_ITEM_ID`) that exist in no item
+        // list. They are a shipping line and an untracked income line, with
+        // no item behind either (D30).
+        let pseudo_item = parsed_line.item_id.as_deref().and_then(pseudo_item_kind);
+        let item_id = if pseudo_item.is_some() {
+            None
+        } else {
+            parsed_line.item_id.clone()
+        };
+        let item = item_id.as_deref().and_then(|id| ctx.items.get(id));
         let is_shipping_item = item.is_some_and(|context| {
             context.item.name.to_lowercase().contains("shipping")
                 || context
@@ -176,7 +209,9 @@ pub fn translate(
                     .is_some_and(|sku| sku.to_lowercase().contains("shipping"))
         });
 
-        let kind = if detail_type.as_deref() == Some("ShippingLineDetail") || is_shipping_item {
+        let kind = if let Some(kind) = pseudo_item {
+            kind
+        } else if detail_type.as_deref() == Some("ShippingLineDetail") || is_shipping_item {
             LineKind::Shipping
         } else {
             match detail_type.as_deref() {
@@ -258,11 +293,27 @@ pub fn translate(
         // expense carries a class. Balance sheet lines (`Account`) and
         // description-only lines are not asked for one, and are not warned
         // about lacking one.
-        let (class, source) = if matches!(
-            kind,
-            LineKind::Item | LineKind::Discount | LineKind::Shipping | LineKind::Journal
-        ) {
-            resolve_line_class(parsed_line, item, &header_class, ctx, &mut warnings)
+        //
+        // An `Account` line is asked only when the account it names is one
+        // the gate wants a class on (an expense line on a Purchase or Bill);
+        // its own payload `ClassRef` is read like any other line's.
+        let wants_class = match kind {
+            LineKind::Item | LineKind::Discount | LineKind::Shipping => true,
+            LineKind::Journal | LineKind::Account => {
+                account.as_ref().is_some_and(crate::post::requires_class)
+            }
+            LineKind::Description => false,
+        };
+        let (class, source) = if wants_class {
+            resolve_line_class(
+                parsed_line.line_no,
+                parsed_line.class_id.as_deref(),
+                item,
+                &header_class,
+                txn_date,
+                ctx,
+                &mut warnings,
+            )
         } else {
             (None, None)
         };
@@ -275,7 +326,7 @@ pub fn translate(
             kind,
             amount: parsed_line.amount,
             class,
-            item_id: parsed_line.item_id.clone(),
+            item_id,
             account,
             is_taxable: parsed_line.is_taxable,
             qty: parsed_line.qty,
@@ -291,11 +342,20 @@ pub fn translate(
     if let Some(ship_amount) = json_money(raw, "ShipAmt", &qbo_id)? {
         if !ship_amount.is_zero() {
             let line_no = doc_lines.iter().map(|line| line.line_no).max().unwrap_or(0) + 1;
+            let (class, source) = resolve_line_class(
+                line_no,
+                None,
+                None,
+                &header_class,
+                txn_date,
+                ctx,
+                &mut warnings,
+            );
             doc_lines.push(DocLine {
                 line_no,
                 kind: LineKind::Shipping,
                 amount: ship_amount,
-                class: header_class.clone(),
+                class,
                 item_id: None,
                 account: None,
                 is_taxable: false,
@@ -305,8 +365,8 @@ pub fn translate(
                 posting: None,
                 entity: None,
             });
-            if header_class.is_some() {
-                class_sources.push((line_no, ClassSource::Header));
+            if let Some(source) = source {
+                class_sources.push((line_no, source));
             }
         }
     }
@@ -324,8 +384,39 @@ pub fn translate(
     });
 
     let pay_from = resolve_pay_from(raw, doc_kind, &ctx.accounts, &mut warnings);
-    let applications = collect_applications(raw, &mut warnings);
+    let applications = collect_applications(
+        raw,
+        doc_kind,
+        doc.contact_id.as_deref(),
+        ctx,
+        &mut warnings,
+    );
     let unapplied = json_money(raw, "UnappliedAmt", &qbo_id)?.unwrap_or(Money::ZERO);
+
+    // D29: a QBO Payment's lines are its applications, one per document
+    // paid, and they are already `applications` above. What the document
+    // states is its `TotalAmt`, so that is the one line it keeps: the
+    // posting gate then checks applications plus unapplied against the
+    // amount the customer actually handed over.
+    if doc_kind == DocKind::Payment {
+        if let Some(total) = json_money(raw, "TotalAmt", &qbo_id)? {
+            doc_lines = vec![DocLine {
+                line_no: 1,
+                kind: LineKind::Description,
+                amount: total,
+                class: None,
+                item_id: None,
+                account: None,
+                is_taxable: false,
+                qty: None,
+                unit_cost: None,
+                description: Some("Stated total (QBO TotalAmt)".to_string()),
+                posting: None,
+                entity: None,
+            }];
+            class_sources.clear();
+        }
+    }
     let is_voided = entity.is_deleted || json_text(raw, "TxnStatus").as_deref() == Some("Voided");
     let document_id = format!("qbo:{}:{}", entity.entity_type.as_str(), qbo_id);
     let memo = doc
@@ -359,22 +450,33 @@ pub fn translate(
     })
 }
 
+/// The line kind a QBO pseudo item stands for, or `None` for a real item id.
+fn pseudo_item_kind(item_id: &str) -> Option<LineKind> {
+    match item_id {
+        "SHIPPING_ITEM_ID" => Some(LineKind::Shipping),
+        "SURCHARGE_ITEM_ID" => Some(LineKind::Item),
+        _ => None,
+    }
+}
+
 /// §3's default chain: payload `ClassRef`, then the item's own default class
-/// (W16, `ClassSource::ItemDefault`), then the header's class, then none.
+/// (W16, `ClassSource::ItemDefault`), then the header's class, then — import
+/// only, and only before the cut date — D28's fallback class, then none.
 fn resolve_line_class(
-    parsed_line: &ParsedLine,
+    line_no: i64,
+    payload_class: Option<&str>,
     item: Option<&ItemContext>,
     header_class: &Option<ClassId>,
+    txn_date: NaiveDate,
     ctx: &TranslateContext,
     warnings: &mut Vec<String>,
 ) -> (Option<ClassId>, Option<ClassSource>) {
-    if let Some(class_id) = parsed_line.class_id.as_deref() {
+    if let Some(class_id) = payload_class {
         return match ctx.classes.by_source_ref(class_id) {
             Some(mapped) => (Some(mapped.class_id.clone()), Some(ClassSource::Payload)),
             None => {
                 warnings.push(format!(
-                    "line {}: class {class_id} has no ledger mapping",
-                    parsed_line.line_no
+                    "line {line_no}: class {class_id} has no ledger mapping"
                 ));
                 (None, None)
             }
@@ -386,9 +488,18 @@ fn resolve_line_class(
     if let Some(header) = header_class.clone() {
         return (Some(header), Some(ClassSource::Header));
     }
+    if let Some(fallback) = ctx
+        .class_fallback
+        .as_ref()
+        .filter(|fallback| txn_date < fallback.before)
+    {
+        return (
+            Some(fallback.class.clone()),
+            Some(ClassSource::ImportFallback),
+        );
+    }
     warnings.push(format!(
-        "line {}: no class from the payload, the item's default, or the header",
-        parsed_line.line_no
+        "line {line_no}: no class from the payload, the item's default, or the header"
     ));
     (None, None)
 }
@@ -533,7 +644,28 @@ fn resolve_pay_account(
     }
 }
 
-fn collect_applications(raw: &Value, warnings: &mut Vec<String>) -> Vec<Application> {
+/// Every `LinkedTxn` on a Payment, BillPayment, CreditMemo or VendorCredit
+/// line, as an [`Application`].
+///
+/// The amount: QBO's own `LinkedTxn[].Amount` when the payload carries one,
+/// else the enclosing line's `Amount`. On a live Payment or BillPayment the
+/// link never carries an amount (D29): the line does, one line per document
+/// applied. The sign says which way the application moves the balance:
+/// applying an invoice or bill is positive, applying a credit memo or vendor
+/// credit (or a deposit that credited AR) inside the same payment is
+/// negative, so the applications sum to
+/// what the payment actually takes out of AR or AP. A linked JournalEntry
+/// takes its sign from the side it posts to AR or AP
+/// ([`TranslateContext::journal_ar_ap_sides`]): on a Payment a JE that
+/// debits AR is applied like an invoice, one that credits it like a credit
+/// memo; on a BillPayment the reverse.
+fn collect_applications(
+    raw: &Value,
+    doc_kind: DocKind,
+    contact_id: Option<&str>,
+    ctx: &TranslateContext,
+    warnings: &mut Vec<String>,
+) -> Vec<Application> {
     let mut applications = Vec::new();
     let Some(lines) = raw.get("Line").and_then(Value::as_array) else {
         return applications;
@@ -545,6 +677,10 @@ fn collect_applications(raw: &Value, warnings: &mut Vec<String>) -> Vec<Applicat
         let Some(linked) = line.get("LinkedTxn").and_then(Value::as_array) else {
             continue;
         };
+        let line_amount = line
+            .get("Amount")
+            .and_then(json_decimal)
+            .and_then(|d| round_money(d, RoundingPolicy::MirroredAmount).ok());
         for link in linked {
             let (Some(txn_id), Some(txn_type)) =
                 (json_text(link, "TxnId"), json_text(link, "TxnType"))
@@ -555,13 +691,27 @@ fn collect_applications(raw: &Value, warnings: &mut Vec<String>) -> Vec<Applicat
                 .get("Amount")
                 .and_then(json_decimal)
                 .and_then(|d| round_money(d, RoundingPolicy::MirroredAmount).ok())
+                .or(if linked.len() == 1 { line_amount } else { None })
                 .unwrap_or(Money::ZERO);
             match map_txn_type(&txn_type) {
-                Some(target_kind) => applications.push(Application {
-                    target_document_id: txn_id,
-                    target_kind,
-                    amount,
-                }),
+                Some(target_kind) => {
+                    let amount = if application_is_credit(
+                        doc_kind,
+                        target_kind,
+                        &txn_id,
+                        contact_id,
+                        ctx,
+                    ) {
+                        amount.checked_neg().unwrap_or(amount)
+                    } else {
+                        amount
+                    };
+                    applications.push(Application {
+                        target_document_id: txn_id,
+                        target_kind,
+                        amount,
+                    })
+                }
                 // D11: an unrecognized link type is reported, never dropped silently.
                 None => warnings.push(format!(
                     "linked transaction {txn_id} has type {txn_type:?}, which has no ledger document kind; not applied"
@@ -570,6 +720,35 @@ fn collect_applications(raw: &Value, warnings: &mut Vec<String>) -> Vec<Applicat
         }
     }
     applications
+}
+
+/// Whether applying `target` inside a `doc_kind` payment gives money back
+/// rather than taking it: a credit memo inside a customer payment, a vendor
+/// credit inside a bill payment, or a journal entry that sits on the credit
+/// side of AR (or the debit side of AP).
+fn application_is_credit(
+    doc_kind: DocKind,
+    target: DocKind,
+    txn_id: &str,
+    contact_id: Option<&str>,
+    ctx: &TranslateContext,
+) -> bool {
+    let journal_side = || {
+        let sides = &ctx.journal_ar_ap_sides;
+        contact_id
+            .and_then(|contact| sides.get(&(txn_id.to_string(), contact.to_string())))
+            .or_else(|| sides.get(&(txn_id.to_string(), String::new())))
+            .copied()
+    };
+    match (doc_kind, target) {
+        // A deposit that credited AR for this customer, now applied to the
+        // customer's invoices inside a $0 payment.
+        (DocKind::Payment, DocKind::CreditMemo | DocKind::Deposit) => true,
+        (DocKind::BillPayment, DocKind::VendorCredit) => true,
+        (DocKind::Payment, DocKind::JournalEntry) => journal_side() == Some(Side::Credit),
+        (DocKind::BillPayment, DocKind::JournalEntry) => journal_side() == Some(Side::Debit),
+        _ => false,
+    }
 }
 
 fn map_txn_type(raw: &str) -> Option<DocKind> {

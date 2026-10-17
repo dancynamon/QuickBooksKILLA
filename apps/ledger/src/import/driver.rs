@@ -16,12 +16,14 @@ use qbo_local::store::{Store, StoreError};
 use serde_json::Value;
 use thiserror::Error;
 
-use crate::types::CompanyId;
+use crate::chart;
+use crate::types::{ClassId, CompanyId, Side};
 
 use super::accounts::map_accounts;
 use super::classes::{map_classes, ClassMapping};
 use super::translate::{
-    json_reference, translate, ItemContext, TranslateContext, TranslateError, Translated,
+    json_reference, translate, ClassFallback, ItemContext, TranslateContext, TranslateError,
+    Translated,
 };
 
 /// Masters first (built into the mappings below), then documents in this
@@ -42,10 +44,29 @@ const DOCUMENT_TYPE_ORDER: &[DocumentType] = &[
     DocumentType::JournalEntry,
 ];
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct ImportOptions {
     pub from: Option<NaiveDate>,
     pub to: Option<NaiveDate>,
+    /// D28's import-only fallback class. `None` leaves every unclassed line
+    /// for the posting gate to refuse.
+    pub class_fallback: Option<ClassFallback>,
+}
+
+impl ImportOptions {
+    /// What `ledger import`, the nightly run and the boundary walk use: the
+    /// given window, plus D28's fallback class for anything dated before the
+    /// new books open on 1 January 2027 (D24).
+    pub fn with_d28_fallback(from: Option<NaiveDate>, to: Option<NaiveDate>) -> Self {
+        ImportOptions {
+            from,
+            to,
+            class_fallback: Some(ClassFallback {
+                class: ClassId(chart::IMPORT_FALLBACK_CLASS.0.to_string()),
+                before: NaiveDate::from_ymd_opt(2027, 1, 1).expect("1 January 2027 is a date"),
+            }),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -86,7 +107,9 @@ pub fn run(
     options: &ImportOptions,
     sink: &mut dyn FnMut(Translated) -> Result<(), Box<dyn std::error::Error>>,
 ) -> Result<ImportReport, ImportError> {
-    let accounts = map_accounts(&parsed_accounts(store, realm)?);
+    let replica_accounts = parsed_accounts(store, realm)?;
+    let journal_ar_ap_sides = build_journal_ar_ap_sides(store, realm, &replica_accounts)?;
+    let accounts = map_accounts(&replica_accounts);
     let classes = map_classes(&parsed_classes(store, realm)?, company);
     let items = build_item_contexts(store, realm, &classes)?;
     let customers_exempt = build_exempt_customers(store, realm)?;
@@ -107,6 +130,8 @@ pub fn run(
         classes,
         items,
         customers_exempt,
+        class_fallback: options.class_fallback.clone(),
+        journal_ar_ap_sides,
     };
 
     let mut ordered: Vec<(NaiveDate, String, Translated)> = Vec::new();
@@ -216,6 +241,82 @@ pub(crate) fn build_item_contexts(
         );
     }
     Ok(items)
+}
+
+/// For every JournalEntry with a line on an AR or AP account, the side its
+/// AR/AP lines net to, per entity on those lines (`(je_id, entity_id)`) and
+/// across the whole entry (`(je_id, "")`). A payment line linked to such an
+/// entry has no sign of its own (D29); this is where it comes from. Per
+/// entity, because one entry often moves AR between customers.
+fn build_journal_ar_ap_sides(
+    store: &Store,
+    realm: &RealmId,
+    accounts: &[ParsedAccount],
+) -> Result<HashMap<(String, String), Side>, ImportError> {
+    let ar_ap: HashSet<&str> = accounts
+        .iter()
+        .filter(|account| {
+            let kind = account
+                .account_type
+                .as_deref()
+                .unwrap_or_default()
+                .replace(' ', "")
+                .to_ascii_lowercase();
+            kind == "accountsreceivable" || kind == "accountspayable"
+        })
+        .map(|account| account.qbo_id.as_str())
+        .collect();
+
+    let mut sides = HashMap::new();
+    for entry in store.entity_index(realm, EntityType::JournalEntry)? {
+        let Some(entity) = store.get_entity(realm, EntityType::JournalEntry, &entry.qbo_id)? else {
+            continue;
+        };
+        let Some(lines) = entity.raw_json.get("Line").and_then(Value::as_array) else {
+            continue;
+        };
+        let mut nets: HashMap<String, rust_decimal::Decimal> = HashMap::new();
+        for line in lines {
+            let Some(detail) = line.get("JournalEntryLineDetail") else {
+                continue;
+            };
+            let Some(account) = json_reference(detail, "AccountRef") else {
+                continue;
+            };
+            if !ar_ap.contains(account.as_str()) {
+                continue;
+            }
+            let amount = line
+                .get("Amount")
+                .and_then(|value| value.to_string().parse::<rust_decimal::Decimal>().ok())
+                .unwrap_or_default();
+            let signed = match detail.get("PostingType").and_then(Value::as_str) {
+                Some("Debit") => amount,
+                Some("Credit") => -amount,
+                _ => continue,
+            };
+            let entity = detail
+                .get("Entity")
+                .and_then(|entity| json_reference(entity, "EntityRef"))
+                .unwrap_or_default();
+            *nets.entry(String::new()).or_default() += signed;
+            if !entity.is_empty() {
+                *nets.entry(entity).or_default() += signed;
+            }
+        }
+        for (entity, net) in nets {
+            if net.is_zero() {
+                continue;
+            }
+            let side = if net.is_sign_positive() {
+                Side::Debit
+            } else {
+                Side::Credit
+            };
+            sides.insert((entry.qbo_id.clone(), entity), side);
+        }
+    }
+    Ok(sides)
 }
 
 /// §6: `Customer.Taxable == false` or a `ResaleNum` on file — a customer

@@ -164,7 +164,10 @@ test("a write dated on or before locked_through is refused, not silently accepte
 
 test("proposing and approving an adjustment moves the trial balance", async () => {
   const ledger = createFixtureProvider();
-  const before = await ledger.trialBalance("2026-09-30");
+  // An approved adjustment posts dated the day it is decided, so read the
+  // balance as of a date after any run of this test, not a fixed past one.
+  const asOf = "2099-12-31";
+  const before = await ledger.trialBalance(asOf);
   const suppliesBefore = before.rows.find((r) => r.account_id === "6100").balance;
 
   const proposed = await ledger.proposeAdjustment("joel", "move supplies", [
@@ -173,7 +176,7 @@ test("proposing and approving an adjustment moves the trial balance", async () =
   ]);
   await ledger.decideAdjustment(proposed.request_id, "dan", true, "ok");
 
-  const after = await ledger.trialBalance("2026-09-30");
+  const after = await ledger.trialBalance(asOf);
   const suppliesAfter = after.rows.find((r) => r.account_id === "6100").balance;
   assert.equal((Number(suppliesAfter) - Number(suppliesBefore)).toFixed(2), "30.00");
 });

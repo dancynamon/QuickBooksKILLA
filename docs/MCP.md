@@ -408,6 +408,31 @@ The date the period gate is locked through, or `null`.
 { "name": "locked_through", "arguments": {} }
 ```
 
+### `list_contacts` / `list_items`
+
+Customers and vendors (`kind` `"customer"` or `"vendor"`), and products and
+services, from the book's own master data (D28). `query` matches anywhere in
+the name, company name, email, SKU or description, case-insensitive;
+`include_inactive` adds the inactive ones.
+
+```json
+{ "name": "list_contacts", "arguments": { "kind": "customer", "query": "pool" } }
+```
+
+### `open_documents` / `aging`
+
+What is still open on the receivable book (invoices, credit memos as
+negatives) or the payable book (bills, vendor credits) as of a date, derived
+from the saved documents and the applications against them — nothing is
+stored. `aging` buckets it per contact into current, 1-30, 31-60, 61-90 and
+over 90 days past due; its total ties to 1200 (receivable) or 2000 (payable)
+on the trial balance. The slim cutover import (D28) checks itself against
+QBO's aging with these.
+
+```json
+{ "name": "aging", "arguments": { "book": "receivable", "as_of": "2026-10-15" } }
+```
+
 ## Write tools
 
 ### `save_and_post_document`
@@ -419,6 +444,45 @@ up in, an inline `items` map (item id to `ItemAccounts` JSON) supplies
 whatever an `Item` line needs. Returns `{ document_id, version, entry_id,
 entry, locked_through }` — `entry_id` and `entry` are `null` for a
 non-posting document.
+
+### `upsert_contact` / `upsert_item`
+
+Create or replace a customer, vendor or item. A contact's `display_name` is
+unique per kind; an item's accounts and class must exist, and an inventory
+item (and only one) carries an `asset_account`. `source_ref` keeps the QBO id
+when the slim import loads them.
+
+### `create_document`
+
+The standalone entry path (D28), and the one a repointed skill should use.
+It takes what a person would type and fills the rest from master data: a new
+`document_id`, the next `number` for invoices, estimates, sales receipts,
+credit memos, refund receipts and POs (a number already in use is refused),
+`due_date` from the contact's terms, `header_class` from the contact's
+default, and sales tax at the NJ rate on taxable lines (zero for an exempt
+customer). The contact must exist, be active and be the right kind; every
+item must exist. A document the posting rules refuse leaves nothing saved.
+
+```json
+{
+  "name": "create_document",
+  "arguments": {
+    "actor": "process-sales-order",
+    "document": {
+      "kind": "Invoice",
+      "txn_date": "2026-09-13",
+      "contact": { "kind": "Customer", "id": "cust-blue-harbor" },
+      "lines": [
+        { "kind": "Item", "item_id": "rt-50-red", "qty": "10", "amount": "199.50",
+          "is_taxable": true }
+      ]
+    }
+  }
+}
+```
+
+Returns `{ document_id, version, number, due_date, total, tax, entry_id,
+entry, locked_through }`.
 
 ### `reverse_entry`
 

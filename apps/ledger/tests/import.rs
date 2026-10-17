@@ -568,6 +568,7 @@ fn options_from_and_to_filter_by_txn_date() {
     let options = ImportOptions {
         from: NaiveDate::from_ymd_opt(2026, 7, 20),
         to: NaiveDate::from_ymd_opt(2026, 7, 21),
+        class_fallback: None,
     };
     let report = run(&store, &realm(), &company(), &options, &mut |translated| {
         collected.push(translated);

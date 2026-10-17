@@ -57,6 +57,7 @@ use mcp_stdio::{ServerInfo, ToolSet};
 pub use mcp_stdio::{ToolError, ToolSpec};
 
 use crate::accountant::{self, AccountantError};
+use crate::books::{self, Book, BooksError, Contact, Item};
 use crate::post::{self, PostError, Posting};
 use crate::report;
 use crate::store::{AdjustmentState, CommandMeta, Ledger, LedgerError};
@@ -200,7 +201,64 @@ impl<'a> LedgerToolSet<'a> {
                 Ok(json!({ "locked_through": locked.map(|d| d.to_string()) }))
             }
 
+            "list_contacts" => {
+                let kind = match args.get("kind").and_then(Value::as_str) {
+                    None => None,
+                    Some("customer") => Some(ContactKind::Customer),
+                    Some("vendor") => Some(ContactKind::Vendor),
+                    Some(other) => {
+                        return Err(ToolError::new(format!(
+                            "\"kind\" must be \"customer\" or \"vendor\", got {other:?}"
+                        )))
+                    }
+                };
+                let query = args.get("query").and_then(Value::as_str);
+                let inactive = args
+                    .get("include_inactive")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                let contacts =
+                    books::list_contacts(self.ledger, &self.company, kind, query, inactive)
+                        .map_err(books_err)?;
+                Ok(json!(contacts.iter().map(contact_json).collect::<Vec<_>>()))
+            }
+            "list_items" => {
+                let query = args.get("query").and_then(Value::as_str);
+                let inactive = args
+                    .get("include_inactive")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                let items = books::list_items(self.ledger, &self.company, query, inactive)
+                    .map_err(books_err)?;
+                Ok(json!(items.iter().map(item_json).collect::<Vec<_>>()))
+            }
+            "open_documents" => {
+                let book = parse_book(&args)?;
+                let as_of = parse_date(&args, "as_of")?;
+                let open = books::open_documents(self.ledger, &self.company, book, as_of)
+                    .map_err(books_err)?;
+                Ok(json!(open
+                    .iter()
+                    .map(open_document_json)
+                    .collect::<Vec<_>>()))
+            }
+            "aging" => {
+                let book = parse_book(&args)?;
+                let as_of = parse_date(&args, "as_of")?;
+                let aging =
+                    books::aging(self.ledger, &self.company, book, as_of).map_err(books_err)?;
+                Ok(json!({
+                    "book": book_str(aging.book),
+                    "as_of": aging.as_of.to_string(),
+                    "rows": aging.rows.iter().map(aging_row_json).collect::<Vec<_>>(),
+                    "totals": aging_row_json(&aging.totals),
+                }))
+            }
+
             // --- writes ---------------------------------------------------
+            "upsert_contact" => self.upsert_contact(&mut args),
+            "upsert_item" => self.upsert_item(&mut args),
+            "create_document" => self.create_document(&mut args),
             "save_and_post_document" => self.save_and_post_document(&mut args),
             "reverse_entry" => self.reverse_entry(&args),
             "propose_adjustment" => self.propose_adjustment(&mut args),
@@ -295,6 +353,100 @@ impl<'a> LedgerToolSet<'a> {
             );
         }
         Ok(value)
+    }
+
+    fn upsert_contact(&mut self, args: &mut Value) -> Result<Value, ToolError> {
+        self.refuse_if_replaying()?;
+        let raw = args
+            .get_mut("contact")
+            .map(Value::take)
+            .ok_or_else(|| ToolError::new("missing \"contact\""))?;
+        let contact: Contact = serde_json::from_value(raw)
+            .map_err(|err| ToolError::new(format!("invalid \"contact\": {err}")))?;
+        books::upsert_contact(self.ledger, &self.company, &contact, Utc::now())
+            .map_err(books_err)?;
+        self.with_locked_through(json!({ "contact": contact_json(&contact) }))
+    }
+
+    fn upsert_item(&mut self, args: &mut Value) -> Result<Value, ToolError> {
+        self.refuse_if_replaying()?;
+        let mut raw = args
+            .get_mut("item")
+            .map(Value::take)
+            .ok_or_else(|| ToolError::new("missing \"item\""))?;
+        normalize_money_fields(&mut raw);
+        let item: Item = serde_json::from_value(raw)
+            .map_err(|err| ToolError::new(format!("invalid \"item\": {err}")))?;
+        books::upsert_item(self.ledger, &self.company, &item, Utc::now()).map_err(books_err)?;
+        self.with_locked_through(json!({ "item": item_json(&item) }))
+    }
+
+    /// The standalone entry path (D28): the caller sends what a person would
+    /// type, [`books::prepare_document`] checks it against the master data
+    /// and fills the rest, then it is saved and posted exactly as
+    /// `save_and_post_document` does.
+    fn create_document(&mut self, args: &mut Value) -> Result<Value, ToolError> {
+        self.refuse_if_replaying()?;
+        let actor = required_str(args, "actor")?.to_string();
+        let mut document_value = args
+            .get_mut("document")
+            .map(Value::take)
+            .ok_or_else(|| ToolError::new("missing \"document\""))?;
+        fill_document_defaults(&mut document_value)?;
+        normalize_money_fields(&mut document_value);
+        let doc: LedgerDocument = serde_json::from_value(document_value)
+            .map_err(|err| ToolError::new(format!("invalid \"document\": {err}")))?;
+
+        let (doc, ctx) =
+            books::prepare_document(self.ledger, &self.company, doc, PostingConfig::default())
+                .map_err(books_err)?;
+        // Post before saving, so a document the posting rules refuse (a
+        // missing class, an unbalanced journal) leaves nothing behind. The
+        // version it will be saved as is the next one.
+        let next_version = self
+            .ledger
+            .document_version_count(&self.company, &doc.document_id)
+            .map_err(ledger_err)?
+            + 1;
+        let posting = post::post(&doc, next_version, &ctx).map_err(post_err)?;
+
+        let now = Utc::now();
+        let version = self
+            .ledger
+            .save_document(
+                &self.company,
+                &doc,
+                CommandMeta {
+                    actor_id: actor,
+                    kind: "mcp_create_document".to_string(),
+                    hlc: now.to_rfc3339(),
+                },
+                now,
+            )
+            .map_err(ledger_err)?;
+        debug_assert_eq!(version.version, next_version);
+
+        let (entry_id, entry_value) = match posting {
+            Posting::NonPosting => (Value::Null, Value::Null),
+            Posting::Entry(entry) => {
+                let entry_id = self
+                    .ledger
+                    .post_entry(&self.company, &entry, now)
+                    .map_err(ledger_err)?;
+                (json!(entry_id), journal_entry_json(&entry))
+            }
+        };
+
+        self.with_locked_through(json!({
+            "document_id": doc.document_id,
+            "version": version.version,
+            "number": doc.number,
+            "due_date": doc.due_date.map(|d| d.to_string()),
+            "total": money_str(books::document_total(&doc).map_err(|e| ToolError::new(e.to_string()))?),
+            "tax": doc.tax.as_ref().map(|t| money_str(t.total_tax)),
+            "entry_id": entry_id,
+            "entry": entry_value,
+        }))
     }
 
     fn save_and_post_document(&mut self, args: &mut Value) -> Result<Value, ToolError> {
@@ -636,6 +788,113 @@ pub fn tools() -> Vec<ToolSpec> {
                 no period has ever been closed. No entry may post on or before this date; every \
                 write tool's result also carries this field so a caller always sees the gate.",
             input_schema: tool_schema(json!({}), &[]),
+        },
+        ToolSpec {
+            name: "list_contacts",
+            description: "Customers and vendors in this book (D28), by name. `kind` narrows to \
+                \"customer\" or \"vendor\"; `query` matches anywhere in the display name, \
+                company name or email, case-insensitive. Inactive contacts only with \
+                `include_inactive`.",
+            input_schema: tool_schema(
+                json!({
+                    "kind": { "type": "string", "enum": ["customer", "vendor"] },
+                    "query": { "type": "string" },
+                    "include_inactive": { "type": "boolean" },
+                }),
+                &[],
+            ),
+        },
+        ToolSpec {
+            name: "list_items",
+            description: "Products and services in this book (D28), by name, with their \
+                accounts, default class, prices and unit cost. `query` matches anywhere in the \
+                SKU, name or description, case-insensitive.",
+            input_schema: tool_schema(
+                json!({
+                    "query": { "type": "string" },
+                    "include_inactive": { "type": "boolean" },
+                }),
+                &[],
+            ),
+        },
+        ToolSpec {
+            name: "open_documents",
+            description: "Every invoice and credit memo (`book` \"receivable\") or bill and \
+                vendor credit (`book` \"payable\") with a balance still open as of `as_of`, \
+                oldest first: total, applied, open, due date. Credits are negative.",
+            input_schema: tool_schema(
+                json!({
+                    "book": { "type": "string", "enum": ["receivable", "payable"] },
+                    "as_of": date_prop("YYYY-MM-DD."),
+                }),
+                &["book", "as_of"],
+            ),
+        },
+        ToolSpec {
+            name: "aging",
+            description: "AR (`book` \"receivable\") or AP (`book` \"payable\") aging as of \
+                a date: one row per contact with current, 1-30, 31-60, 61-90 and over-90 days \
+                past due, plus totals. Ties to the 1200 / 2000 balance on the trial balance.",
+            input_schema: tool_schema(
+                json!({
+                    "book": { "type": "string", "enum": ["receivable", "payable"] },
+                    "as_of": date_prop("YYYY-MM-DD."),
+                }),
+                &["book", "as_of"],
+            ),
+        },
+        ToolSpec {
+            name: "upsert_contact",
+            description: "Creates or replaces a customer or vendor. `contact`: `contact_id`, \
+                `kind` (\"Customer\" or \"Vendor\"), `display_name` (unique per kind), and \
+                optionally `company_name`, `email`, `phone`, `bill_address`, `ship_address`, \
+                `terms_days` (net days; null is due on receipt), `is_tax_exempt`, \
+                `default_class`, `is_active`, `source_ref` (the QBO id when imported).",
+            input_schema: tool_schema(json!({ "contact": { "type": "object" } }), &["contact"]),
+        },
+        ToolSpec {
+            name: "upsert_item",
+            description: "Creates or replaces a product or service. `item`: `item_id`, `name`, \
+                `item_type` (\"inventory\", \"non_inventory\", \"service\"), \
+                `income_account`, `expense_account`, `asset_account` (inventory items only, and \
+                required for them), and optionally `sku` (unique), `description`, \
+                `default_class`, `sales_price`, `purchase_cost`, `unit_cost`, `is_taxable`, \
+                `is_active`, `source_ref`. Every account and class must exist.",
+            input_schema: tool_schema(json!({ "item": { "type": "object" } }), &["item"]),
+        },
+        ToolSpec {
+            name: "create_document",
+            description: "The standalone way to enter a document (D28): an invoice, estimate, \
+                sales receipt, credit memo, purchase order, bill, payment, bill payment and the \
+                rest. Send only what a person would type: `kind`, `txn_date`, `contact` \
+                ({\"kind\":\"Customer\" or \"Vendor\",\"id\":...}), and `lines` (each \
+                `kind`, `amount`, and `item_id` for Item, Shipping and Discount lines, \
+                `account` for Account lines, optionally `qty`, `description`, `class`, \
+                `is_taxable`); payments add `applications` \
+                ([{\"target_document_id\",\"target_kind\",\"amount\"}]). Every other \
+                LedgerDocument field may be left out. The contact must exist, be active and be \
+                the right kind; every item must exist. Fills in: `document_id` (new), `number` \
+                (next in sequence for invoices, estimates, sales receipts, credit memos, refund \
+                receipts and purchase orders; a number already used is refused), `due_date` \
+                (from the contact's terms), `header_class` (the contact's default), and `tax` on \
+                sales (taxable lines at the NJ rate, zero for an exempt customer). Then saves \
+                and posts. Refused, with nothing saved, while an import replay is in progress, \
+                on a closed period, a missing class or an unbalanced journal. Returns \
+                `document_id`, `version`, `number`, `due_date`, `total`, `tax`, `entry_id` and \
+                `entry`.",
+            input_schema: tool_schema(
+                json!({
+                    "document": {
+                        "type": "object",
+                        "description": "The document as typed — see this tool's description.",
+                    },
+                    "actor": {
+                        "type": "string",
+                        "description": "Who is entering this document, recorded on the oplog.",
+                    },
+                }),
+                &["document", "actor"],
+            ),
         },
         ToolSpec {
             name: "save_and_post_document",
@@ -1088,6 +1347,8 @@ fn bank_line_json(line: &crate::store::BankLineRow) -> Value {
 const MONEY_FIELDS: &[&str] = &[
     "amount",
     "unit_cost",
+    "sales_price",
+    "purchase_cost",
     "total_tax",
     "taxable_base",
     "unapplied",
@@ -1262,6 +1523,150 @@ fn parse_adjustment_line(raw: &Value, line_no: i64) -> Result<JournalLine, ToolE
 /// ...") does not literally contain the word "closed"; every write tool's
 /// documented refusal on a closed period does, so this rewords just that one
 /// variant rather than leaving a caller to grep for "locked" instead.
+fn books_err(err: BooksError) -> ToolError {
+    match err {
+        BooksError::Ledger(inner) => ledger_err(inner),
+        other => ToolError::new(other.to_string()),
+    }
+}
+
+fn parse_book(args: &Value) -> Result<Book, ToolError> {
+    match args.get("book").and_then(Value::as_str) {
+        Some("receivable") => Ok(Book::Receivable),
+        Some("payable") => Ok(Book::Payable),
+        other => Err(ToolError::new(format!(
+            "\"book\" must be \"receivable\" or \"payable\", got {other:?}"
+        ))),
+    }
+}
+
+const fn book_str(book: Book) -> &'static str {
+    match book {
+        Book::Receivable => "receivable",
+        Book::Payable => "payable",
+    }
+}
+
+/// `create_document` takes only what a person would type: every
+/// LedgerDocument field it leaves out gets its empty value here, and a
+/// missing `document_id` gets a fresh one. `save_and_post_document` stays
+/// strict.
+fn fill_document_defaults(value: &mut Value) -> Result<(), ToolError> {
+    let map = value
+        .as_object_mut()
+        .ok_or_else(|| ToolError::new("\"document\" must be an object"))?;
+    map.entry("document_id")
+        .or_insert_with(|| json!(uuid::Uuid::now_v7().to_string()));
+    for key in [
+        "number",
+        "due_date",
+        "contact",
+        "header_class",
+        "tax",
+        "deposit_to",
+        "pay_from",
+        "source_ref",
+        "memo",
+    ] {
+        map.entry(key).or_insert(Value::Null);
+    }
+    map.entry("lines").or_insert_with(|| json!([]));
+    map.entry("applications").or_insert_with(|| json!([]));
+    map.entry("unapplied").or_insert(json!(0));
+    map.entry("is_voided").or_insert(json!(false));
+    if let Some(Value::Array(lines)) = map.get_mut("lines") {
+        for (index, line) in lines.iter_mut().enumerate() {
+            let Some(line) = line.as_object_mut() else {
+                continue;
+            };
+            line.entry("line_no").or_insert(json!(index as i64 + 1));
+            line.entry("is_taxable").or_insert(json!(false));
+            for key in [
+                "class",
+                "item_id",
+                "account",
+                "qty",
+                "unit_cost",
+                "description",
+                "posting",
+                "entity",
+            ] {
+                line.entry(key).or_insert(Value::Null);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn contact_json(contact: &Contact) -> Value {
+    json!({
+        "contact_id": contact.contact_id,
+        "kind": match contact.kind {
+            ContactKind::Customer => "customer",
+            ContactKind::Vendor => "vendor",
+        },
+        "display_name": contact.display_name,
+        "company_name": contact.company_name,
+        "email": contact.email,
+        "phone": contact.phone,
+        "bill_address": contact.bill_address,
+        "ship_address": contact.ship_address,
+        "terms_days": contact.terms_days,
+        "is_tax_exempt": contact.is_tax_exempt,
+        "default_class": class_id_json(&contact.default_class),
+        "is_active": contact.is_active,
+        "source_ref": contact.source_ref,
+    })
+}
+
+fn item_json(item: &Item) -> Value {
+    json!({
+        "item_id": item.item_id,
+        "sku": item.sku,
+        "name": item.name,
+        "description": item.description,
+        "item_type": serde_json::to_value(item.item_type).unwrap_or(Value::Null),
+        "income_account": item.income_account.0,
+        "expense_account": item.expense_account.0,
+        "asset_account": item.asset_account.as_ref().map(|a| a.0.clone()),
+        "default_class": class_id_json(&item.default_class),
+        "sales_price": item.sales_price.map(money_str),
+        "purchase_cost": item.purchase_cost.map(money_str),
+        "unit_cost": item.unit_cost.map(money_str),
+        "is_taxable": item.is_taxable,
+        "is_active": item.is_active,
+        "source_ref": item.source_ref,
+    })
+}
+
+fn open_document_json(doc: &books::OpenDocument) -> Value {
+    json!({
+        "document_id": doc.document_id,
+        "kind": doc.kind.as_str(),
+        "number": doc.number,
+        "contact_id": doc.contact_id,
+        "contact_name": doc.contact_name,
+        "txn_date": doc.txn_date.to_string(),
+        "due_date": doc.due_date.to_string(),
+        "total": money_str(doc.total),
+        "applied": money_str(doc.applied),
+        "open": money_str(doc.open),
+    })
+}
+
+fn aging_row_json(row: &books::AgingRow) -> Value {
+    json!({
+        "contact_id": row.contact_id,
+        "contact_name": row.contact_name,
+        "current": money_str(row.current),
+        "days_1_30": money_str(row.days_1_30),
+        "days_31_60": money_str(row.days_31_60),
+        "days_61_90": money_str(row.days_61_90),
+        "over_90": money_str(row.over_90),
+        "total": money_str(row.total),
+    })
+}
+
 fn ledger_err(err: LedgerError) -> ToolError {
     if let LedgerError::PeriodClosed { period_end } = &err {
         return ToolError::new(format!(
@@ -1421,6 +1826,13 @@ mod tests {
             "list_adjustments",
             "bank_status",
             "locked_through",
+            "list_contacts",
+            "list_items",
+            "open_documents",
+            "aging",
+            "upsert_contact",
+            "upsert_item",
+            "create_document",
             "save_and_post_document",
             "reverse_entry",
             "propose_adjustment",
@@ -1669,6 +2081,153 @@ mod tests {
         assert_eq!(response["result"]["isError"], json!(true));
         let text = response["result"]["content"][0]["text"].as_str().unwrap();
         assert!(text.contains("class"), "{text:?}");
+    }
+
+    /// A customer on net 30, a vendor, and one taxable item, entered through
+    /// the tools themselves.
+    fn seed_master_data(server: &mut Server) {
+        for (id, contact) in [
+            (
+                1,
+                json!({ "contact_id": "c-pool", "kind": "Customer", "display_name": "Pool Co",
+                        "terms_days": 30, "default_class": "foam" }),
+            ),
+            (
+                2,
+                json!({ "contact_id": "v-foam", "kind": "Vendor", "display_name": "Foam Supplier" }),
+            ),
+        ] {
+            let response = call_tool(server, id, "upsert_contact", json!({ "contact": contact }));
+            assert_ne!(response["result"]["isError"], json!(true), "{response}");
+        }
+        let response = call_tool(
+            server,
+            3,
+            "upsert_item",
+            json!({ "item": {
+                "item_id": "mat", "sku": "MAT-1", "name": "Swim mat",
+                "item_type": "non_inventory", "income_account": "4100",
+                "expense_account": "6100", "default_class": "foam", "sales_price": "25.00"
+            }}),
+        );
+        assert_ne!(response["result"]["isError"], json!(true), "{response}");
+    }
+
+    #[test]
+    fn create_document_fills_the_blanks_and_aging_follows_a_payment() {
+        let ledger = seed_ledger();
+        let mut server = new_server(&ledger, COMPANY.to_string());
+        seed_master_data(&mut server);
+
+        let items = call_tool(&mut server, 4, "list_items", json!({ "query": "mat-1" }));
+        assert_eq!(
+            items["result"]["structuredContent"][0]["sales_price"],
+            json!("25.00")
+        );
+
+        let response = call_tool(
+            &mut server,
+            5,
+            "create_document",
+            json!({ "actor": "dan", "document": {
+                "kind": "Invoice", "txn_date": "2026-09-01",
+                "contact": { "kind": "Customer", "id": "c-pool" },
+                "lines": [{ "kind": "Item", "item_id": "mat", "amount": "100.00",
+                            "is_taxable": true }]
+            }}),
+        );
+        assert_ne!(response["result"]["isError"], json!(true), "{response}");
+        let created = &response["result"]["structuredContent"];
+        assert_eq!(created["number"], json!("1001"));
+        assert_eq!(created["due_date"], json!("2026-10-01"));
+        assert_eq!(created["tax"], json!("6.62"));
+        assert_eq!(created["total"], json!("106.62"));
+        let invoice_id = created["document_id"].as_str().unwrap().to_string();
+
+        let response = call_tool(
+            &mut server,
+            6,
+            "create_document",
+            json!({ "actor": "dan", "document": {
+                "kind": "Payment", "txn_date": "2026-10-05",
+                "contact": { "kind": "Customer", "id": "c-pool" },
+                "applications": [{ "target_document_id": invoice_id,
+                                   "target_kind": "Invoice", "amount": "50.00" }]
+            }}),
+        );
+        assert_ne!(response["result"]["isError"], json!(true), "{response}");
+
+        let aging = call_tool(
+            &mut server,
+            7,
+            "aging",
+            json!({ "book": "receivable", "as_of": "2026-10-15" }),
+        );
+        let totals = &aging["result"]["structuredContent"]["totals"];
+        assert_eq!(totals["days_1_30"], json!("56.62"));
+        assert_eq!(totals["total"], json!("56.62"));
+        assert_eq!(
+            aging["result"]["structuredContent"]["rows"][0]["contact_name"],
+            json!("Pool Co")
+        );
+
+        let open = call_tool(
+            &mut server,
+            8,
+            "open_documents",
+            json!({ "book": "receivable", "as_of": "2026-10-15" }),
+        );
+        assert_eq!(
+            open["result"]["structuredContent"][0]["number"],
+            json!("1001")
+        );
+        assert_eq!(
+            open["result"]["structuredContent"][0]["open"],
+            json!("56.62")
+        );
+    }
+
+    #[test]
+    fn create_document_refuses_an_unknown_customer_and_saves_nothing() {
+        let ledger = seed_ledger();
+        let mut server = new_server(&ledger, COMPANY.to_string());
+        seed_master_data(&mut server);
+        let before = ledger.oplog_len(COMPANY).unwrap();
+        let response = call_tool(
+            &mut server,
+            4,
+            "create_document",
+            json!({ "actor": "dan", "document": {
+                "kind": "Invoice", "txn_date": "2026-09-01",
+                "contact": { "kind": "Customer", "id": "nobody" },
+                "lines": [{ "kind": "Item", "item_id": "mat", "amount": "100.00" }]
+            }}),
+        );
+        assert_eq!(response["result"]["isError"], json!(true));
+        let text = response["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("unknown customer nobody"), "{text:?}");
+        assert_eq!(ledger.oplog_len(COMPANY).unwrap(), before);
+    }
+
+    #[test]
+    fn create_document_that_cannot_post_saves_nothing() {
+        let ledger = seed_ledger();
+        let mut server = new_server(&ledger, COMPANY.to_string());
+        seed_master_data(&mut server);
+        // A vendor with no default class and an account line with no class:
+        // the posting rules refuse it, and nothing may be left behind.
+        let response = call_tool(
+            &mut server,
+            4,
+            "create_document",
+            json!({ "actor": "dan", "document": {
+                "kind": "Bill", "txn_date": "2026-09-01", "number": "FS-1",
+                "contact": { "kind": "Vendor", "id": "v-foam" },
+                "lines": [{ "kind": "Account", "account": "6100", "amount": "40.00" }]
+            }}),
+        );
+        assert_eq!(response["result"]["isError"], json!(true), "{response}");
+        assert_eq!(ledger.oplog_len(COMPANY).unwrap(), 0);
     }
 
     #[test]

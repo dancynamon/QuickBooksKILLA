@@ -1760,7 +1760,7 @@ fn run_import(
 ) -> Result<(), CommandError> {
     let ledger = Ledger::open(db).map_err(runtime)?;
     let store = Store::open(replica).map_err(runtime)?;
-    let options = ImportOptions { from, to };
+    let options = ImportOptions::with_d28_fallback(from, to);
     let report = pipeline::import_replica(&ledger, &store, realm, company, &options, Utc::now())
         .map_err(runtime)?;
     print!("{}", report.render_text());

@@ -672,3 +672,51 @@ it. A guess is a place to start the conversation, not a finding.
 10. **185 accounts need mapping before sign-off** (`ledger-import.log`).
     Several look like personal or owner items (loans, "Personal Expense",
     "y/e adj", "Ask My Accountant"). These are Joel's call.
+
+## D28 — Standalone first, slim one-shot import last
+
+15 Oct 2026, Dan. Amends D24 and LEDGER-DESIGN §6 ("Full history from
+where").
+
+**Order.** Build everything that lets the own books stand alone first —
+document entry into the own store (invoice, PO, estimate, bill, receive
+payment), bank lines, Authorize.net on the own invoice, skill repointing
+through `ledger-mcp` — tested against a blank or synthetic book. The import
+from QBO is the last step before cutover, run once.
+
+**Scope of the import.** Slim, not full history:
+
+1. Chart of accounts (the 185 `needs_mapping` accounts resolved), classes,
+   customers, vendors, items, terms.
+2. One opening-balance entry from QBO's `TrialBalance` as of the cutover
+   date, balanced by construction; 3950 nets to zero.
+3. Open documents only: unpaid invoices and bills at their open balance, open
+   POs, open sales orders. Lines with no class take an import-only fallback
+   class.
+4. Checked: AR aging by customer and AP aging by vendor equal QBO's; the
+   post-import trial balance equals QBO's on every must-tier line.
+
+It is rehearsed as a dry run against the live replica before cutover day, so
+the one real run holds no surprises.
+
+**History** before cutover stays in the `qbo-local` replica, read-only and
+searchable, and in QBO itself. It is not replayed into the ledger. The
+full-history replay and boundary walk stay in the code but leave the cutover
+path, and D27's rejection list stops being a blocker: classes on old lines,
+old payment applications and old unbalanced entries no longer have to
+reconcile.
+
+**Still open** (Dan, Joel): the cutover date under this order. 1 January 2027
+keeps FY2027 whole with nothing to replay, and needs the standalone pieces
+and a clean dry run by mid-December. A later quarter boundary needs either
+that quarter's documents replayed (one recent quarter, not fourteen years) or
+FY2027 split across two systems. W21 (Joel accepting one opening-balance
+entry for everything before it) now applies to the cutover date itself.
+
+*Rejected: keep the nightly full-history import as the critical path.* 40k
+of 51k documents were rejected on the first run (D27), mostly for history no
+one will post against again. Fixing that first holds up the pieces that make
+the switch possible.
+*Rejected: drop history entirely.* The replica already answers every
+historical lookup, so nothing is lost by not replaying it, and dropping the
+replica would lose it.

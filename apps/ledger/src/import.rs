@@ -28,7 +28,8 @@ pub use classes::{map_classes, ClassMapping, MappedClass};
 pub use driver::{run, ImportError, ImportOptions, ImportReport};
 pub use opening::{boundary_year, opening_balance_entry, TbAgreement};
 pub use translate::{
-    translate, ClassSource, ItemContext, TranslateContext, TranslateError, Translated,
+    translate, ClassFallback, ClassSource, ItemContext, TranslateContext, TranslateError,
+    Translated,
 };
 
 /// `opening_balance_entry` and the §7 nightly diff (`crate::report`) both once

@@ -208,14 +208,20 @@ fn acct(number: &str) -> AccountId {
 
 /// [`resolve_class`], then reject if the account needs a class and none
 /// resolved. Every `post_*` function below calls this exactly once per line
-/// that produces an income, COGS or class-consuming expense leg, and passes
-/// `None` for balance sheet legs without calling it at all.
+/// that produces an income, COGS or class-consuming expense leg. A balance
+/// sheet account gets `None` whatever the chain would have said: an Item
+/// line on a Bill that lands on inventory, or a journal line to the bank,
+/// may carry a class in its payload, and the gate refuses a class on a
+/// balance sheet line (§3).
 fn class_for(
     line: &DocLine,
     item: Option<&ItemAccounts>,
     header: Option<&ClassId>,
     account: &AccountId,
 ) -> Result<Option<ClassId>, PostError> {
+    if !requires_class(account) {
+        return Ok(None);
+    }
     let resolved = resolve_class(line, item, header);
     if requires_class(account) && resolved.is_none() {
         return Err(PostError::MissingClass {
@@ -735,7 +741,9 @@ fn post_journal_entry(doc: &LedgerDocument) -> Result<Vec<Leg>, PostError> {
     let header = doc.header_class.as_ref();
 
     for line in &doc.lines {
-        if line.kind != LineKind::Journal {
+        // A zero line (QBO keeps them, e.g. an "opening balance" entry with
+        // no amounts and no posting side) moves nothing, so it needs neither.
+        if line.kind != LineKind::Journal || line.amount.is_zero() {
             continue;
         }
         let account = line.account.clone().ok_or(PostError::MissingAccount {
@@ -1003,9 +1011,19 @@ fn post_inventory_adjustment(doc: &LedgerDocument) -> Result<Vec<Leg>, PostError
 /// else in this crate either).
 fn merge_legs(legs: Vec<Leg>) -> Result<Vec<JournalLine>, PostError> {
     let mut merged: Vec<Leg> = Vec::new();
-    for leg in legs {
+    for mut leg in legs {
         if leg.amount.is_zero() {
             continue;
+        }
+        // A negative amount is the other side, not a negative debit or
+        // credit (§4: both are non-negative): a negative invoice line is a
+        // debit to income, a negative bill line a credit to expense.
+        if leg.amount.is_negative() {
+            leg.amount = leg.amount.checked_neg()?;
+            leg.side = match leg.side {
+                Side::Debit => Side::Credit,
+                Side::Credit => Side::Debit,
+            };
         }
         match merged.iter_mut().find(|existing| {
             existing.account == leg.account
@@ -1122,6 +1140,13 @@ pub fn post(
     };
 
     let entry = finalize(doc, version, legs, is_journal)?;
+
+    // A document whose every leg came to zero (a $0 invoice, a payment that
+    // only applies a credit memo to an invoice) moves nothing; there is no
+    // entry to post, which is not the same as an unbalanced one.
+    if entry.lines.is_empty() {
+        return Ok(Posting::NonPosting);
+    }
 
     if is_journal && !entry.is_balanced() {
         return Err(PostError::UnbalancedJournal);

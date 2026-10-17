@@ -199,7 +199,12 @@ pub fn import_replica(
 
     let (accounts_created, accounts_needing_mapping) =
         materialize_accounts(ledger, company, &account_mapping)?;
-    let classes_created = materialize_classes(ledger, company, &class_mapping)?;
+    let mut classes_created = materialize_classes(ledger, company, &class_mapping)?;
+    if let Some(fallback) = &options.class_fallback {
+        if ensure_class(ledger, company, &fallback.class.0)? {
+            classes_created += 1;
+        }
+    }
 
     // --- the posting context: items, customers, config ---------------------
     let item_contexts = import::build_item_contexts(replica, realm, &class_mapping)?;
@@ -320,6 +325,26 @@ fn materialize_accounts(
     }
 
     Ok((created, needs_mapping))
+}
+
+/// An import fallback class (D28), added to the company's class list if
+/// absent, named from the chart when it is the standard one. Returns whether
+/// it was added.
+fn ensure_class(ledger: &Ledger, company: &str, id: &str) -> Result<bool, PipelineError> {
+    let name = if id == chart::IMPORT_FALLBACK_CLASS.0 {
+        chart::IMPORT_FALLBACK_CLASS.1
+    } else {
+        id
+    };
+    if ledger
+        .list_classes(company)?
+        .into_iter()
+        .any(|class| class.class_id.0 == id)
+    {
+        return Ok(false);
+    }
+    ledger.add_class(company, id, name, None)?;
+    Ok(true)
 }
 
 /// As [`materialize_accounts`], for classes: every mapped class not already
@@ -627,6 +652,9 @@ pub fn apply_opening_balance(
     let company_id = CompanyId(company.to_string());
     let mapping = account_mapping_from_ledger(ledger, company)?;
     let (doc, mut entry) = import::opening_balance_entry(&company_id, as_of, qbo_tb, &mapping)?;
+    if entry.lines.iter().any(|line| line.class.is_some()) {
+        ensure_class(ledger, company, chart::IMPORT_FALLBACK_CLASS.0)?;
+    }
     let document_id = doc.document_id.clone();
 
     let posted_existing: Vec<_> = ledger
@@ -767,10 +795,7 @@ pub fn boundary_walk(
 
         let from = NaiveDate::from_ymd_opt(year, 1, 1).expect("1 January is always a valid date");
         let to = NaiveDate::from_ymd_opt(year, 12, 31).expect("31 December is always a valid date");
-        let options = ImportOptions {
-            from: Some(from),
-            to: Some(to),
-        };
+        let options = ImportOptions::with_d28_fallback(Some(from), Some(to));
         import_replica(&scratch, replica, realm, company, &options, now)?;
 
         if let Some(prior_rows) = rows_for(year - 1) {

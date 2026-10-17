@@ -6,7 +6,7 @@ use ledger_core::Money;
 
 use crate::chart;
 use crate::types::{
-    AccountId, ContactRef, DocKind, DocLine, JournalEntry, JournalLine, LedgerDocument, LineKind,
+    AccountId, ClassId, ContactRef, DocKind, DocLine, JournalEntry, JournalLine, LedgerDocument, LineKind,
 };
 
 use super::accounts::AccountMapping;
@@ -56,20 +56,27 @@ pub fn opening_balance_entry(
         } else {
             row.balance.checked_neg()?
         };
+        // A mid-year opening carries QBO's year-to-date income and expense,
+        // and the gate wants a class on every such line. QBO's totals have
+        // none to give, so they take D28's import-only class.
+        let class = crate::post::requires_class(&mapped.ledger_number)
+            .then(|| ClassId(chart::IMPORT_FALLBACK_CLASS.0.to_string()));
 
-        journal_lines.push(if is_debit {
+        let mut journal_line = if is_debit {
             debit_total = debit_total.checked_add(amount)?;
             JournalLine::debit(line_no, mapped.ledger_number.clone(), amount)
         } else {
             credit_total = credit_total.checked_add(amount)?;
             JournalLine::credit(line_no, mapped.ledger_number.clone(), amount)
-        });
+        };
+        journal_line.class = class.clone();
+        journal_lines.push(journal_line);
 
         doc_lines.push(DocLine {
             line_no,
             kind: LineKind::Account,
             amount,
-            class: None,
+            class,
             item_id: None,
             account: Some(mapped.ledger_number.clone()),
             is_taxable: false,

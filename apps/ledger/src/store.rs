@@ -501,6 +501,70 @@ CREATE TABLE build_consumptions (
 ) STRICT;
 "#,
     },
+    Migration {
+        version: 6,
+        name: "master data and numbering: contacts, items, document sequences (D28)",
+        sql: r#"
+CREATE TABLE contacts (
+    company_id     TEXT NOT NULL REFERENCES companies(company_id),
+    contact_id     TEXT NOT NULL,
+    kind           TEXT NOT NULL CHECK (kind IN ('customer','vendor')),
+    display_name   TEXT NOT NULL,
+    company_name   TEXT,
+    email          TEXT,
+    phone          TEXT,
+    bill_address   TEXT,
+    ship_address   TEXT,
+    terms_days     INTEGER,
+    is_tax_exempt  INTEGER NOT NULL DEFAULT 0,
+    default_class  TEXT,
+    is_active      INTEGER NOT NULL DEFAULT 1,
+    source_ref     TEXT,
+    updated_at     TEXT NOT NULL,
+    PRIMARY KEY (company_id, contact_id),
+    FOREIGN KEY (company_id, default_class) REFERENCES classes(company_id, class_id)
+) STRICT;
+
+CREATE UNIQUE INDEX idx_contacts_name ON contacts(company_id, kind, display_name);
+
+CREATE TABLE items (
+    company_id          TEXT NOT NULL REFERENCES companies(company_id),
+    item_id             TEXT NOT NULL,
+    sku                 TEXT,
+    name                TEXT NOT NULL,
+    description         TEXT,
+    item_type           TEXT NOT NULL CHECK (item_type IN ('inventory','non_inventory','service')),
+    income_account      TEXT NOT NULL,
+    expense_account     TEXT NOT NULL,
+    asset_account       TEXT,
+    default_class       TEXT,
+    sales_price_minor   INTEGER,
+    purchase_cost_minor INTEGER,
+    unit_cost_minor     INTEGER,
+    is_taxable          INTEGER NOT NULL DEFAULT 1,
+    is_active           INTEGER NOT NULL DEFAULT 1,
+    source_ref          TEXT,
+    updated_at          TEXT NOT NULL,
+    PRIMARY KEY (company_id, item_id),
+    FOREIGN KEY (company_id, income_account) REFERENCES accounts(company_id, account_id),
+    FOREIGN KEY (company_id, expense_account) REFERENCES accounts(company_id, account_id),
+    FOREIGN KEY (company_id, asset_account) REFERENCES accounts(company_id, account_id),
+    FOREIGN KEY (company_id, default_class) REFERENCES classes(company_id, class_id),
+    CHECK ((item_type = 'inventory') = (asset_account IS NOT NULL))
+) STRICT;
+
+CREATE UNIQUE INDEX idx_items_sku ON items(company_id, sku) WHERE sku IS NOT NULL;
+
+CREATE TABLE doc_sequences (
+    company_id   TEXT NOT NULL REFERENCES companies(company_id),
+    doc_type     TEXT NOT NULL,
+    next_number  INTEGER NOT NULL CHECK (next_number > 0),
+    PRIMARY KEY (company_id, doc_type)
+) STRICT;
+
+CREATE INDEX idx_document_versions_type ON document_versions(company_id, doc_type, document_id, version);
+"#,
+    },
 ];
 
 pub fn latest_version() -> i64 {
@@ -2335,7 +2399,7 @@ fn next_close_history_seq(conn: &Connection, company: &str) -> Result<i64, Ledge
     )?)
 }
 
-/// The §3 class rule: every line on a 4xxx, 5xxx or 6xxx account carries
+/// The §3 class rule: every line on a 4xxx, 5xxx, 6xxx or 7xxx account carries
 /// exactly one class; a balance-sheet line carries none. Also checks that
 /// the line's account and (if present) class exist in this company's chart.
 fn check_class_rule(
@@ -2356,7 +2420,7 @@ fn check_class_rule(
         .number
         .chars()
         .next()
-        .map(|c| matches!(c, '4' | '5' | '6'))
+        .map(|c| matches!(c, '4' | '5' | '6' | '7'))
         .unwrap_or(false);
 
     if needs_class && line.class.is_none() {

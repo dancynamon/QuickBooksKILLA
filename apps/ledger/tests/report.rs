@@ -310,6 +310,23 @@ fn balance_sheet_balances_with_current_year_net_income_folded_into_equity() {
 }
 
 #[test]
+fn trial_balance_and_balance_sheet_leave_out_entries_after_as_of() {
+    // Every fixture entry is dated in 2026; as of the day before the first,
+    // the book is empty. The date filter used to sit on a LEFT JOIN's ON
+    // clause, which dropped the entry but kept summing its lines.
+    let ledger = fixture();
+    let before = ymd(2025, 12, 31);
+    let tb = report::trial_balance(&ledger, "aquamentor", before).unwrap();
+    assert_eq!(tb.total_debits, Money::ZERO);
+    assert_eq!(tb.total_credits, Money::ZERO);
+    assert!(tb.rows.iter().all(|r| r.balance.is_zero()));
+
+    let bs = report::balance_sheet(&ledger, "aquamentor", before).unwrap();
+    assert_eq!(bs.assets.total, Money::ZERO);
+    assert_eq!(bs.total_liabilities_and_equity, Money::ZERO);
+}
+
+#[test]
 fn profit_and_loss_by_class_sums_to_the_section_total() {
     let ledger = fixture();
     let pnl = report::profit_and_loss(&ledger, "aquamentor", ymd(2026, 1, 1), AS_OF()).unwrap();

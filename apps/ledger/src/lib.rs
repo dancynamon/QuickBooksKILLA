@@ -10,6 +10,8 @@
 //!
 //! - [`types`]  — the document and entry shapes every module shares
 //! - [`chart`]  — §2: account numbers and the seed chart
+//! - [`books`]  — D28: customers, vendors, items, document numbering, the
+//!   standalone entry path, and open documents with AR/AP aging
 //! - [`post`]   — §1: the posting-rules table as code
 //! - [`store`]  — §4, §5: schema, invariants, period close, oplog
 //! - [`report`] — §7, §9: trial balance, P&L, balance sheet, the tax lines
@@ -38,6 +40,7 @@
 pub mod accountant;
 pub mod authnet;
 pub mod bank;
+pub mod books;
 pub mod chart;
 pub mod import;
 pub mod mcp;

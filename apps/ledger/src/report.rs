@@ -56,11 +56,11 @@ pub fn trial_balance(
                 a.needs_mapping, a.source_ref, a.normal_balance,
                 COALESCE(SUM(l.debit_minor), 0), COALESCE(SUM(l.credit_minor), 0)
          FROM accounts a
-         LEFT JOIN journal_lines l
+         LEFT JOIN (journal_lines l
+                    JOIN journal_entries e
+                        ON e.company_id = l.company_id AND e.entry_id = l.entry_id
+                        AND e.is_posted = 1 AND e.entry_date <= ?2)
              ON l.company_id = a.company_id AND l.account_id = a.account_id
-         LEFT JOIN journal_entries e
-             ON e.company_id = l.company_id AND e.entry_id = l.entry_id
-             AND e.is_posted = 1 AND e.entry_date <= ?2
          WHERE a.company_id = ?1
          GROUP BY a.account_id
          ORDER BY a.number",
@@ -312,11 +312,11 @@ pub fn balance_sheet(
         "SELECT a.account_id, a.name, a.classification,
                 COALESCE(SUM(l.debit_minor), 0), COALESCE(SUM(l.credit_minor), 0)
          FROM accounts a
-         LEFT JOIN journal_lines l
+         LEFT JOIN (journal_lines l
+                    JOIN journal_entries e
+                        ON e.company_id = l.company_id AND e.entry_id = l.entry_id
+                        AND e.is_posted = 1 AND e.entry_date <= ?2)
              ON l.company_id = a.company_id AND l.account_id = a.account_id
-         LEFT JOIN journal_entries e
-             ON e.company_id = l.company_id AND e.entry_id = l.entry_id
-             AND e.is_posted = 1 AND e.entry_date <= ?2
          WHERE a.company_id = ?1 AND a.classification IN ('Asset', 'Liability', 'Equity')
          GROUP BY a.account_id
          ORDER BY a.number",

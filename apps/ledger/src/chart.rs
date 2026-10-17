@@ -234,6 +234,10 @@ pub const AQUAMENTOR_CLASSES: &[(&str, &str)] = &[
 
 pub const WATERLINE_CLASSES: &[(&str, &str)] = &[("cnc", "CNC cutting"), ("uv", "UV printing")];
 
+/// D28: the class an imported line takes when QBO history carries none and
+/// the document predates the new books. Never offered for a new entry.
+pub const IMPORT_FALLBACK_CLASS: (&str, &str) = ("unclassified", "Unclassified (pre-2027 import)");
+
 #[cfg(test)]
 mod tests {
     use super::*;
