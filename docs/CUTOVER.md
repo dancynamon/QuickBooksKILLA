@@ -16,8 +16,9 @@ live replica, and what each check means when it fails. The code is
   without `--from` into the cutover book: it would post 2026 documents on top
   of the opening entry. The open items the slim import brought across are
   refused if it tries (see "Guards"), but everything else from 2026 would
-  post. `ledger nightly` currently imports the whole replica with no window,
-  so it must not be pointed at the cutover book until it takes a `--from`.
+  post. The same holds for `ledger nightly`: the cutover book's nightly runs
+  with `--from 2027-01-01`, and refuses to run without a `--from` after the
+  opening entry's date (`docs/NIGHTLY.md`, "The cutover book").
 
 ## What it brings across
 
@@ -146,3 +147,21 @@ entry, so posting it would put it on the books twice. `ledger import` and
 new version of one and say why. Settle it with a payment or credit memo
 (applications to it work like any other document's), or adjust it with a
 journal entry.
+
+`ledger nightly` refuses a book holding the slim opening entry (oplog kind
+`import_slim_opening`) unless `--from` is after the entry's date, so an
+unwindowed run can never post 2026 on top of it.
+
+## The nightly after the slim import
+
+Once the real run has written the cutover book, schedule its nightly with
+the window baked in:
+
+```bash
+ledger nightly --plist --from 2027-01-01 --db .local/ledger.sqlite --company aquamentor --replica .local/replica.sqlite --realm REALM --qbo-csv .local/nightly/qbo-tb.csv --out .local/nightly
+```
+
+Every night it replays Q1 2027 (only the documents dated from 1 January)
+under the full posting gate and diffs the result against QBO's trial
+balance as of yesterday. Re-running the slim import after Joel's close does
+not change the window.

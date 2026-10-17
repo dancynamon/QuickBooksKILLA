@@ -1723,6 +1723,26 @@ pub fn ensure_company(
     Ok(true)
 }
 
+/// The as-of date of the slim import's opening entry in `company`'s book,
+/// or `None` when the book holds none. Every QBO document dated on or before
+/// it is already in the opening entry (or carried as an open item), so a
+/// replay must start after it: `ledger nightly` refuses to run without a
+/// `--from` past this date (D29, `docs/NIGHTLY.md`).
+pub fn opening_as_of(ledger: &Ledger, company: &str) -> Result<Option<NaiveDate>, LedgerError> {
+    let date: Option<String> = ledger.conn().query_row(
+        "SELECT MAX(dv.txn_date) FROM document_versions dv JOIN oplog o
+           ON o.company_id = dv.company_id AND o.command_id = dv.command_id
+         WHERE dv.company_id = ?1 AND o.kind = ?2",
+        rusqlite::params![company, SLIM_OPENING_KIND],
+        |row| row.get(0),
+    )?;
+    date.map(|raw| {
+        raw.parse::<NaiveDate>()
+            .map_err(|_| LedgerError::BadDate(raw))
+    })
+    .transpose()
+}
+
 /// A consistent copy of the whole book at `dest`, which must not exist yet:
 /// the scratch book a dry run (and the rehearsal before a real run) writes
 /// into, so the real book is never touched until the rehearsal passed.

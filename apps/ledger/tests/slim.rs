@@ -26,6 +26,7 @@ use chrono::{NaiveDate, TimeZone, Utc};
 use ledger::books::{self, Book};
 use ledger::chart;
 use ledger::import::ImportOptions;
+use ledger::nightly::{self, NightlyError};
 use ledger::pipeline::import_replica;
 use ledger::report::{self, QboTbRow};
 use ledger::slim::{self, QboAgingRow, SlimOptions, SlimReport};
@@ -804,6 +805,131 @@ fn the_q1_replay_relieves_imported_invoices_and_refuses_to_post_them_again() {
 }
 
 // ---------------------------------------------------------------------------
+// The nightly against the cutover book (D29)
+// ---------------------------------------------------------------------------
+
+/// A Q1 2027 invoice, classed as the full posting gate requires of every
+/// line dated from 1 January 2027.
+fn seed_q1_invoice(store: &Store) {
+    seed(
+        store,
+        EntityType::Invoice,
+        "I5",
+        json!({ "Id": "I5", "DocNumber": "1201", "TxnDate": "2027-01-12", "DueDate": "2027-02-11",
+                "CustomerRef": { "value": "31" }, "TotalAmt": 300, "Balance": 300,
+                "Line": [{ "Id": "1", "LineNum": 1, "Amount": 300, "DetailType": "SalesItemLineDetail",
+                           "SalesItemLineDetail": { "ItemRef": { "value": "501" }, "Qty": 3,
+                                                    "UnitPrice": 100, "ClassRef": { "value": "4" } } }] }),
+    );
+}
+
+/// QBO's trial balance at 31 January 2027: the 31 December one, plus
+/// payment P2 (400 from AR to undeposited funds) and invoice I5 (300 of AR
+/// and sales).
+fn qbo_tb_january() -> Vec<QboTbRow> {
+    let mut rows = qbo_tb(false);
+    for row in &mut rows {
+        let delta = match row.qbo_account_id.as_str() {
+            "AR1" => -40_000 + 30_000,
+            "UDF1" => 40_000,
+            "INC1" => -30_000,
+            _ => 0,
+        };
+        row.balance = usd(row.balance.minor() + delta);
+    }
+    rows
+}
+
+#[test]
+fn the_cutover_books_nightly_replays_only_2027_and_refuses_to_run_unbounded() {
+    let ledger = book();
+    let store = replica(false);
+    seed_q1_invoice(&store);
+    assert!(run(&ledger, &store, &options(false, true)).passed());
+    assert_eq!(slim::opening_as_of(&ledger, CO).unwrap(), Some(as_of()));
+
+    let out = tempfile::tempdir().unwrap();
+    let end = ymd(2027, 1, 31);
+    let nightly = |from: Option<NaiveDate>| {
+        nightly::run_nightly(
+            &ledger,
+            &store,
+            &realm(),
+            CO,
+            &qbo_tb_january(),
+            from,
+            end,
+            out.path(),
+            now(),
+        )
+    };
+
+    // Unbounded, or a window that reaches back into 2026: refused before
+    // anything is imported, naming the --from to use.
+    for from in [None, Some(as_of()), Some(ymd(2026, 1, 1))] {
+        match nightly(from) {
+            Err(err @ NightlyError::Window { .. }) => {
+                assert!(err.to_string().contains("--from 2027-01-01"), "{err}")
+            }
+            Err(other) => panic!("{from:?}: expected a window refusal, got {other}"),
+            Ok(_) => panic!("{from:?}: an unbounded nightly ran against the slim book"),
+        }
+    }
+    assert!(ledger
+        .entries_for_document(CO, "qbo:Invoice:I4")
+        .unwrap()
+        .is_empty());
+
+    // The cutover book's nightly: only Q1 2027 posts, nothing is rejected,
+    // and the trial balance agrees with QBO's at 31 January.
+    let outcome = nightly(Some(ymd(2027, 1, 1))).unwrap();
+    assert!(
+        outcome.import.rejected.is_empty(),
+        "{}",
+        outcome.import.render_text()
+    );
+    assert_eq!(
+        outcome.import.translated,
+        2,
+        "{}",
+        outcome.import.render_text()
+    );
+    assert_eq!(outcome.import.posted, 2, "{}", outcome.import.render_text());
+    assert!(outcome.passed(), "{}", outcome.diff.render_text(CO, end));
+    for id in ["qbo:Payment:P2", "qbo:Invoice:I5"] {
+        assert!(
+            !ledger.entries_for_document(CO, id).unwrap().is_empty(),
+            "{id} did not post"
+        );
+    }
+    // 2026 documents — paid ones the opening entry does not carry as open
+    // items, and the carried ones — stay unposted.
+    for id in [
+        "qbo:Invoice:I4",
+        "qbo:Payment:P3",
+        "qbo:Bill:B2",
+        "qbo:BillPayment:BP1",
+        "qbo:Invoice:I1",
+        "qbo:Bill:B1",
+    ] {
+        assert!(
+            ledger.entries_for_document(CO, id).unwrap().is_empty(),
+            "{id} posted"
+        );
+    }
+    assert_eq!(
+        balance(&ledger, chart::ACCOUNTS_RECEIVABLE, end),
+        usd(117_000 - 40_000 + 30_000)
+    );
+
+    // Tomorrow night: the same window is a no-op.
+    let again = nightly(Some(ymd(2027, 1, 1))).unwrap();
+    assert!(again.passed(), "{}", again.diff.render_text(CO, end));
+    assert_eq!(again.import.posted, 0);
+    assert_eq!(again.import.skipped_unchanged, 2);
+}
+
+// ---------------------------------------------------------------------------
 // The binary
 // ---------------------------------------------------------------------------
 
@@ -932,6 +1058,41 @@ fn the_binary_rehearses_on_a_scratch_book_and_writes_only_when_every_check_passe
         balance(&real, chart::ACCOUNTS_RECEIVABLE, as_of()),
         usd(117_000)
     );
+    drop(real);
+
+    // `ledger nightly` against the imported book: refused without --from,
+    // and the plist it renders carries the window.
+    let nightly_args = |extra: &[&str]| {
+        let mut args = vec![
+            "nightly".to_string(),
+            "--db".into(),
+            db_arg.clone(),
+            "--company".into(),
+            CO.into(),
+            "--replica".into(),
+            dir.path().join("replica.sqlite").display().to_string(),
+            "--realm".into(),
+            realm().as_str().to_string(),
+            "--qbo-csv".into(),
+            dir.path().join("tb.csv").display().to_string(),
+            "--out".into(),
+            dir.path().join("nightly").display().to_string(),
+        ];
+        args.extend(extra.iter().map(|s| s.to_string()));
+        Command::new(env!("CARGO_BIN_EXE_ledger"))
+            .args(&args)
+            .output()
+            .unwrap()
+    };
+    let out = nightly_args(&["--as-of", "2027-01-31"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "{stderr}");
+    assert!(stderr.contains("--from 2027-01-01"), "{stderr}");
+    assert!(!dir.path().join("nightly").exists());
+    let out = nightly_args(&["--plist", "--from", "2027-01-01"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(out.status.code(), Some(0), "{stdout}");
+    assert!(stdout.contains("--from 2027-01-01 --as-of"), "{stdout}");
 }
 
 #[test]

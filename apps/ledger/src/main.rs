@@ -25,8 +25,8 @@ use ledger::mfg::NewMaterial;
 use ledger::nightly;
 use ledger::pipeline;
 use ledger::post::{self, Posting};
-use ledger::slim;
 use ledger::report::{self, BalanceSheet, Pnl, QboTbRow, SalesTaxLines, TierRules, TrialBalance};
+use ledger::slim;
 use ledger::store::{AdjustmentState, CommandMeta, Ledger, LedgerError};
 use ledger::types::{
     AccountId, ClassId, DocKind, JournalLine, PostingConfig, PostingContext, Side,
@@ -246,6 +246,7 @@ enum Command {
         realm: RealmId,
         qbo_csv: PathBuf,
         out: PathBuf,
+        from: Option<NaiveDate>,
         as_of: Option<NaiveDate>,
         plist: bool,
     },
@@ -373,9 +374,10 @@ USAGE:
                    --snapshots DIR
     ledger verify  --db PATH --company ID
     ledger nightly --db PATH --company ID --replica PATH --realm ID
-                   --qbo-csv PATH --out DIR [--as-of YYYY-MM-DD]
+                   --qbo-csv PATH --out DIR [--from YYYY-MM-DD]
+                   [--as-of YYYY-MM-DD]
     ledger nightly --plist --db PATH --company ID --replica PATH --realm ID
-                   --qbo-csv PATH --out DIR
+                   --qbo-csv PATH --out DIR [--from YYYY-MM-DD]
     ledger mfg material add  --db PATH --company ID --file material.json
     ledger mfg material list --db PATH --company ID
     ledger mfg receive       --db PATH --company ID --file receipt.json
@@ -463,14 +465,18 @@ SUBCOMMANDS:
               foreign keys. Prints a table of what failed and exits 1 on any
               fatal finding; a needs_mapping account with a non-zero balance
               is reported but never fails the run on its own.
-    nightly   The §E parallel run: import the whole replica, diff the
-              resulting trial balance against --qbo-csv (produced by
-              `qbo-local report --live` on the Mac's cron), and write
-              tbdiff-<as-of>.txt and .csv into --out. --as-of defaults to
-              yesterday (§7: \"as of the previous day\"). Exits 1 on any
+    nightly   The §E parallel run: import the replica (all of it, or the
+              documents dated --from on), diff the resulting trial balance
+              against --qbo-csv (produced by `qbo-local report --live` on the
+              Mac's cron), and write tbdiff-<as-of>.txt and .csv into --out.
+              --as-of defaults to yesterday (§7: \"as of the previous day\").
+              A book holding the slim import's opening entry (D28) refuses
+              to run without a --from after that entry's date; the cutover
+              book's nightly uses --from 2027-01-01 (D29). Exits 1 on any
               must-tier failure or import rejection. With --plist, prints a
               launchd plist that runs `qbo-local report --live` and then
-              this command at 02:00 local, instead of running anything.
+              this command (with the same --from) at 02:00 local, instead
+              of running anything.
     mfg       Manufacturing costing (§11, docs/MFG.md for the JSON shapes):
               material add/list — a raw material, at zero cost until received.
               receive            — a raw material receipt: landed cost by
@@ -491,7 +497,9 @@ FLAGS:
     --name \"Name\"         Company display name (init only).
     --realm ID            QBO realm id (init: optional; import/boundary: required).
     --replica PATH        Path to the qbo-local replica file (import, boundary).
-    --from YYYY-MM-DD     Start date (import: optional; pnl: required).
+    --from YYYY-MM-DD     Start date (import: optional; pnl: required;
+                           nightly: required once the book holds the slim
+                           opening entry, and after its date).
     --to YYYY-MM-DD       End date (import: optional; pnl: required).
     --as-of YYYY-MM-DD    As-of date (tb, bs, tbdiff, opening).
     --year YYYY           Calendar year (tax only).
@@ -1823,10 +1831,11 @@ fn execute(command: Command) -> Result<ExitCode, CommandError> {
             realm,
             qbo_csv,
             out,
+            from,
             as_of,
             plist,
         } => run_nightly(
-            &db, &company, &replica, &realm, &qbo_csv, &out, as_of, plist,
+            &db, &company, &replica, &realm, &qbo_csv, &out, from, as_of, plist,
         ),
         Command::Mfg(cmd) => run_mfg(cmd),
     }
@@ -1959,13 +1968,17 @@ fn run_import_slim(
     }
     let db = db.expect("a real run has --db (checked at parse)");
     if !rehearsal.passed() {
-        println!("\nnothing written to {}: the rehearsal failed", db.display());
+        println!(
+            "\nnothing written to {}: the rehearsal failed",
+            db.display()
+        );
         return Ok(ExitCode::from(1));
     }
 
     let ledger = Ledger::open(db).map_err(runtime)?;
     slim::ensure_company(&ledger, company, realm, now).map_err(runtime)?;
-    let real = slim::import_slim(&ledger, &store, realm, company, &options, now).map_err(runtime)?;
+    let real =
+        slim::import_slim(&ledger, &store, realm, company, &options, now).map_err(runtime)?;
     println!("\nREAL RUN into {}\n", db.display());
     print!("{}", real.render_text(company));
     Ok(if real.passed() {
@@ -1995,7 +2008,11 @@ fn read_aging_csv(path: &std::path::Path) -> Result<Vec<slim::QboAgingRow>, Stri
         };
         let amount = |raw: &str| -> Result<Money, String> {
             let decimal = Decimal::from_str(raw).map_err(|e| {
-                format!("{}:{}: invalid amount {raw:?}: {e}", path.display(), line_no + 1)
+                format!(
+                    "{}:{}: invalid amount {raw:?}: {e}",
+                    path.display(),
+                    line_no + 1
+                )
             })?;
             ledger_core::round_money(decimal, ledger_core::RoundingPolicy::MirroredAmount)
                 .map_err(|e| format!("{}:{}: amount {raw:?}: {e}", path.display(), line_no + 1))
@@ -3182,6 +3199,7 @@ fn parse_nightly(mut args: Args<'_>) -> Result<Command, UsageError> {
     let mut realm = None;
     let mut qbo_csv = None;
     let mut out = None;
+    let mut from = None;
     let mut as_of = None;
     let mut plist = false;
     while let Some(flag) = args.next() {
@@ -3192,6 +3210,7 @@ fn parse_nightly(mut args: Args<'_>) -> Result<Command, UsageError> {
             "--realm" => realm = Some(parse_realm(&next_value(&mut args, "--realm")?)?),
             "--qbo-csv" => qbo_csv = Some(PathBuf::from(next_value(&mut args, "--qbo-csv")?)),
             "--out" => out = Some(PathBuf::from(next_value(&mut args, "--out")?)),
+            "--from" => from = Some(parse_date(&next_value(&mut args, "--from")?, "--from")?),
             "--as-of" => as_of = Some(parse_date(&next_value(&mut args, "--as-of")?, "--as-of")?),
             "--plist" => plist = true,
             other => return Err(UsageError::unknown_flag(other)),
@@ -3204,6 +3223,7 @@ fn parse_nightly(mut args: Args<'_>) -> Result<Command, UsageError> {
         realm: realm.ok_or_else(|| UsageError::missing_flag("--realm"))?,
         qbo_csv: qbo_csv.ok_or_else(|| UsageError::missing_flag("--qbo-csv"))?,
         out: out.ok_or_else(|| UsageError::missing_flag("--out"))?,
+        from,
         as_of,
         plist,
     })
@@ -3286,12 +3306,14 @@ fn run_nightly(
     realm: &RealmId,
     qbo_csv: &std::path::Path,
     out: &std::path::Path,
+    from: Option<NaiveDate>,
     as_of: Option<NaiveDate>,
     plist: bool,
 ) -> Result<ExitCode, CommandError> {
     if plist {
         let label = format!("com.aquamentor.ledger.nightly.{company}");
-        let text = nightly::render_launchd_plist(&label, realm, company, db, replica, qbo_csv, out);
+        let text =
+            nightly::render_launchd_plist(&label, realm, company, db, replica, qbo_csv, out, from);
         print!("{text}");
         return Ok(ExitCode::SUCCESS);
     }
@@ -3302,8 +3324,10 @@ fn run_nightly(
     let store = Store::open(replica).map_err(runtime)?;
     let qbo_rows = read_qbo_csv(qbo_csv).map_err(runtime)?;
 
-    let outcome = nightly::run_nightly(&ledger, &store, realm, company, &qbo_rows, as_of, out, now)
-        .map_err(runtime)?;
+    let outcome = nightly::run_nightly(
+        &ledger, &store, realm, company, &qbo_rows, from, as_of, out, now,
+    )
+    .map_err(runtime)?;
 
     print!("{}", outcome.diff.render_text(company, as_of));
     println!("{}", outcome.summary_line());
@@ -3801,6 +3825,8 @@ mod tests {
                 "tb.csv",
                 "--out",
                 "out",
+                "--from",
+                "2027-01-01",
                 "--as-of",
                 "2026-09-10",
             ])),
@@ -3811,6 +3837,7 @@ mod tests {
                 realm: RealmId::parse("1234567890123456").unwrap(),
                 qbo_csv: PathBuf::from("tb.csv"),
                 out: PathBuf::from("out"),
+                from: Some(NaiveDate::from_ymd_opt(2027, 1, 1).unwrap()),
                 as_of: Some(NaiveDate::from_ymd_opt(2026, 9, 10).unwrap()),
                 plist: false,
             })
@@ -3837,7 +3864,10 @@ mod tests {
         ]))
         .unwrap();
         match command {
-            Command::Nightly { as_of, plist, .. } => {
+            Command::Nightly {
+                from, as_of, plist, ..
+            } => {
+                assert_eq!(from, None);
                 assert_eq!(as_of, None);
                 assert!(plist);
             }

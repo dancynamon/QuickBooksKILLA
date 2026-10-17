@@ -1,14 +1,21 @@
 //! `ledger nightly` — the §E parallel run, made mechanical.
 //! `LEDGER-DESIGN.md` §7, `ROADMAP.md` §E.
 //!
-//! Every night, for each entity: import the replica's whole history through
-//! the same posting function everything else uses
-//! ([`crate::pipeline::import_replica`]), diff the resulting trial balance
+//! Every night, for each entity: import the replica through the same posting
+//! function everything else uses ([`crate::pipeline::import_replica`]) —
+//! its whole history, or from `--from` on — diff the resulting trial balance
 //! against a QBO trial balance CSV (the Mac's cron produces that CSV with
 //! `qbo-local report --live`), and write both the fixed-width text and the
 //! CSV the design doc calls "kept forever" (§7). A must-tier disagreement or
 //! an import rejection fails the run; anything else is printed and forgotten
 //! about until tomorrow night.
+//!
+//! A book that holds D28's slim opening entry already has everything dated on
+//! or before that entry's as-of date (31 December 2026, D29); only the
+//! documents after it may be replayed. The run refuses such a book unless
+//! `from` is after that date ([`NightlyError::Window`]): without the window,
+//! every 2026 document the opening entry does not carry as an open item
+//! would post on top of it and double the books.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -22,6 +29,7 @@ use qbo_local::store::Store;
 use crate::import::ImportOptions;
 use crate::pipeline::{self, PipelineError, PipelineReport};
 use crate::report::{self, QboTbRow, TbDiff, TierRules};
+use crate::slim;
 use crate::store::{Ledger, LedgerError};
 
 #[derive(Debug, Error)]
@@ -30,6 +38,16 @@ pub enum NightlyError {
     Pipeline(#[from] PipelineError),
     #[error("store: {0}")]
     Store(#[from] LedgerError),
+    #[error(
+        "this book holds the slim import's opening entry as of {opening}, which already \
+         carries everything dated on or before it; {given}, so 2026 documents would post \
+         on top of it. Run with --from {next} (D29, docs/NIGHTLY.md)"
+    )]
+    Window {
+        opening: NaiveDate,
+        given: String,
+        next: NaiveDate,
+    },
     #[error("io error writing {path}: {source}")]
     Io {
         path: PathBuf,
@@ -68,10 +86,36 @@ impl NightlyOutcome {
     }
 }
 
+/// Refuse a window that would replay documents the slim opening entry
+/// already carries: when `company`'s book holds one, `from` is required and
+/// must be after its as-of date. A book without one may run unbounded.
+pub fn check_window(
+    ledger: &Ledger,
+    company: &str,
+    from: Option<NaiveDate>,
+) -> Result<(), NightlyError> {
+    let Some(opening) = slim::opening_as_of(ledger, company)? else {
+        return Ok(());
+    };
+    let given = match from {
+        Some(from) if from > opening => return Ok(()),
+        Some(from) => format!("--from {from} is not after it"),
+        None => "no --from was given".to_string(),
+    };
+    Err(NightlyError::Window {
+        opening,
+        given,
+        next: opening
+            .succ_opt()
+            .expect("the opening date is not the last representable day"),
+    })
+}
+
 /// The §E run over an already-open `ledger` and `replica`: import every
-/// document (unbounded — the parallel run posts the whole book every night,
-/// not a window of it), diff the resulting trial balance as of `as_of`
-/// against `qbo_rows`, and write `<out_dir>/tbdiff-<as_of>.txt` and `.csv`.
+/// document dated on or after `from` (`None` is the whole history, which a
+/// book holding the slim opening entry refuses — [`check_window`]), diff the
+/// resulting trial balance as of `as_of` against `qbo_rows`, and write
+/// `<out_dir>/tbdiff-<as_of>.txt` and `.csv`.
 #[allow(clippy::too_many_arguments)]
 pub fn run_nightly(
     ledger: &Ledger,
@@ -79,16 +123,18 @@ pub fn run_nightly(
     realm: &RealmId,
     company: &str,
     qbo_rows: &[QboTbRow],
+    from: Option<NaiveDate>,
     as_of: NaiveDate,
     out_dir: &Path,
     now: DateTime<Utc>,
 ) -> Result<NightlyOutcome, NightlyError> {
+    check_window(ledger, company, from)?;
     let import = pipeline::import_replica(
         ledger,
         replica,
         realm,
         company,
-        &ImportOptions::with_d28_fallback(None, None),
+        &ImportOptions::with_d28_fallback(from, None),
         now,
     )?;
 
@@ -134,7 +180,10 @@ fn xml_escape(raw: &str) -> String {
 /// QBO trial balance CSV and then to `ledger nightly` against it. One
 /// `/bin/sh -c "A && B"` job rather than two launchd jobs — launchd has no
 /// built-in "run B only if A succeeded", and a shell `&&` says the same thing
-/// in a form anyone reading this file can verify by eye.
+/// in a form anyone reading this file can verify by eye. `from`, when given,
+/// is baked into the job as `--from`: the cutover book's job carries
+/// `--from 2027-01-01` (D29).
+#[allow(clippy::too_many_arguments)]
 pub fn render_launchd_plist(
     label: &str,
     realm: &RealmId,
@@ -143,6 +192,7 @@ pub fn render_launchd_plist(
     replica: &Path,
     qbo_csv: &Path,
     out_dir: &Path,
+    from: Option<NaiveDate>,
 ) -> String {
     // Yesterday, per §7 ("as of the previous day"), computed at run time
     // rather than baked into the plist — BSD `date` (macOS's), matching the
@@ -153,9 +203,10 @@ pub fn render_launchd_plist(
         "qbo-local report --realm {realm} --name trial-balance --as-of {YESTERDAY} --out {} --live",
         qbo_csv.display(),
     );
+    let window = from.map_or_else(String::new, |from| format!(" --from {from}"));
     let nightly_cmd = format!(
         "ledger nightly --db {} --company {company} --replica {} --realm {realm} \
-         --qbo-csv {} --out {} --as-of {YESTERDAY}",
+         --qbo-csv {} --out {}{window} --as-of {YESTERDAY}",
         db.display(),
         replica.display(),
         qbo_csv.display(),
@@ -340,6 +391,7 @@ mod tests {
             &realm(),
             "aquamentor",
             &qbo_rows,
+            None,
             as_of,
             directory.path(),
             now(),
@@ -390,6 +442,7 @@ mod tests {
             &realm(),
             "aquamentor",
             &qbo_rows,
+            None,
             as_of,
             directory.path(),
             now(),
@@ -417,6 +470,7 @@ mod tests {
             Path::new("/Users/dan/.local/replica.db"),
             Path::new("/Users/dan/.local/qbo-tb.csv"),
             Path::new("/Users/dan/.local/nightly"),
+            None,
         );
         assert!(plist.contains("<key>Label</key>"));
         assert!(plist.contains("com.aquamentor.ledger.nightly"));
@@ -429,5 +483,31 @@ mod tests {
         assert!(plist.contains("<integer>2</integer>"));
         assert!(plist.contains("<integer>0</integer>"));
         assert!(plist.contains("--live"));
+        assert!(!plist.contains("--from"));
+    }
+
+    #[test]
+    fn render_launchd_plist_bakes_in_the_window() {
+        let plist = render_launchd_plist(
+            "com.aquamentor.ledger.nightly.aquamentor",
+            &realm(),
+            "aquamentor",
+            Path::new("/Users/dan/.local/ledger.db"),
+            Path::new("/Users/dan/.local/replica.db"),
+            Path::new("/Users/dan/.local/qbo-tb.csv"),
+            Path::new("/Users/dan/.local/nightly"),
+            Some(ymd(2027, 1, 1)),
+        );
+        assert!(
+            plist.contains("--out /Users/dan/.local/nightly --from 2027-01-01 --as-of"),
+            "{plist}"
+        );
+    }
+
+    #[test]
+    fn a_book_without_the_slim_opening_may_run_unbounded() {
+        let (ledger, _store) = empty("aquamentor");
+        check_window(&ledger, "aquamentor", None).unwrap();
+        check_window(&ledger, "aquamentor", Some(ymd(2027, 1, 1))).unwrap();
     }
 }

@@ -20,8 +20,12 @@ qbo-local report --realm ID --name trial-balance --as-of YESTERDAY \
 
 ledger nightly --db LEDGER.sqlite --company aquamentor \
     --replica REPLICA.sqlite --realm ID \
-    --qbo-csv qbo-tb.csv --out NIGHTLY_DIR --as-of YESTERDAY
+    --qbo-csv qbo-tb.csv --out NIGHTLY_DIR [--from 2027-01-01] \
+    --as-of YESTERDAY
 ```
+
+The cutover book always carries `--from 2027-01-01` (see "The cutover book"
+below).
 
 The first pulls QBO's own `TrialBalance` report (the Reports API,
 `LEDGER-DESIGN.md` §6/§7) as of yesterday and writes it as the
@@ -30,13 +34,14 @@ is used (`tbdiff`, `opening`, `boundary`).
 
 The second:
 
-1. **Imports the whole replica** through `pipeline::import_replica` — the
+1. **Imports the replica** through `pipeline::import_replica` — the
    same posting function every other path in this codebase uses, not a
-   parallel implementation. This is a full re-import every night (no
-   `--from`/`--to` window): a document whose payload has not changed since
-   the last run is skipped, one that changed has its prior entries reversed
-   and replaced, so this is cheap in the steady state despite touching every
-   document every night.
+   parallel implementation. Without `--from` that is the whole history;
+   with it, every document dated on or after it. Either way it is a full
+   re-import of that window every night: a document whose payload has not
+   changed since the last run is skipped, one that changed has its prior
+   entries reversed and replaced, so this is cheap in the steady state
+   despite touching every document every night.
 2. **Reads the resulting trial balance** as of the same `--as-of` date.
 3. **Diffs it against the QBO CSV** (`report::tb_diff`, the §7 tier rules)
    and writes the result as both `tbdiff-<as-of>.txt` (the fixed-width report
@@ -100,6 +105,33 @@ FIFO, tax rounding mode, and so on), each recorded in `DECISIONS.md`. An
 unexplained variance there is worth a look before it becomes routine, but it
 is not the thing that blocks going live.
 
+## The cutover book
+
+Under D28/D29 the cutover book is built by `ledger import-slim` as of 31
+December 2026 (`docs/CUTOVER.md`): one opening entry carrying every 2026
+balance, plus the documents open on that date saved as never-posted open
+items. Only Q1 2027 is replayed. Its nightly therefore runs with
+**`--from 2027-01-01`**:
+
+```
+ledger nightly --db LEDGER.sqlite --company aquamentor \
+    --replica REPLICA.sqlite --realm ID \
+    --qbo-csv qbo-tb.csv --out NIGHTLY_DIR --from 2027-01-01 \
+    --as-of YESTERDAY
+```
+
+`--from` is required on such a book. When the ledger holds the slim opening
+entry (oplog kind `import_slim_opening`), `ledger nightly` refuses to run
+without a `--from`, or with one on or before the entry's date, and exits 1
+naming the date to use. Without the window the carried open items would be
+rejected ("opening entry" in the reason), but every other 2026 document —
+everything paid before 31 December — would post on top of the opening entry
+and double the books. A book without the slim opening entry (one built by a
+full `ledger import`) may still run with no window.
+
+The diff is the same: the ledger's trial balance as of yesterday (opening
+entry plus the replayed 2027 documents) against QBO's.
+
 ## Nightly and the reconciliation sweep are not the same check
 
 `qbo-local sweep` (`DESIGN.md` §7) verifies that the **replica** — the raw
@@ -126,16 +158,18 @@ parallel run keeps going through all of 2027.
 ## Scheduling it
 
 `ledger nightly --plist --db LEDGER.sqlite --company aquamentor --replica
-REPLICA.sqlite --realm ID --qbo-csv qbo-tb.csv --out NIGHTLY_DIR` prints a
-`launchd` plist (to stdout — redirect it to a `.plist` file) that runs both
-commands above, chained with a shell `&&`, once a day at 02:00 local, on
-`YESTERDAY`'s date computed at run time. Install it the ordinary `launchd`
-way:
+REPLICA.sqlite --realm ID --qbo-csv qbo-tb.csv --out NIGHTLY_DIR
+[--from YYYY-MM-DD]` prints a `launchd` plist (to stdout — redirect it to a
+`.plist` file) that runs both commands above, chained with a shell `&&`, once
+a day at 02:00 local, on `YESTERDAY`'s date computed at run time. A `--from`
+given here is baked into the job's `ledger nightly` command. Install the
+cutover book's job the ordinary `launchd` way:
 
 ```
-ledger nightly --plist --db ~/.local/ledger.db --company aquamentor \
-    --replica ~/.local/replica.db --realm 1234567890123456 \
-    --qbo-csv ~/.local/qbo-tb.csv --out ~/.local/nightly \
+ledger nightly --plist --from 2027-01-01 --db ~/.local/ledger.db \
+    --company aquamentor --replica ~/.local/replica.db \
+    --realm 1234567890123456 --qbo-csv ~/.local/qbo-tb.csv \
+    --out ~/.local/nightly \
     > ~/Library/LaunchAgents/com.aquamentor.ledger.nightly.plist
 
 launchctl load ~/Library/LaunchAgents/com.aquamentor.ledger.nightly.plist
