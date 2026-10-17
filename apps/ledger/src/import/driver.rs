@@ -7,7 +7,7 @@
 //! walked in a fixed type order and sorted by `(txn_date, qbo_id)`, so the
 //! same replica state always produces the same sequence.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use chrono::NaiveDate;
 use qbo_local::domain::{DocumentType, EntityType, RealmId};
@@ -54,6 +54,11 @@ pub struct ImportOptions {
     /// D28's import-only fallback class. `None` leaves every unclassed line
     /// for the posting gate to refuse.
     pub class_fallback: Option<ClassFallback>,
+    /// D33: QBO item id to class, from Dan's reviewed worksheet
+    /// (`crate::item_classes`). An item named here takes this class as its
+    /// default, ahead of any `ClassRef` QBO carries on the item.
+    /// `pipeline::import_replica` adds the book's own map to it.
+    pub item_classes: BTreeMap<String, ClassId>,
 }
 
 impl ImportOptions {
@@ -68,6 +73,7 @@ impl ImportOptions {
                 class: ClassId(chart::IMPORT_FALLBACK_CLASS.0.to_string()),
                 before: NaiveDate::from_ymd_opt(2027, 1, 1).expect("1 January 2027 is a date"),
             }),
+            item_classes: BTreeMap::new(),
         }
     }
 }
@@ -110,7 +116,13 @@ pub fn run(
     options: &ImportOptions,
     sink: &mut dyn FnMut(Translated) -> Result<(), Box<dyn std::error::Error>>,
 ) -> Result<ImportReport, ImportError> {
-    let ctx = translate_context(store, realm, company, options.class_fallback.clone())?;
+    let ctx = translate_context(
+        store,
+        realm,
+        company,
+        options.class_fallback.clone(),
+        &options.item_classes,
+    )?;
 
     let mut report = ImportReport {
         unmatched_classes: ctx.classes.unmatched.clone(),
@@ -176,12 +188,13 @@ pub(crate) fn translate_context(
     realm: &RealmId,
     company: &CompanyId,
     class_fallback: Option<ClassFallback>,
+    item_classes: &BTreeMap<String, ClassId>,
 ) -> Result<TranslateContext, ImportError> {
     let replica_accounts = parsed_accounts(store, realm)?;
     let journal_ar_ap_sides = build_journal_ar_ap_sides(store, realm, &replica_accounts)?;
     let accounts = map_accounts(&replica_accounts);
     let classes = map_classes(&parsed_classes(store, realm)?, company);
-    let items = build_item_contexts(store, realm, &classes)?;
+    let items = build_item_contexts(store, realm, &classes, item_classes)?;
     let customers_exempt = build_exempt_customers(store, realm)?;
     Ok(TranslateContext {
         accounts,
@@ -233,6 +246,7 @@ pub(crate) fn build_item_contexts(
     store: &Store,
     realm: &RealmId,
     classes: &ClassMapping,
+    item_classes: &BTreeMap<String, ClassId>,
 ) -> Result<HashMap<String, ItemContext>, ImportError> {
     let mut items = HashMap::new();
     for entry in store.entity_index(realm, EntityType::Item)? {
@@ -245,9 +259,12 @@ pub(crate) fn build_item_contexts(
         let ParsedEntity::Item(item) = *parsed else {
             continue;
         };
-        let default_class = json_reference(&entity.raw_json, "ClassRef")
-            .and_then(|id| classes.by_source_ref(&id))
-            .map(|mapped| mapped.class_id.clone());
+        // D33: Dan's map first; QBO's own item class only when he named none.
+        let default_class = item_classes.get(&item.qbo_id).cloned().or_else(|| {
+            json_reference(&entity.raw_json, "ClassRef")
+                .and_then(|id| classes.by_source_ref(&id))
+                .map(|mapped| mapped.class_id.clone())
+        });
         items.insert(
             item.qbo_id.clone(),
             ItemContext {

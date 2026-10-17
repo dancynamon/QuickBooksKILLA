@@ -572,6 +572,23 @@ CREATE TABLE doc_sequences (
 CREATE INDEX idx_document_versions_type ON document_versions(company_id, doc_type, document_id, version);
 "#,
     },
+    Migration {
+        version: 7,
+        name: "item class map: Dan's reviewed item -> class worksheet (D33)",
+        sql: r#"
+CREATE TABLE item_class_map (
+    company_id  TEXT NOT NULL REFERENCES companies(company_id),
+    -- The QBO item id (items.source_ref), not items.item_id: the map is
+    -- written before the importer has necessarily brought the item across.
+    item_ref    TEXT NOT NULL,
+    class_id    TEXT NOT NULL,
+    applied_at  TEXT NOT NULL,
+    applied_by  TEXT NOT NULL,
+    PRIMARY KEY (company_id, item_ref),
+    FOREIGN KEY (company_id, class_id) REFERENCES classes(company_id, class_id)
+) STRICT;
+"#,
+    },
 ];
 
 pub fn latest_version() -> i64 {

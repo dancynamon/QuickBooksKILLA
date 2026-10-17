@@ -16,6 +16,8 @@
 //! - [`store`]  — §4, §5: schema, invariants, period close, oplog
 //! - [`report`] — §7, §9: trial balance, P&L, balance sheet, the tax lines
 //! - [`import`]   — §6: replica to documents, chart mapping, opening balances
+//! - [`item_classes`] — D33: the item → class worksheet (rule suggestions
+//!   out, Dan's reviewed classes in) and the map the importer reads
 //! - [`pipeline`] — §6: the importer wired to [`post`] and [`store`] —
 //!   replica in, posted entries out
 //! - [`accountant`] — §8: the accountant's read-only role, GL detail and
@@ -51,6 +53,7 @@ pub mod books;
 pub mod chart;
 pub mod handoff;
 pub mod import;
+pub mod item_classes;
 pub mod mcp;
 pub mod mfg;
 pub mod nightly;

@@ -282,7 +282,10 @@ pub fn import_slim(
             .succ_opt()
             .expect("the as-of date is not the last representable day"),
     };
-    let ctx = import::translate_context(replica, realm, &company_id, Some(fallback))?;
+    // D33: an item Dan has classed in this book takes that class.
+    let item_classes = crate::item_classes::item_class_map(ledger, company)?;
+    let ctx =
+        import::translate_context(replica, realm, &company_id, Some(fallback), &item_classes)?;
 
     // --- 1. masters -------------------------------------------------------
     let (accounts_created, needing_mapping) =

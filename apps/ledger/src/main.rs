@@ -18,6 +18,7 @@ use ledger::authnet::{self, link, AuthnetConfig};
 use ledger::bank::{self, MatchRules, NewStatement};
 use ledger::handoff;
 use ledger::import::ImportOptions;
+use ledger::item_classes;
 use ledger::mfg::build::{self as mfg_build, NewAdjustment, NewBuild};
 use ledger::mfg::landed::{self, RawMaterialReceipt};
 use ledger::mfg::report::{self as mfg_report};
@@ -292,6 +293,19 @@ enum Command {
         plist: bool,
     },
     Mfg(MfgCommand),
+    ClassesSuggest {
+        replica: PathBuf,
+        realm: Option<RealmId>,
+        company: String,
+        out: PathBuf,
+        rules: Option<PathBuf>,
+        as_of: Option<NaiveDate>,
+    },
+    ClassesApply {
+        db: PathBuf,
+        company: String,
+        csv: PathBuf,
+    },
 }
 
 /// `ledger mfg ...` (§11). One JSON file per write, same shape as its
@@ -441,6 +455,9 @@ USAGE:
                              --class ID --date YYYY-MM-DD --reason \"...\"
     ledger mfg variance      --db PATH --company ID --from YYYY-MM-DD --to YYYY-MM-DD
     ledger mfg onhand        --db PATH --company ID
+    ledger classes suggest --replica PATH --out FILE.csv [--realm ID]
+                   [--company ID] [--rules FILE.toml] [--as-of YYYY-MM-DD]
+    ledger classes apply   --db PATH --company ID --csv FILE.csv
     ledger --help
 
 SUBCOMMANDS:
@@ -574,6 +591,22 @@ SUBCOMMANDS:
               launchd plist that runs `qbo-local report --live` and then
               this command (with the same --from) at 02:00 local, instead
               of running anything.
+    classes suggest  D33's item -> class worksheet (docs/CUTOVER.md, \"Item
+              classes\"): one row per active QBO item with its SKU, name,
+              type, category, income account and last-12-month sales (to
+              --as-of, default today), sorted by sales, plus a suggested_class
+              and the rule that fired from --rules (default: the checked-in
+              apps/ledger/item-class-rules.toml), and an empty class column
+              for Dan. Opens the replica read-only. --company (default
+              aquamentor) picks the class list the rules are checked against.
+              Prints only aggregate counts; the CSV holds item names, so keep
+              it under .local/.
+    classes apply  Read the class column (never suggested_class) of a reviewed
+              worksheet and write the book's item -> class map, which
+              `import`, `nightly` and `import-slim` read. Refuses the whole
+              file, listing every problem, if any row has no class, a class
+              the book does not have, or the import-only fallback. Items not
+              in the file keep their mapped class.
     mfg       Manufacturing costing (§11, docs/MFG.md for the JSON shapes):
               material add/list — a raw material, at zero cost until received.
               receive            — a raw material receipt: landed cost by
@@ -834,7 +867,51 @@ fn parse(args: &[String]) -> Result<Command, UsageError> {
         "verify" => parse_verify(args),
         "nightly" => parse_nightly(args),
         "mfg" => parse_mfg(args).map(Command::Mfg),
+        "classes" => parse_classes(args),
         other => Err(UsageError::unknown_subcommand(other)),
+    }
+}
+
+fn parse_classes(mut args: Args<'_>) -> Result<Command, UsageError> {
+    let Some(sub) = args.next() else {
+        return Err(UsageError::new("classes requires suggest or apply"));
+    };
+    let mut db = None;
+    let mut company = None;
+    let mut replica = None;
+    let mut realm = None;
+    let mut out = None;
+    let mut rules = None;
+    let mut as_of = None;
+    let mut csv = None;
+    while let Some(flag) = args.next() {
+        match flag.as_str() {
+            "--db" => db = Some(PathBuf::from(next_value(&mut args, "--db")?)),
+            "--company" => company = Some(next_value(&mut args, "--company")?),
+            "--replica" => replica = Some(PathBuf::from(next_value(&mut args, "--replica")?)),
+            "--realm" => realm = Some(parse_realm(&next_value(&mut args, "--realm")?)?),
+            "--out" => out = Some(PathBuf::from(next_value(&mut args, "--out")?)),
+            "--rules" => rules = Some(PathBuf::from(next_value(&mut args, "--rules")?)),
+            "--as-of" => as_of = Some(parse_date(&next_value(&mut args, "--as-of")?, "--as-of")?),
+            "--csv" => csv = Some(PathBuf::from(next_value(&mut args, "--csv")?)),
+            other => return Err(UsageError::unknown_flag(other)),
+        }
+    }
+    match sub.as_str() {
+        "suggest" => Ok(Command::ClassesSuggest {
+            replica: replica.ok_or_else(|| UsageError::missing_flag("--replica"))?,
+            realm,
+            company: company.unwrap_or_else(|| "aquamentor".to_string()),
+            out: out.ok_or_else(|| UsageError::missing_flag("--out"))?,
+            rules,
+            as_of,
+        }),
+        "apply" => Ok(Command::ClassesApply {
+            db: db.ok_or_else(|| UsageError::missing_flag("--db"))?,
+            company: company.ok_or_else(|| UsageError::missing_flag("--company"))?,
+            csv: csv.ok_or_else(|| UsageError::missing_flag("--csv"))?,
+        }),
+        other => Err(UsageError::unknown_subcommand(&format!("classes {other}"))),
     }
 }
 
@@ -2173,7 +2250,78 @@ fn execute(command: Command) -> Result<ExitCode, CommandError> {
             &db, &company, &replica, &realm, &qbo_csv, &out, from, as_of, plist,
         ),
         Command::Mfg(cmd) => run_mfg(cmd),
+        Command::ClassesSuggest {
+            replica,
+            realm,
+            company,
+            out,
+            rules,
+            as_of,
+        } => run_classes_suggest(&replica, realm, &company, &out, rules.as_deref(), as_of).map(ok),
+        Command::ClassesApply { db, company, csv } => {
+            run_classes_apply(&db, &company, &csv).map(ok)
+        }
     }
+}
+
+// -- classes (D33) --------------------------------------------------------
+
+fn run_classes_suggest(
+    replica: &std::path::Path,
+    realm: Option<RealmId>,
+    company: &str,
+    out: &std::path::Path,
+    rules: Option<&std::path::Path>,
+    as_of: Option<NaiveDate>,
+) -> Result<(), CommandError> {
+    let rules_text = match rules {
+        Some(path) => {
+            fs::read_to_string(path).map_err(|e| runtime(format!("{}: {e}", path.display())))?
+        }
+        None => item_classes::DEFAULT_RULES.to_string(),
+    };
+    let rules = item_classes::Rules::parse(&rules_text, company).map_err(runtime)?;
+    // Read-only: this may be pointed at the live replica the daemon owns.
+    let store = Store::open_read_only(replica).map_err(runtime)?;
+    let realm = match realm {
+        Some(realm) => realm,
+        None => {
+            let realms = store.list_realms().map_err(runtime)?;
+            match realms.as_slice() {
+                [only] => only.realm_id.clone(),
+                _ => {
+                    return Err(runtime(format!(
+                        "{}: holds {} realms; name one with --realm",
+                        replica.display(),
+                        realms.len()
+                    )))
+                }
+            }
+        }
+    };
+    let as_of = as_of.unwrap_or_else(|| Utc::now().date_naive());
+    let rows = item_classes::worksheet(&store, &realm, &rules, as_of).map_err(runtime)?;
+    fs::write(out, item_classes::render_csv(&rows))
+        .map_err(|e| runtime(format!("{}: {e}", out.display())))?;
+    let (from, to) = item_classes::sales_window(as_of);
+    println!("sales window {from} to {to}");
+    print!("{}", item_classes::summarize(&rows).render_text());
+    println!("\nwrote {}", out.display());
+    Ok(())
+}
+
+fn run_classes_apply(
+    db: &std::path::Path,
+    company: &str,
+    csv: &std::path::Path,
+) -> Result<(), CommandError> {
+    let text = fs::read_to_string(csv).map_err(|e| runtime(format!("{}: {e}", csv.display())))?;
+    let rows = item_classes::parse_reviewed(&text).map_err(runtime)?;
+    let ledger = Ledger::open(db).map_err(runtime)?;
+    let report =
+        item_classes::apply(&ledger, company, &rows, &actor(), Utc::now()).map_err(runtime)?;
+    print!("{}", report.render_text(company));
+    Ok(())
 }
 
 fn actor() -> String {

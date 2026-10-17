@@ -193,6 +193,13 @@ pub fn import_replica(
 ) -> Result<PipelineReport, PipelineError> {
     let company_id = CompanyId(company.to_string());
 
+    // D33: the book's item → class map, under anything the caller passed.
+    let mut options = options.clone();
+    for (item, class) in crate::item_classes::item_class_map(ledger, company)? {
+        options.item_classes.entry(item).or_insert(class);
+    }
+    let options = &options;
+
     // --- the chart and class mappings, materialised into the ledger -------
     let parsed_accounts = import::parsed_accounts(replica, realm)?;
     let account_mapping = map_accounts(&parsed_accounts);
@@ -209,7 +216,8 @@ pub fn import_replica(
     }
 
     // --- the posting context: items, customers, config ---------------------
-    let item_contexts = import::build_item_contexts(replica, realm, &class_mapping)?;
+    let item_contexts =
+        import::build_item_contexts(replica, realm, &class_mapping, &options.item_classes)?;
     let items = build_item_accounts(&item_contexts, &account_mapping);
     let customers_exempt = import::build_exempt_customers(replica, realm)?;
     let customers = customers_exempt

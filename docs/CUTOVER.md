@@ -176,6 +176,77 @@ under the full posting gate and diffs the result against QBO's trial
 balance as of yesterday. Re-running the slim import after Joel's close does
 not change the window.
 
+## Item classes (D33)
+
+QBO items carry no default class and QBO's own classes are unused, so under
+the full posting gate the Q1 2027 replay refuses nearly every income line
+for want of a class. Dan decides each item's class once, on a worksheet; the
+code only suggests and then records what he wrote. Nothing is defaulted.
+
+**Where the map lives:** the `item_class_map` table in the ledger book
+(migration 7; QBO item id → class), written by `ledger classes apply`. It
+travels with `--db`, which every command that reads it already takes:
+`ledger import` and `ledger nightly` (`pipeline::import_replica`) and
+`ledger import-slim` (its rehearsal copies the book, so the map comes too).
+An item in the map takes that class as its default, ahead of any `ClassRef`
+QBO carries on the item; a class on the QBO line itself still wins. A fresh
+scratch book (`import-slim --dry-run` without `--db`, the practice-run
+example) has no map until one is applied to it.
+
+1. **Generate the worksheet.** Read-only on the replica (it opens it
+   `SQLITE_OPEN_READ_ONLY`), but take the copy anyway so the daemon is never
+   contended:
+
+   ```bash
+   sqlite3 "file:.local/replica.db?mode=ro" ".backup .local/cutover/replica-copy.db"
+   ```
+
+   ```bash
+   ledger classes suggest --replica .local/cutover/replica-copy.db --out .local/cutover/item-classes.csv
+   ```
+
+   One row per active item (categories and inactive items left out):
+   `qbo_id, sku, name, type, category, income_account, sales_lines_12m,
+   sales_amount_12m, suggested_class, rule, class`. Sales are Invoice and
+   SalesReceipt lines in the twelve months to `--as-of` (default today),
+   credits not netted. Sorted by sales amount, so the top of the sheet is what
+   matters. `suggested_class` and `rule` come from
+   `apps/ledger/item-class-rules.toml` (checked in, commented; `--rules` to
+   try another file). The CSV holds item names: keep it under `.local/`,
+   never commit it. The command prints only counts.
+
+2. **Review.** Fill the `class` column (one of `foam`, `sign`, `chair`,
+   `drop`, `cnc`, `uv`); copying the suggestion is a decision, leaving it is
+   not. Work from the top. Rows you have not decided yet: delete them. Other
+   columns may be reordered, hidden or added; only `qbo_id` and `class` are
+   read.
+
+3. **Apply** to the book the replay runs in (the cutover book once the slim
+   import has created it; before that, `ledger init` it first):
+
+   ```bash
+   ledger classes apply --db .local/ledger.sqlite --company aquamentor --csv .local/cutover/item-classes.csv
+   ```
+
+   All or nothing: any row with no class, a class the book does not have,
+   `unclassified` (D28's import-only fallback) or two classes for one item
+   refuses the whole file and lists every such row. Items not in the file
+   keep their mapped class, so apply in batches as the review goes; a later
+   file changes an item's class by naming it again.
+
+4. **Re-run** the slim import and the nightly as usual; their items now carry
+   the class. Whatever is still refused for want of a class is an item not
+   yet mapped, or an account-only line (purchases, deposits, journal entries)
+   that D33 still has to settle.
+
+**First dry run (17 October 2026, replica as of that morning, sales to
+10/16):** 3,250 active items, 233 of them sold in the twelve months. The
+rules suggest a class for 998 items covering 87.6% of the 806,954.57 of
+item sales: foam 453 items (611,504.62), chair 34 (40,175.00), drop 478
+(54,446.03), sign 33 (400.90); 2,252 items with no suggestion carry
+100,428.02. Most of that remainder is shipping (no rule by design: its class
+is a policy call), pool lifts and other resale without a telling category.
+
 ## Rehearsal 1 — 17 October 2026, as of 30 September 2026
 
 The first dry run against the live replica, read-only: three Reports API
@@ -256,7 +327,8 @@ the passing numbers mean):
   (2300 carries QBO "Loan Payable", 5000 "Merchant Account Fees", and so on).
 - **Classes (D33):** none of the 3,474 items has a default class, and QBO's
   three classes are unused. Fine for the import (its lines take
-  `unclassified`), a blocker for posting Q1 2027 under the full gate.
+  `unclassified`), a blocker for posting Q1 2027 under the full gate until
+  Dan's item worksheet is applied ("Item classes (D33)" above).
 - **Items pointing at non-income accounts (D34)** and **inventory relief
   (D36):** affect the Q1 replay, not the slim import.
 - **20 date-driven payment terms** (due on the 1st or the last of the month)

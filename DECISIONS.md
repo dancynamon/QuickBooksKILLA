@@ -1101,6 +1101,32 @@ Options:
 is Dan's daily workflow and Joel's call on whether an unclassified quarter is
 acceptable.
 
+**Procedure for option 2 (built, 17 Oct 2026).** Whichever option wins for
+the daily workflow, the Q1 replay needs an item → class map, and Dan is the
+one who decides it; the code never does. `docs/CUTOVER.md`, "Item classes
+(D33)":
+
+1. `ledger classes suggest --replica <copy> --out .local/cutover/item-classes.csv`
+   lists every active item with its last-12-month sales, largest first, a
+   `suggested_class` from the checked-in rules
+   (`apps/ledger/item-class-rules.toml`: SKU prefix, name keyword, QBO
+   category, income account; first match wins) and the `rule` that fired.
+   On the first run the rules cover 87.6% of item sales; shipping items are
+   left blank on purpose.
+2. Dan fills the `class` column. Only that column is read, never the
+   suggestion; a row he has not decided is deleted, not left blank.
+3. `ledger classes apply --db <book> --company aquamentor --csv <file>`
+   writes the book's `item_class_map` (migration 7). It refuses the whole
+   file on any row with no class, an unknown class or `unclassified`, and
+   merges with what an earlier batch applied.
+4. `ledger import`, `ledger nightly` and `ledger import-slim` give a mapped
+   item that class ahead of QBO's item class. If option 1 is chosen too,
+   the map still wins over the class QBO later carries on the item, so the
+   two must agree (nothing removes a mapped item yet).
+
+Still open under D33: account-only lines (purchases, bills on accounts,
+channel deposits, journal entries) have no item to take a class from.
+
 ## D34 — Items whose QBO account is not an income account
 
 17 Oct 2026. **Question for Joel.** The posting rules (§1) credit every

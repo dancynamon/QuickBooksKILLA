@@ -158,6 +158,7 @@ fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
             class: ClassId(chart::IMPORT_FALLBACK_CLASS.0.to_string()),
             before: args.fallback_before.unwrap_or(args.from),
         }),
+        ..ImportOptions::default()
     };
     let import = pipeline::import_replica(&ledger, &replica, &realm, COMPANY, &options, Utc::now())?;
     let import_secs = started.elapsed().as_secs_f64();
