@@ -192,6 +192,9 @@ fn generate_synthetic_fixtures() {
 
     let output = Command::new("python3")
         .arg(&script)
+        // Invented data: amounts are kept (D31 — only a real recording's
+        // amounts are scrubbed, and that needs the secret seed).
+        .arg("--keep-amounts")
         .arg(&raw_dir)
         .arg(&dest)
         .output()

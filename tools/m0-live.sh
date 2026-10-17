@@ -53,13 +53,10 @@ step_sync() {
   $BIN/qbo-local status --db $DB --config .local/config.toml | tee "$RUN/status-after-sync.log"
 }
 step_fixtures() {
-  log "7. record + scrub fixtures (commit happens after a human-or-Claude read of every file)"
-  rm -rf .local/fixtures/raw .local/fixtures/scrubbed .local/record.db .local/replay-check.db
-  $BIN/qbo-local init --db .local/record.db --realm "$REALM" --name "Aquamentor, Inc."
-  $BIN/qbo-local init --db .local/replay-check.db --realm "$REALM" --name "Aquamentor, Inc."
-  timed record $BIN/qbo-local record --db .local/record.db --realm "$REALM" --dir .local/fixtures/raw --live
-  timed scrub python3 tools/scrub-fixtures.py .local/fixtures/raw .local/fixtures/scrubbed
-  timed replay $BIN/qbo-local replay --db .local/replay-check.db --realm "$REALM" --dir .local/fixtures/scrubbed
+  log "7. slice + scrub fixtures (commit happens after a human-or-Claude read of every file)"
+  # D31: a closed slice of the replica, amounts scrubbed with the secret seed.
+  # A full-book `record` is still available but cannot be scrubbed for commit.
+  timed fixtures tools/make-real-fixture.sh
 }
 step_ledger() {
   log "8. ledger first run + tbdiff baseline (do not chase variances)"
