@@ -7,10 +7,12 @@ settlement import posting the customer payment"). This is the how-to; the
 policy is in the design document, this file is the operator's guide.
 
 The code is `apps/ledger/src/authnet.rs` and its `csv` submodule, plus the
-fee-aware extension to `apps/ledger/src/bank.rs`'s settlement match. Nothing
-here calls Authorize.net's API — every batch arrives as a file exported by
-hand from the Merchant Interface, the same "no aggregator" discipline as
-`docs/BANK.md`.
+fee-aware extension to `apps/ledger/src/bank.rs`'s settlement match. The
+import never calls Authorize.net's API — every batch arrives as a file
+exported by hand from the Merchant Interface, the same "no aggregator"
+discipline as `docs/BANK.md`. The one API call is the payment link (the
+`link` submodule, last section below): it asks for a hosted payment page and
+moves no money itself.
 
 ## Exporting the CSV
 
@@ -165,3 +167,95 @@ statement, and 6700 carries the discovered fee under `MatchRules::fee_class`
 A line further out than `max_fee_ratio` — a genuine mismatch, not a
 processing fee — falls through to the ordinary keyword proposal, same as any
 other unmatched line, rather than being silently absorbed.
+
+## Payment link
+
+D30. The customer side of the loop: a hosted Authorize.net payment page for
+one of the ledger's own invoices, so the customer pays by card on
+Authorize.net's page and the settled payment comes back through the import
+above against that same invoice. Code: `apps/ledger/src/authnet/link.rs`.
+
+**How the payment finds its invoice.** The request sends the invoice's own
+`number` as `order.invoiceNumber` and its open balance as `amount`. The
+Merchant Interface export carries that number back in its `Invoice Number`
+column, and `authnet import` applies the sale to the invoice with that number
+(above). Nothing else links the two, so an invoice needs a number of at most
+20 characters (Authorize.net's limit) — the ledger's own sequence (`1001`,
+`1002`, ...) always is.
+
+**What is refused**, before Authorize.net is asked anything: a document that
+is not an invoice, a voided invoice, a fully paid one, and one with no
+number.
+
+**The token is short-lived.** Authorize.net's form token is valid for 15
+minutes and has to be POSTed to the hosted form; it is not a URL that can sit
+on a PDF for a week. So a link is the form URL, the token, its expiry, and a
+small page that POSTs the token when opened. Mint it when the customer is
+about to pay (on the phone, or in the email you are sending right now). A
+durable "Pay now" link printed on the invoice needs an endpoint that mints a
+fresh token at click time — not built yet (D30).
+
+```
+ledger authnet link --db LEDGER.sqlite --company aquamentor \
+    --document DOCUMENT_ID --out pay-1042.html
+```
+
+prints the invoice number, amount, environment, form URL and expiry, and
+writes the page to `--out` (without `--out` it prints the token instead).
+From an MCP client it is the `payment_link` tool (`docs/MCP.md`).
+
+### Sandbox first, production off by default
+
+`[authnet]` in `.local/config.toml` (gitignored; `--config PATH` or
+`LEDGER_AUTHNET_CONFIG` to point elsewhere). Every key is optional; no file
+or no table means sandbox.
+
+```toml
+[authnet]
+environment = "sandbox"          # or "production"
+allow_production = false         # production needs this true as well
+merchant_name = "Aquamentor"     # shown on the hosted receipt
+# return_url = "https://aquamentor.com/thanks"   # receipt's Continue button
+# cancel_url = "https://aquamentor.com"
+```
+
+| Environment | API endpoint | Hosted form |
+|---|---|---|
+| sandbox | `https://apitest.authorize.net/xml/v1/request.api` | `https://test.authorize.net/payment/payment` |
+| production | `https://api.authorize.net/xml/v1/request.api` | `https://accept.authorize.net/payment/payment` |
+
+### Credentials
+
+The API Login ID and Transaction Key are never read from a file — a
+`transaction_key` or `api_login_id` under `[authnet]` is an error. In order:
+
+1. `AUTHNET_API_LOGIN_ID` and `AUTHNET_TRANSACTION_KEY` in the environment.
+2. The macOS login keychain: service `com.aquamentor.ledger.authnet`, account
+   `sandbox` or `production`. Store them with
+
+   ```
+   ledger authnet credentials --environment sandbox
+   ```
+
+   which reads the Login ID then the Key from stdin, one per line, so neither
+   lands in shell history.
+
+Neither value is ever printed or put in an error message.
+
+### Trying it in the sandbox
+
+1. Sign up for a free sandbox account at
+   <https://developer.authorize.net/hello_world/sandbox.html>; in its
+   Merchant Interface (`https://sandbox.authorize.net`), Account -> Settings
+   -> API Credentials & Keys gives the API Login ID and a new Transaction Key.
+2. `ledger authnet credentials --environment sandbox`.
+3. Create an invoice (`create_document`), then `ledger authnet link ... --out
+   pay.html`, open `pay.html` within 15 minutes and pay with Authorize.net's
+   test card `4111111111111111`, any future expiry.
+4. After the sandbox batch settles, export the Transaction Detail CSV and run
+   `ledger authnet import` against a scratch book: the invoice should leave
+   `aging`.
+
+Production is the same with the production account's keys,
+`environment = "production"` and `allow_production = true` — at cutover, not
+before.

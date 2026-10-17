@@ -269,6 +269,14 @@ Two environment variables, both required:
 Build the binary with `cargo build --release -p ledger --bin ledger-mcp` and
 point `command` at `target/release/ledger-mcp`.
 
+One optional variable, for `payment_link` only: `LEDGER_AUTHNET_CONFIG`
+names the config file whose `[authnet]` table it reads (default
+`.local/config.toml`, relative to the server's working directory). Missing,
+the tool runs against the Authorize.net **sandbox**. The API Login ID and
+Transaction Key come from `AUTHNET_API_LOGIN_ID` / `AUTHNET_TRANSACTION_KEY`
+in the server's `env`, else the macOS keychain (`docs/AUTHNET.md`, "Payment
+link") — never from the config file.
+
 ## The write gate
 
 Two rules apply to every write tool below, uniformly, so a skill never has
@@ -658,6 +666,33 @@ says — there is no quiet way to relock a period back to where it was.
   "arguments": { "period_end": "2026-08-31", "actor": "dan", "note": "August close" }
 }
 ```
+
+## Payment tool
+
+### `payment_link`
+
+An Authorize.net hosted payment page for one open invoice (D15, D30,
+`docs/AUTHNET.md`). The request carries the invoice's own `number` as
+`invoiceNumber` and its open balance (total less every payment and credit
+applied so far) as the amount, so when the batch settles `ledger authnet
+import` applies the payment back to this invoice and it leaves the AR aging.
+
+Refused, with `isError` and no call to Authorize.net, for a document that is
+not an invoice, a voided invoice, a fully paid one, one with no number or a
+number over 20 characters, and while an import replay is in progress. Writes
+nothing to the ledger and moves no money: the customer pays on Authorize.net's
+own page. Not a write tool, so its result carries no `locked_through`.
+
+```json
+{ "name": "payment_link", "arguments": { "document_id": "0192d4c8-..." } }
+```
+
+Returns `{ document_id, invoice_number, amount, environment, url, token,
+expires_at, html }`. **The token lasts 15 minutes and must be POSTed** to
+`url` as form field `token` — a GET of `url` does nothing. `html` is a small
+page that does the POST as soon as it opens; save it and open it, or hand it
+to the customer at once. `environment` is `"sandbox"` unless production is
+enabled in the config.
 
 ## Repointing a skill
 

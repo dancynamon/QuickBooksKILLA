@@ -44,18 +44,21 @@
 //! module's documents go through (`ledger authnet import`, `main.rs`).
 
 pub mod csv;
+pub mod link;
 
 pub use csv::{parse_transactions, ParseError, TransactionRow, TransactionStatus};
 
 use std::collections::HashMap;
 
-use chrono::NaiveDate;
+use chrono::{DateTime, NaiveDate, Utc};
 
 use ledger_core::{Money, MoneyError};
 
+use crate::post::{self, PostError, Posting};
+use crate::store::{CommandMeta, Ledger, LedgerError};
 use crate::types::{
     AccountId, Application, ClassId, ContactKind, ContactRef, DocKind, DocLine, LedgerDocument,
-    LineKind,
+    LineKind, PostingConfig, PostingContext,
 };
 
 /// Whether a batch transaction moved money in (a settled sale) or out (a
@@ -385,6 +388,124 @@ pub fn settlement_documents(
         }
     }
     documents
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ImportError {
+    #[error(transparent)]
+    Parse(#[from] ParseError),
+    #[error(transparent)]
+    Money(#[from] MoneyError),
+    #[error(transparent)]
+    Ledger(#[from] LedgerError),
+}
+
+/// What [`import_settlement`] did with one file.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ImportReport {
+    pub settled: usize,
+    pub applied: usize,
+    pub unapplied: usize,
+    pub refunded: usize,
+    /// Documents whose id was already saved: a re-import of the same file.
+    pub skipped: usize,
+    /// `document_id: reason` for every document the store or posting rules
+    /// refused. The rest of the file still posts.
+    pub rejected: Vec<String>,
+    /// The memo of every sale parked unapplied, for Dan to chase.
+    pub warnings: Vec<String>,
+}
+
+/// `ledger authnet import` as a library call: parse, group, build the
+/// documents, and save and post every one not already saved. The
+/// `document_id` (`authnet:<batch>`, `authnet:txn:<txn>`) is the dedupe key,
+/// so re-running the same file posts nothing new (D22's "a re-run replaces,
+/// never duplicates", simplified to "already saved, so skip": a settled
+/// Authorize.net transaction is immutable once it appears in this export).
+/// A sale's `Invoice Number` resolves through
+/// [`Ledger::document_by_number`] — the number [`link`] sends as
+/// `invoiceNumber` on the hosted payment page.
+pub fn import_settlement(
+    ledger: &Ledger,
+    company: &str,
+    text: &str,
+    config: &AuthnetConfig,
+    actor: &str,
+    now: DateTime<Utc>,
+) -> Result<ImportReport, ImportError> {
+    let rows = parse_transactions(text)?;
+    let batches = group_batches(&rows)?;
+    let resolve_invoice = |number: &str| -> Option<(String, DocKind)> {
+        ledger.document_by_number(company, number).ok().flatten()
+    };
+    let documents = settlement_documents(&batches, config, &resolve_invoice);
+
+    let ctx = PostingContext {
+        config: PostingConfig {
+            default_deposit_account: config.undeposited.clone(),
+            ..PostingConfig::default()
+        },
+        ..PostingContext::default()
+    };
+
+    let mut report = ImportReport::default();
+    for doc in &documents {
+        if ledger.document_version_count(company, &doc.document_id)? > 0 {
+            report.skipped += 1;
+            continue;
+        }
+        let result = (|| -> Result<(), String> {
+            let next_version = ledger
+                .document_version_count(company, &doc.document_id)
+                .map_err(|e| e.to_string())?
+                + 1;
+            // Post before saving, so a document the rules refuse leaves
+            // nothing behind (`mcp::create_document` does the same).
+            let posting =
+                post::post(doc, next_version, &ctx).map_err(|e: PostError| e.to_string())?;
+            ledger
+                .save_document(
+                    company,
+                    doc,
+                    CommandMeta {
+                        actor_id: actor.to_string(),
+                        kind: "authnet_import".to_string(),
+                        hlc: now.to_rfc3339(),
+                    },
+                    now,
+                )
+                .map_err(|e| e.to_string())?;
+            match posting {
+                Posting::Entry(entry) => {
+                    ledger
+                        .post_entry(company, &entry, now)
+                        .map_err(|e| e.to_string())?;
+                }
+                Posting::NonPosting => unreachable!("authnet documents always post"),
+            }
+            Ok(())
+        })();
+
+        match result {
+            Ok(()) => match doc.kind {
+                DocKind::Settlement => report.settled += 1,
+                DocKind::Payment => {
+                    if doc.unapplied.is_zero() {
+                        report.applied += 1;
+                    } else {
+                        report.unapplied += 1;
+                        report
+                            .warnings
+                            .push(doc.memo.clone().unwrap_or_else(|| doc.document_id.clone()));
+                    }
+                }
+                DocKind::RefundReceipt => report.refunded += 1,
+                _ => {}
+            },
+            Err(err) => report.rejected.push(format!("{}: {err}", doc.document_id)),
+        }
+    }
+    Ok(report)
 }
 
 #[cfg(test)]

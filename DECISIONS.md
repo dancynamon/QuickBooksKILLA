@@ -1023,3 +1023,86 @@ keychain prompt, D26):**
 posts the same entry. New variants would spread into every exhaustive
 `DocKind` match, the desktop app's included, and buy nothing until the own
 books need their own transfer form.
+
+## D30 — The payment link is an Accept Hosted token, minted on demand
+
+17 Oct 2026. Builds the D15 go/no-go piece: a hosted Authorize.net payment
+page for the own invoice (`apps/ledger/src/authnet/link.rs`, `payment_link`
+on `ledger-mcp`, `ledger authnet link`; `docs/AUTHNET.md`, "Payment link").
+
+**Decided.**
+
+1. **Accept Hosted, `getHostedPaymentPageRequest`.** The request carries
+   `order.invoiceNumber` = the invoice's own number and `amount` = its open
+   balance (total less every application so far), so the settlement import's
+   existing `Invoice Number` match (`docs/AUTHNET.md`) applies the payment
+   back to that invoice. `refId` is the number too. `customer.id` is the
+   ledger contact id when it fits the gateway's rule (≤ 20, alphanumeric),
+   `customer.email` the contact's email.
+2. **A link is minted when it is about to be used.** The form token is valid
+   for 15 minutes and must be POSTed. So `payment_link` returns the form URL,
+   the token, `expires_at`, and a self-submitting HTML page — not a URL that
+   can be printed on an invoice PDF. **Follow-up:** a durable "Pay now" link
+   on a sent invoice needs a small public endpoint (e.g. an HMAC-signed
+   `pay.aquamentor.com/i/<number>`) that calls this same code at click time.
+   Not built; needs hosting decided.
+3. **Refused** before any API call: not an invoice, voided, fully paid, no
+   number, number over 20 characters (it could not be matched back).
+4. **Sandbox by default.** Production needs `environment = "production"`
+   *and* `allow_production = true` under `[authnet]` in the gitignored
+   `.local/config.toml`.
+5. **Credentials** never in a file: `AUTHNET_API_LOGIN_ID` /
+   `AUTHNET_TRANSACTION_KEY`, else the macOS login keychain (service
+   `com.aquamentor.ledger.authnet`, account `sandbox`/`production`, JSON
+   `{api_login_id, transaction_key}`), stored by `ledger authnet
+   credentials`, which reads stdin. A key written under `[authnet]` is a
+   config error. `Credentials`' `Debug` and every error message omit both.
+6. **`HostedPaymentClient` is the seam** (`qbo_local::client::QboClient`'s
+   shape): `HttpAuthnetClient` (blocking `ureq`), `MockAuthnet` for the
+   offline suite, and a loopback fake gateway test for the wire shape. No
+   test reaches Authorize.net.
+7. The CLI's settlement import loop moved into the library
+   (`authnet::import_settlement`) so the end-to-end test drives the same
+   code, and it now posts before saving: a document the rules refuse is no
+   longer left saved, where the next re-import would have skipped it for
+   good.
+
+*Rejected: a Payment Link product.* Authorize.net's developer docs show no
+payment-link API; Accept Hosted is the documented hosted-form path. The
+Merchant Interface's own invoicing feature would bill from Authorize.net's
+side, outside this book, and could not carry the ledger's numbering.
+
+**API facts relied on**, from Authorize.net's own pages (read 17 Oct 2026):
+
+| Fact | Source |
+|---|---|
+| API endpoints: sandbox `https://apitest.authorize.net/xml/v1/request.api`, production `https://api.authorize.net/xml/v1/request.api`; HTTP POST, `application/json` | [API reference](https://developer.authorize.net/api/reference/index.html) |
+| Hosted form: sandbox `https://test.authorize.net/payment/payment`, production `https://accept.authorize.net/payment/payment`; the token is sent by HTML form POST | [Accept Hosted](https://developer.authorize.net/api/reference/features/accept-hosted.html) |
+| "The form token is valid for 15 minutes." | Accept Hosted |
+| Only `transactionType` and `amount` are required; `transactionRequest` takes `createTransactionRequest`'s children | Accept Hosted |
+| Response: `token`, `messages.resultCode` `Ok`/`Error`, `messages.message[].code`/`text` | Accept Hosted; API reference |
+| `amount` a plain decimal, no currency symbol; `order.invoiceNumber` ≤ 20; `order.description` ≤ 255; `customer.id` ≤ 20, alphanumeric | API reference (createTransactionRequest) |
+| Settings `hostedPaymentReturnOptions` (`showReceipt`, `url`, `urlText`, `cancelUrl`, `cancelUrlText`), `hostedPaymentButtonOptions` (`text`), `hostedPaymentOrderOptions` (`show`, `merchantName`); values are JSON objects sent as strings | Accept Hosted |
+| Element order: request `merchantAuthentication`, `refId`, `transactionRequest`, `hostedPaymentSettings`; transaction `transactionType`, `amount`, …, `order`, …, `customer`; customer `type`, `id`, `email` | Authorize.net's PHP SDK schema ([GetHostedPaymentPageRequest.yml](https://github.com/AuthorizeNet/sdk-php/blob/master/lib/net/authorize/api/yml/v1/GetHostedPaymentPageRequest.yml), TransactionRequestType.yml) and [sample code](https://github.com/AuthorizeNet/sample-code-python/blob/master/AcceptSuite/get-an-accept-payment-page.py) |
+
+**Not verified** — handled defensively or to check in the sandbox:
+
+- That the JSON API rejects out-of-order elements. Believed from developer
+  forum reports, not found on an official page; the body is built from
+  structs in schema order either way.
+- That JSON responses can start with a UTF-8 byte-order mark. Same: forum
+  reports only; `parse_response` strips one if present.
+- Whether `refId` is echoed by this call, and whether a token can be posted
+  more than once inside its 15 minutes. Not relied on.
+- That the Merchant Interface's Transaction Detail export fills `Invoice
+  Number` from `order.invoiceNumber` on an Accept Hosted sale. Strongly
+  expected (it is the same field), but the first sandbox settlement should
+  confirm it before cutover.
+- The sandbox sign-up URL and test card `4111111111111111` in
+  `docs/AUTHNET.md` are from Authorize.net's testing guide as commonly
+  cited, not re-read today.
+
+**Open:** a settled sale is applied for its full amount even if the invoice
+was meanwhile paid another way (two links paid, or a check plus a link), which
+would over-apply the invoice. The import should cap the application at the
+open balance and park the rest unapplied; not changed here.
