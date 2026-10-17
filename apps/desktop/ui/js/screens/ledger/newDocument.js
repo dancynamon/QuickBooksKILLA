@@ -167,10 +167,10 @@ async function renderForm(main, kind, draft, saved) {
         ? viewHead(
           `${spec.label} ${saved.number ?? ""}`.trim(),
           `Editing version ${saved.version} · saving keeps the number and ${spec.posts ? "reverses the old entry before posting the new one" : "posts nothing"}`,
-          `<a class="btn" href="#ledger-new/${kind}">New ${esc(spec.label.toLowerCase())}</a>`,
+          `<a class="btn" href="#ledger-new/${kind}">New ${esc(spec.noun ?? spec.label.toLowerCase())}</a>`,
         )
         : viewHead(
-          `New ${spec.label.toLowerCase()}`,
+          `New ${spec.noun ?? spec.label.toLowerCase()}`,
           spec.posts ? "Saves and posts to the own book" : "Saves to the own book; posts nothing",
           `<div class="seg" role="group" aria-label="Document type">
             ${Object.entries(ENTRY_KINDS).map(([k, s]) => `<button data-kind="${k}" aria-pressed="${k === kind}">${esc(s.label)}</button>`).join("")}

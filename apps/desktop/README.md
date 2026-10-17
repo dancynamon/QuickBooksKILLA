@@ -121,6 +121,10 @@ hand-posted from a form.
   or vendor credit has an Apply control (`apply_credit`) that applies it
   to one of the same contact's open invoices or bills, all of it or a
   typed amount.
+  An open invoice has **Take card payment**: it mints D30's Authorize.net
+  hosted page for the open balance and opens it at once (the token lasts 15
+  minutes, so it is never printed or emailed); the payment posts back to the
+  invoice when its batch settles and is imported.
 - **Edit a document** (`#ledger-edit/<document_id>`) — the New document
   form over `get_document`/`update_document`: the saved document read back
   into a draft (a line's rate recovered when quantity × rate gives back
