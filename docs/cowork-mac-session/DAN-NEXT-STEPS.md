@@ -84,7 +84,7 @@ write the feed by hand:
    invoiced" or partly invoiced, plus the newest order whatever its status,
    with `"complete": true` and `capturedAt` set to now.
 3. Show Dan the count and the order numbers, not the amounts, for his OK.
-   Don't apply it: syncing needs the rebuilt daemon from step 6 first.
+   Don't apply it: syncing needs the rebuilt daemon from step 7 first.
 4. Ask Dan whether a Claude Code session should build the real producer in
    `~/code/aquamentor-mcp` (qbo-headless). Record his answer.
 
@@ -115,6 +115,12 @@ Each pay run's wages post by class, so every employee needs one.
 ## 6. Open the desktop app and look at it
 
 1. Dan types in Terminal: `cd ~/code/QuickBooksKILLA && tools/desktop.sh --open`
+   What it shows: the top of the side menu (Today, Invoices, Bills, A/R and
+   A/P aging, Chart of accounts, and ⌘K search) is his **real QBO data**, from
+   the local copy, read-only. The "Ledger" section is an **empty practice
+   book** (`~/Library/Application Support/QuickBooksKILLA/scratch-ledger.sqlite`):
+   anything entered there is a test and touches no real books. Tell him so
+   before he clicks.
 2. Take a screenshot of the window. Ask Dan to click through New document,
    Receivables, Customers and Products and services. Screenshot each.
 3. Note anything broken, unreadable or confusing in `answers.md`, with the
