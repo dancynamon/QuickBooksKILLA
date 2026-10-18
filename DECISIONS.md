@@ -270,3 +270,29 @@ than an optimisation, which fixes the one-transaction-per-entity cost flagged in
 - **The drain runs in the sync process.** The desktop app only queues; `sync --watch`
   drains before each poll. Both open the same file, so the store waits up to 5 s on the
   other's lock rather than failing a save.
+
+## D15 — Manufacturing costing: what was decided while building it
+
+18 Oct 2026, in build. Phase 2's first slice: landed cost, build sheets, builds.
+
+- **The replica's own data, outside the write gate.** Materials, deliveries, build sheets
+  and builds live in tables QuickBooks never sees (migration 4). Recording them changes
+  nothing in the book of record, so they are usable today, before any QuickBooks write
+  is switched on.
+- **Freight follows board-feet, to the cent.** Shares are allocated by largest remainder,
+  so the freight in the costs always equals the freight on the bill.
+- **A material's cost is its most recent delivery's landed $/bf.** Simple, explainable
+  and matches how a quote is priced. A moving average over stock on hand needs
+  quantities on hand, which this slice does not track. Recorded here because it is the
+  first thing to revisit when inventory quantities arrive.
+- **Yield divides.** Net board-feet over yield is what is bought; the difference is priced
+  as waste and shown, not buried.
+- **Rates carry four places; sums of money are rounded once.** $/bf and unit costs are
+  rates, kept to four places; a run's standard and variance are money, rounded to the
+  cent at the end.
+- **A build keeps the sheet it was measured against.** Editing a build sheet later does
+  not rewrite a past run's standard.
+- **Nothing is deleted.** A wrong delivery is corrected by recording another.
+- **No posting.** Builds are costed, not journalled. Moving inventory value between raw
+  material and finished goods is ledger work (Phase 3) and the posting rules there need
+  your CPA's review first.

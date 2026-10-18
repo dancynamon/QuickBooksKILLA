@@ -173,6 +173,106 @@ export interface Item {
   usedOn: number;
 }
 
+// Manufacturing. Decimals arrive as exact strings and are shown as such.
+export interface MaterialRow {
+  materialId: string;
+  name: string;
+  thicknessIn: string;
+  widthIn: string;
+  lengthIn: string;
+  color: string | null;
+  bfPerSheet: string;
+  landedPerBf: string | null;
+  lastReceived: string | null;
+  receipts: number;
+}
+
+export interface ReceiptLineRow {
+  materialId: string;
+  sheets: string;
+  bfPerSheet: string;
+  pricePerSheet: string;
+  surchargePerSheet: string;
+  goodsMinor: number;
+  freightMinor: number;
+  landedPerBf: string;
+}
+
+export interface ReceiptRow {
+  receiptId: string;
+  receivedOn: string;
+  vendorId: string | null;
+  reference: string | null;
+  freightMinor: number;
+  lines: ReceiptLineRow[];
+}
+
+export type Component =
+  | { kind: "material"; materialId: string; netBf: string; yieldPct: string }
+  | { kind: "part"; name: string; itemId: string | null; qty: string; unitCost: string }
+  | { kind: "labour"; name: string; minutes: string; ratePerHour: string };
+
+export interface SheetSummary {
+  itemId: string;
+  name: string;
+  sku: string | null;
+  price: string | null;
+  unitCost: string | null;
+  materialCost: string | null;
+  wasteCost: string | null;
+  marginPct: string | null;
+  problem: string | null;
+  components: number;
+  updatedAt: string;
+}
+
+export interface CostLine {
+  label: string;
+  grossBf: string | null;
+  wasteBf: string | null;
+  cost: string;
+}
+
+export interface UnitCost {
+  lines: CostLine[];
+  material: string;
+  parts: string;
+  labour: string;
+  total: string;
+  waste: string;
+}
+
+export interface SensitivityCell {
+  priceMovePct: string;
+  yieldMovePts: string;
+  unitCost: string;
+  marginPct: string | null;
+}
+
+export interface BuildRow {
+  buildId: string;
+  itemId: string;
+  name?: string | null;
+  builtOn: string;
+  quantity: string;
+  standardMinor: number;
+  actualMinor: number;
+  varianceMinor: number;
+  flagged: boolean;
+  note: string | null;
+  actual: { materialId: string; boardFeet: string }[];
+}
+
+export interface SheetDetail {
+  item: { qboId: string; name: string; sku: string | null; unitPrice: string | null };
+  components: Component[];
+  cost: UnitCost | null;
+  marginPct: string | null;
+  problem: string | null;
+  sensitivity: SensitivityCell[];
+  builds: BuildRow[];
+}
+
 declare global {
   interface Window {
     __TAURI__?: { core: { invoke: (cmd: string, args: unknown) => Promise<unknown> } };
@@ -220,6 +320,20 @@ export const api = {
     call<{ outboxId: string; entityId: string; displayName: string }>("createCustomer", { realm, displayName, companyName, email }),
   outbox: (realm: string) => call<Write[]>("outbox", { realm }),
   resolveWrite: (realm: string, id: string, action: "retry" | "discard") => call<Write>("resolveWrite", { realm, id, action }),
+  materials: (realm: string) => call<MaterialRow[]>("materials", { realm }),
+  saveMaterial: (realm: string, m: { materialId?: string; name: string; thicknessIn: string; widthIn: string; lengthIn: string; color?: string }) =>
+    call<{ materialId: string; bfPerSheet: string }>("saveMaterial", { realm, ...m }),
+  receipts: (realm: string, materialId?: string) => call<ReceiptRow[]>("receipts", { realm, materialId }),
+  recordReceipt: (
+    realm: string,
+    r: { receivedOn: string; reference?: string; freight: string; lines: { materialId: string; sheets: string; pricePerSheet: string; surchargePerSheet?: string }[] },
+  ) => call<{ receiptId: string }>("recordReceipt", { realm, ...r }),
+  buildSheets: (realm: string) => call<SheetSummary[]>("buildSheets", { realm }),
+  buildSheet: (realm: string, itemId: string) => call<SheetDetail>("buildSheet", { realm, itemId }),
+  saveBuildSheet: (realm: string, itemId: string, components: Component[]) => call<{ itemId: string }>("saveBuildSheet", { realm, itemId, components }),
+  builds: (realm: string, itemId?: string) => call<BuildRow[]>("builds", { realm, itemId }),
+  recordBuild: (realm: string, b: { itemId: string; builtOn: string; quantity: string; actual: { materialId: string; boardFeet: string }[]; note?: string }) =>
+    call<{ buildId: string }>("recordBuild", { realm, ...b }),
   classes: (realm: string) => call<Record<string, string>>("classes", { realm }),
   documents: (realm: string, docType: DocType, limit = 50_000) => call<Document[]>("documents", { realm, docType, limit }),
   document: (realm: string, qboId: string) => call<DocumentDetail>("document", { realm, qboId }),

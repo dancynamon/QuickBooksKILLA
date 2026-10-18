@@ -108,6 +108,45 @@ assert.match(await page.textContent(".facts"), /737\.50/);
 
 await page.goto(`${base}/#/r/${realm}/writes`);
 await page.waitForSelector("text=Nothing waiting");
+// Manufacturing: a new material, a delivery, a build sheet, a run.
+await page.goto(`${base}/#/r/${realm}/materials`);
+await page.waitForSelector(".grid tbody tr");
+await page.click("text=New material");
+const material = `Test EVA ${Date.now() % 100000}`;
+await page.fill('[aria-label="Material name"]', material);
+await page.fill('[aria-label="Thickness in inches"]', "1");
+await page.click("text=Add material");
+await page.waitForSelector(`text=${material}`);
+await page.click("text=Record a delivery");
+await page.selectOption('[aria-label="Line 1 material"]', { label: material });
+await page.fill('[aria-label="Line 1 sheets"]', "10");
+await page.fill('[aria-label="Line 1 price per sheet"]', "60");
+await page.fill('[aria-label="Freight"]', "32");
+await page.click('button.primary:has-text("Record delivery")');
+// 10 sheets × 32 bf = 320 bf; (600 + 32) / 320 = 1.975
+await page.waitForSelector(".inline-form", { state: "detached" });
+const row = page.locator(".grid tbody tr", { hasText: material }).first();
+await page.waitForFunction((m) => [...document.querySelectorAll(".grid tbody tr")].some((r) => r.textContent.includes(m) && r.textContent.includes("1.9750")), material);
+assert.match(await row.textContent(), /1\.9750/);
+
+await page.goto(`${base}/#/r/${realm}/sheets`);
+await page.waitForSelector(".grid tbody tr a");
+await page.click(".grid tbody tr a >> nth=0");
+await page.waitForSelector(".components");
+await page.click("text=Add material");
+const last = (await page.locator(".components tbody tr").count());
+await page.selectOption(`[aria-label="Component ${last} material"]`, { label: material });
+await page.fill(`[aria-label="Component ${last} net board-feet"]`, "1");
+await page.fill(`[aria-label="Component ${last} yield"]`, "80");
+await page.click("text=Save build sheet");
+// Saved and re-costed: the new line buys 1 / 0.8 bf.
+await page.waitForFunction(() => document.querySelector(".components")?.textContent.includes("buys 1.25 bf"));
+await page.click("text=Record a build");
+await page.fill('[aria-label="Units built"]', "10");
+await page.click('button.primary:has-text("Record build")');
+await page.waitForSelector(".inline-form", { state: "detached" });
+await page.waitForFunction(() => [...document.querySelectorAll(".grid tbody tr td:nth-child(2)")].some((td) => td.textContent.trim() === "10"));
+
 assert.deepEqual(errors, []);
 await browser.close();
 console.log("e2e-writes: ok");

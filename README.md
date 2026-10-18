@@ -31,7 +31,7 @@ than engineering judgement.
 ## Build
 
 ```sh
-cargo test          # 280 tests, all offline
+cargo test          # 293 tests, all offline
 cargo clippy --all-targets
 cargo run --bin qbo-local
 
@@ -98,6 +98,12 @@ Built and tested:
   retry or discard what QuickBooks refused, all through the durable outbox
   and the write gate (`qbo-local writes`; DECISIONS D14). Try it end to end
   on the synthetic book with `serve --demo-writes`
+
+- Manufacturing costing (Phase 2, first slice): materials with landed cost
+  per board-foot (freight allocated by board-foot, to the cent), build sheets
+  per product (material over yield, parts, labour) with margin and a
+  price-by-yield sensitivity table, and builds with priced variance against
+  the sheet. The replica's own data; never sent to QuickBooks (DECISIONS D15)
 
 Not built yet: the trial-balance diff (§7.5,
 ledger territory), the Tauri shell, the React UI.

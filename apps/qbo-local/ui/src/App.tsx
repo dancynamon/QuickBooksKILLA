@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Aging, api, ApiError, ContactType, Customer, DocType, Document, DocumentDetail, Draft, DraftLine, Hit, Item, Realm, SalesRow, SearchResult, Status, Write } from "./api";
+import { Aging, api, ApiError, BuildRow, Component, ContactType, Customer, DocType, Document, DocumentDetail, Draft, DraftLine, Hit, Item, MaterialRow, ReceiptRow, Realm, SalesRow, SearchResult, SheetDetail, SheetSummary, Status, Write } from "./api";
 import { createContext, useContext } from "react";
-import { ago, DOC_LABELS, DOC_PLURALS, formatDate, formatDecimal, formatMoney, lineAmountMinor } from "./format";
+import { ago, DOC_LABELS, DOC_PLURALS, formatDate, formatDecimal, formatMoney, formatPerBf, formatQty, formatRate, lineAmountMinor } from "./format";
 
 // ---------------------------------------------------------------------------
 // Routing: the hash is the whole navigation state, so back/forward and a
@@ -18,6 +18,10 @@ type Route =
   | { view: "new"; docType: DocType }
   | { view: "edit"; qboId: string }
   | { view: "writes" }
+  | { view: "materials" }
+  | { view: "sheets" }
+  | { view: "sheet"; itemId: string }
+  | { view: "builds" }
   | { view: "doc"; qboId: string }
   | { view: "contact"; contactType: ContactType; contactId: string };
 
@@ -33,6 +37,10 @@ function parseRoute(hash: string): { realm: string | null; route: Route } {
     return { realm, route: { view: "report", report: parts[3] } };
   if (parts[2] === "items") return { realm, route: { view: "items" } };
   if (parts[2] === "writes") return { realm, route: { view: "writes" } };
+  if (parts[2] === "materials") return { realm, route: { view: "materials" } };
+  if (parts[2] === "sheets") return { realm, route: { view: "sheets" } };
+  if (parts[2] === "sheet" && parts[3]) return { realm, route: { view: "sheet", itemId: parts[3] } };
+  if (parts[2] === "builds") return { realm, route: { view: "builds" } };
   if (parts[2] === "new" && EDITABLE.includes(parts[3] as DocType)) return { realm, route: { view: "new", docType: parts[3] as DocType } };
   if (parts[2] === "edit" && parts[3]) return { realm, route: { view: "edit", qboId: parts[3] } };
   if (parts[2] === "item" && parts[3]) return { realm, route: { view: "item", itemId: parts[3] } };
@@ -61,6 +69,14 @@ function href(realm: string, route: Route): string {
       return `#/r/${realm}/edit/${encodeURIComponent(route.qboId)}`;
     case "writes":
       return `#/r/${realm}/writes`;
+    case "materials":
+      return `#/r/${realm}/materials`;
+    case "sheets":
+      return `#/r/${realm}/sheets`;
+    case "sheet":
+      return `#/r/${realm}/sheet/${encodeURIComponent(route.itemId)}`;
+    case "builds":
+      return `#/r/${realm}/builds`;
   }
 }
 
@@ -290,6 +306,18 @@ export function App() {
           </a>
         </div>
         <div className="rail-group">
+          <div className="rail-head">Manufacturing</div>
+          <a className={route.view === "materials" ? "rail-item active" : "rail-item"} href={href(realm, { view: "materials" })}>
+            <span>Materials</span>
+          </a>
+          <a className={route.view === "sheets" || route.view === "sheet" ? "rail-item active" : "rail-item"} href={href(realm, { view: "sheets" })}>
+            <span>Build sheets</span>
+          </a>
+          <a className={route.view === "builds" ? "rail-item active" : "rail-item"} href={href(realm, { view: "builds" })}>
+            <span>Builds</span>
+          </a>
+        </div>
+        <div className="rail-group">
           <div className="rail-head">Reports</div>
           {(["ar", "ap", "sales"] as Report[]).map((r) => (
             <a key={r} className={route.view === "report" && route.report === r ? "rail-item active" : "rail-item"} href={href(realm, { view: "report", report: r })}>
@@ -311,6 +339,10 @@ export function App() {
         {route.view === "new" && <Editor key={`${realm}:new:${route.docType}`} realm={realm} docType={route.docType} go={go} />}
         {route.view === "edit" && <Editor key={`${realm}:edit:${route.qboId}`} realm={realm} qboId={route.qboId} go={go} />}
         {route.view === "writes" && <WritesView key={realm} realm={realm} />}
+        {route.view === "materials" && <MaterialsView key={realm} realm={realm} />}
+        {route.view === "sheets" && <SheetsView key={realm} realm={realm} go={go} />}
+        {route.view === "sheet" && <SheetView key={`${realm}:${route.itemId}`} realm={realm} itemId={route.itemId} />}
+        {route.view === "builds" && <BuildsView key={realm} realm={realm} />}
         {route.view === "contact" && (
           <ContactView key={`${realm}:${route.contactId}`} realm={realm} contactType={route.contactType} contactId={route.contactId} go={go} />
         )}
@@ -1183,6 +1215,8 @@ function ItemView({ realm, itemId }: { realm: string; itemId: string }) {
         <a className="back" href={href(realm, { view: "items" })}>← Products and services</a>
         <h1>{item?.name ?? `Item ${itemId}`}</h1>
         {item?.sku && <span className="badge">{item.sku}</span>}
+        <span className="spacer" />
+        <a className="button" href={href(realm, { view: "sheet", itemId })}>Build sheet</a>
       </div>
       <dl className="facts">
         <div><dt>Price</dt><dd className="num">{formatDecimal(item?.unitPrice ?? null) || "—"}</dd></div>
@@ -1614,4 +1648,562 @@ function WriteLink({ realm, write }: { realm: string; write: Write }) {
   if (write.entityType === "Customer" && !write.entityId.startsWith("local:"))
     return <a href={href(realm, { view: "contact", contactType: "Customer", contactId: write.entityId })}>{write.label}</a>;
   return <span>{write.label}</span>;
+}
+
+// ---------------------------------------------------------------------------
+// Manufacturing: materials, build sheets, builds
+// ---------------------------------------------------------------------------
+
+function MaterialsView({ realm }: { realm: string }) {
+  const [rows, setRows] = useState<MaterialRow[] | null>(null);
+  const [receipts, setReceipts] = useState<ReceiptRow[]>([]);
+  const [error, setError] = useState<string | null>(null);
+  const [tick, setTick] = useState(0);
+  const [adding, setAdding] = useState<{ name: string; t: string; w: string; l: string; color: string } | null>(null);
+  const [receiving, setReceiving] = useState<{ on: string; ref: string; freight: string; lines: { materialId: string; sheets: string; price: string; surcharge: string }[] } | null>(null);
+
+  useEffect(() => {
+    api.materials(realm).then(setRows, (e: ApiError) => setError(e.message));
+    api.receipts(realm).then(setReceipts, () => setReceipts([]));
+  }, [realm, tick]);
+
+  const names = new Map((rows ?? []).map((m) => [m.materialId, m.name]));
+
+  const saveMaterial = async () => {
+    if (!adding) return;
+    setError(null);
+    try {
+      await api.saveMaterial(realm, { name: adding.name, thicknessIn: adding.t, widthIn: adding.w, lengthIn: adding.l, color: adding.color });
+      setAdding(null);
+      setTick((t) => t + 1);
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  };
+
+  const saveReceipt = async () => {
+    if (!receiving) return;
+    setError(null);
+    try {
+      await api.recordReceipt(realm, {
+        receivedOn: receiving.on,
+        reference: receiving.ref,
+        freight: receiving.freight || "0",
+        lines: receiving.lines
+          .filter((l) => l.materialId && l.sheets)
+          .map((l) => ({ materialId: l.materialId, sheets: l.sheets, pricePerSheet: l.price, surchargePerSheet: l.surcharge })),
+      });
+      setReceiving(null);
+      setTick((t) => t + 1);
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  };
+
+  const emptyReceiptLine = () => ({ materialId: rows?.[0]?.materialId ?? "", sheets: "", price: "", surcharge: "" });
+
+  return (
+    <section className="document">
+      <div className="toolbar">
+        <h1>Materials</h1>
+        <span className="spacer" />
+        <span className="muted">Landed cost per board-foot: price, surcharge and freight allocated by board-foot</span>
+        <button className="button" onClick={() => setAdding({ name: "", t: "2", w: "48", l: "96", color: "" })}>New material</button>
+        <button className="button primary" onClick={() => setReceiving({ on: todayIso(), ref: "", freight: "", lines: [emptyReceiptLine()] })} disabled={!rows?.length}>
+          Record a delivery
+        </button>
+      </div>
+      {error && <div className="error">{error}</div>}
+
+      {adding && (
+        <div className="inline-form">
+          <strong>New material</strong>
+          <input value={adding.name} onChange={(e) => setAdding({ ...adding, name: e.target.value })} placeholder="Name, e.g. XLPE 2 in blue" aria-label="Material name" />
+          <input className="num narrow" value={adding.t} onChange={(e) => setAdding({ ...adding, t: e.target.value })} aria-label="Thickness in inches" title="Thickness, in" />
+          <span className="muted">×</span>
+          <input className="num narrow" value={adding.w} onChange={(e) => setAdding({ ...adding, w: e.target.value })} aria-label="Width in inches" title="Width, in" />
+          <span className="muted">×</span>
+          <input className="num narrow" value={adding.l} onChange={(e) => setAdding({ ...adding, l: e.target.value })} aria-label="Length in inches" title="Length, in" />
+          <span className="muted">in</span>
+          <input value={adding.color} onChange={(e) => setAdding({ ...adding, color: e.target.value })} placeholder="Colour" aria-label="Colour" />
+          <button className="button primary" onClick={() => void saveMaterial()}>Add material</button>
+          <button className="button" onClick={() => setAdding(null)}>Cancel</button>
+        </div>
+      )}
+
+      {receiving && (
+        <div className="inline-form column">
+          <div className="row">
+            <strong>Delivery</strong>
+            <input type="date" value={receiving.on} onChange={(e) => setReceiving({ ...receiving, on: e.target.value })} aria-label="Received on" />
+            <input value={receiving.ref} onChange={(e) => setReceiving({ ...receiving, ref: e.target.value })} placeholder="PO or bill number" aria-label="Reference" />
+            <input className="num" value={receiving.freight} onChange={(e) => setReceiving({ ...receiving, freight: e.target.value })} placeholder="Freight, $" aria-label="Freight" />
+          </div>
+          {receiving.lines.map((line, i) => (
+            <div className="row" key={i}>
+              <select value={line.materialId} onChange={(e) => setReceiving({ ...receiving, lines: receiving.lines.map((l, j) => (j === i ? { ...l, materialId: e.target.value } : l)) })} aria-label={`Line ${i + 1} material`}>
+                {(rows ?? []).map((m) => (
+                  <option key={m.materialId} value={m.materialId}>{m.name}</option>
+                ))}
+              </select>
+              <input className="num" value={line.sheets} onChange={(e) => setReceiving({ ...receiving, lines: receiving.lines.map((l, j) => (j === i ? { ...l, sheets: e.target.value } : l)) })} placeholder="Sheets" aria-label={`Line ${i + 1} sheets`} />
+              <input className="num" value={line.price} onChange={(e) => setReceiving({ ...receiving, lines: receiving.lines.map((l, j) => (j === i ? { ...l, price: e.target.value } : l)) })} placeholder="$ per sheet" aria-label={`Line ${i + 1} price per sheet`} />
+              <input className="num" value={line.surcharge} onChange={(e) => setReceiving({ ...receiving, lines: receiving.lines.map((l, j) => (j === i ? { ...l, surcharge: e.target.value } : l)) })} placeholder="Surcharge per sheet" aria-label={`Line ${i + 1} surcharge`} />
+            </div>
+          ))}
+          <div className="row">
+            <button className="link" onClick={() => setReceiving({ ...receiving, lines: [...receiving.lines, emptyReceiptLine()] })}>Add a line</button>
+            <span className="spacer" />
+            <button className="button primary" onClick={() => void saveReceipt()}>Record delivery</button>
+            <button className="button" onClick={() => setReceiving(null)}>Cancel</button>
+          </div>
+        </div>
+      )}
+
+      {!rows && !error && <div className="muted pad">Loading…</div>}
+      {rows && rows.length === 0 && <p className="muted indent">No materials yet. Add the sheet stock you cut from, then record a delivery to give it a cost.</p>}
+      {rows && rows.length > 0 && (
+        <div className="grid-wrap">
+          <table className="grid">
+            <thead>
+              <tr>
+                <th>Material</th>
+                <th>Sheet</th>
+                <th className="r">bf / sheet</th>
+                <th className="r">Landed $ / bf</th>
+                <th>Last delivery</th>
+                <th className="r">Deliveries</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((m) => (
+                <tr key={m.materialId}>
+                  <td className="ellipsis">{m.name}</td>
+                  <td className="num muted">{formatQty(m.thicknessIn)} × {formatQty(m.widthIn)} × {formatQty(m.lengthIn)} in</td>
+                  <td className="num r">{formatQty(m.bfPerSheet)}</td>
+                  <td className="num r">{m.landedPerBf ? formatPerBf(m.landedPerBf) : <span className="muted">no delivery yet</span>}</td>
+                  <td className="num muted">{formatDate(m.lastReceived)}</td>
+                  <td className="num r muted">{m.receipts}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {receipts.length > 0 && (
+        <>
+          <h2>Deliveries</h2>
+          <div className="grid-wrap">
+            <table className="grid">
+              <thead>
+                <tr>
+                  <th>Received</th>
+                  <th>Reference</th>
+                  <th>Material</th>
+                  <th className="r">Sheets</th>
+                  <th className="r">bf</th>
+                  <th className="r">Goods</th>
+                  <th className="r">Freight share</th>
+                  <th className="r">Landed $ / bf</th>
+                </tr>
+              </thead>
+              <tbody>
+                {receipts.flatMap((r) =>
+                  r.lines.map((l, i) => (
+                    <tr key={`${r.receiptId}:${i}`} className={i === 0 ? "group-start" : ""}>
+                      <td className="num">{i === 0 ? formatDate(r.receivedOn) : ""}</td>
+                      <td className="num muted">{i === 0 ? r.reference ?? "" : ""}</td>
+                      <td className="ellipsis">{names.get(l.materialId) ?? l.materialId}</td>
+                      <td className="num r">{formatQty(l.sheets)}</td>
+                      <td className="num r">{formatQty(multiplyDecimal(l.sheets, l.bfPerSheet))}</td>
+                      <td className="num r">{formatMoney(l.goodsMinor)}</td>
+                      <td className="num r">{formatMoney(l.freightMinor)}</td>
+                      <td className="num r">{formatPerBf(l.landedPerBf)}</td>
+                    </tr>
+                  )),
+                )}
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
+    </section>
+  );
+}
+
+// Exact product of two decimal strings, for display.
+function multiplyDecimal(a: string, b: string): string {
+  const scale = (x: string) => (x.split(".")[1] ?? "").length;
+  const sa = scale(a);
+  const sb = scale(b);
+  const product = BigInt(a.replace(".", "")) * BigInt(b.replace(".", ""));
+  const places = sa + sb;
+  if (places === 0) return product.toString();
+  const digits = product.toString().padStart(places + 1, "0");
+  return `${digits.slice(0, -places)}.${digits.slice(-places)}`;
+}
+
+function marginClass(pct: string | null): string {
+  if (pct === null) return "num r muted";
+  return Number(pct) < 30 ? "num r crit-text" : "num r";
+}
+
+function SheetsView({ realm, go }: { realm: string; go: (r: Route) => void }) {
+  const [rows, setRows] = useState<SheetSummary[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [filter, setFilter] = useState("");
+  useEffect(() => {
+    api.buildSheets(realm).then(setRows, (e: ApiError) => setError(e.message));
+  }, [realm]);
+  const needle = filter.trim().toLowerCase();
+  const shown = (rows ?? []).filter((r) => !needle || [r.name, r.sku].some((v) => v?.toLowerCase().includes(needle)));
+
+  return (
+    <section className="register">
+      <div className="toolbar">
+        <h1>Build sheets</h1>
+        <input className="filter" placeholder="Filter by product or SKU" value={filter} onChange={(e) => setFilter(e.target.value)} aria-label="Filter" />
+        <span className="spacer" />
+        <span className="muted">Unit cost from landed material, parts and labour · margin against the QuickBooks price</span>
+      </div>
+      {error && <div className="error">{error}</div>}
+      {!rows && !error && <div className="muted pad">Loading…</div>}
+      {rows && rows.length === 0 && <p className="muted indent">No build sheets yet. Open a product and write one.</p>}
+      {rows && rows.length > 0 && (
+        <div className="grid-wrap">
+          <table className="grid">
+            <thead>
+              <tr>
+                <th>Product</th>
+                <th>SKU</th>
+                <th className="r">Unit cost</th>
+                <th className="r">of which waste</th>
+                <th className="r">Price</th>
+                <th className="r">Margin</th>
+              </tr>
+            </thead>
+            <tbody>
+              {shown.map((r) => (
+                <tr key={r.itemId} onDoubleClick={() => go({ view: "sheet", itemId: r.itemId })}>
+                  <td className="ellipsis">
+                    <a href={href(realm, { view: "sheet", itemId: r.itemId })}>{r.name}</a>
+                  </td>
+                  <td className="num muted">{r.sku ?? ""}</td>
+                  <td className="num r">{r.unitCost ? formatRate(r.unitCost) : <span className="crit-text">{r.problem}</span>}</td>
+                  <td className="num r muted">{r.wasteCost ? formatRate(r.wasteCost) : ""}</td>
+                  <td className="num r">{r.price ? formatRate(r.price) : ""}</td>
+                  <td className={marginClass(r.marginPct)}>{r.marginPct !== null ? `${r.marginPct}%` : "—"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </section>
+  );
+}
+
+const newComponent = (kind: Component["kind"], materialId: string): Component =>
+  kind === "material"
+    ? { kind, materialId, netBf: "", yieldPct: "78" }
+    : kind === "part"
+      ? { kind, name: "", itemId: null, qty: "1", unitCost: "" }
+      : { kind, name: "", minutes: "", ratePerHour: "" };
+
+function SheetView({ realm, itemId }: { realm: string; itemId: string }) {
+  const [detail, setDetail] = useState<SheetDetail | null>(null);
+  const [materials, setMaterials] = useState<MaterialRow[]>([]);
+  const [components, setComponents] = useState<Component[]>([]);
+  const [dirty, setDirty] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [tick, setTick] = useState(0);
+  const [run, setRun] = useState<{ on: string; qty: string; actual: Record<string, string>; note: string } | null>(null);
+
+  useEffect(() => {
+    api.buildSheet(realm, itemId).then(
+      (d) => {
+        setDetail(d);
+        setComponents(d.components);
+        setDirty(false);
+      },
+      (e: ApiError) => setError(e.message),
+    );
+    api.materials(realm).then(setMaterials, () => setMaterials([]));
+  }, [realm, itemId, tick]);
+
+  if (error && !detail) return <div className="error pad">{error}</div>;
+  if (!detail) return <div className="muted pad">Loading…</div>;
+  const names = new Map(materials.map((m) => [m.materialId, m.name]));
+  const update = (i: number, patch: Partial<Component>) => {
+    setComponents(components.map((c, j) => (j === i ? ({ ...c, ...patch } as Component) : c)));
+    setDirty(true);
+  };
+
+  const save = async () => {
+    setError(null);
+    try {
+      await api.saveBuildSheet(realm, itemId, components);
+      setTick((t) => t + 1);
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  };
+
+  const recordRun = async () => {
+    if (!run) return;
+    setError(null);
+    try {
+      await api.recordBuild(realm, {
+        itemId,
+        builtOn: run.on,
+        quantity: run.qty,
+        actual: Object.entries(run.actual).filter(([, bf]) => bf.trim()).map(([materialId, boardFeet]) => ({ materialId, boardFeet })),
+        note: run.note,
+      });
+      setRun(null);
+      setTick((t) => t + 1);
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  };
+
+  const cost = detail.cost;
+  const priceMoves = [...new Set(detail.sensitivity.map((c) => c.priceMovePct))];
+  const yieldMoves = [...new Set(detail.sensitivity.map((c) => c.yieldMovePts))];
+  const materialIds = components.flatMap((c) => (c.kind === "material" ? [c.materialId] : []));
+
+  return (
+    <section className="document" onKeyDown={(e) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "s") {
+        e.preventDefault();
+        void save();
+      }
+    }}>
+      <div className="toolbar">
+        <a className="back" href={href(realm, { view: "sheets" })}>← Build sheets</a>
+        <h1>{detail.item.name}</h1>
+        {detail.item.sku && <span className="badge">{detail.item.sku}</span>}
+        <span className="spacer" />
+        <a className="button" href={href(realm, { view: "item", itemId })}>Where used</a>
+        <button className="button primary" onClick={() => void save()} disabled={!dirty}>{dirty ? "Save build sheet" : "Saved"}</button>
+      </div>
+      {error && <div className="error">{error}</div>}
+      {detail.problem && <p className="banner crit">{detail.problem}</p>}
+
+      <dl className="facts">
+        <div><dt>Unit cost</dt><dd className="num">{cost ? formatRate(cost.total) : "—"}</dd></div>
+        <div><dt>Material</dt><dd className="num">{cost ? formatRate(cost.material) : "—"}</dd></div>
+        <div><dt>of which waste</dt><dd className="num">{cost ? formatRate(cost.waste) : "—"}</dd></div>
+        <div><dt>Parts</dt><dd className="num">{cost ? formatRate(cost.parts) : "—"}</dd></div>
+        <div><dt>Labour</dt><dd className="num">{cost ? formatRate(cost.labour) : "—"}</dd></div>
+        <div><dt>Price</dt><dd className="num">{detail.item.unitPrice ? formatRate(detail.item.unitPrice) : "—"}</dd></div>
+        <div><dt>Margin</dt><dd className={detail.marginPct !== null && Number(detail.marginPct) < 30 ? "num crit-text" : "num"}>{detail.marginPct !== null ? `${detail.marginPct}%` : "—"}</dd></div>
+      </dl>
+
+      <h2>Components{dirty && <span className="muted"> · unsaved; costs below are for the saved sheet</span>}</h2>
+      <div className="grid-wrap">
+        <table className="grid edit-lines components">
+          <thead>
+            <tr>
+              <th>Kind</th>
+              <th>What</th>
+              <th className="r">Amount</th>
+              <th className="r">Yield / rate</th>
+              <th className="r">Cost per unit</th>
+              <th />
+            </tr>
+          </thead>
+          <tbody>
+            {components.map((c, i) => {
+              const line = cost && !dirty ? cost.lines[i] : null;
+              return (
+                <tr key={i}>
+                  <td>
+                    <select value={c.kind} onChange={(e) => update(i, newComponent(e.target.value as Component["kind"], materials[0]?.materialId ?? ""))} aria-label={`Component ${i + 1} kind`}>
+                      <option value="material">Material</option>
+                      <option value="part">Part</option>
+                      <option value="labour">Labour</option>
+                    </select>
+                  </td>
+                  <td>
+                    {c.kind === "material" ? (
+                      <select value={c.materialId} onChange={(e) => update(i, { materialId: e.target.value })} aria-label={`Component ${i + 1} material`}>
+                        {materials.map((m) => (
+                          <option key={m.materialId} value={m.materialId}>{m.name}</option>
+                        ))}
+                      </select>
+                    ) : (
+                      <input value={c.name} onChange={(e) => update(i, { name: e.target.value })} placeholder={c.kind === "part" ? "Strap, buckle, decal…" : "CNC, sewing, packing…"} aria-label={`Component ${i + 1} name`} />
+                    )}
+                  </td>
+                  <td className="r">
+                    {c.kind === "material" ? (
+                      <label className="unit"><input className="num r" value={c.netBf} onChange={(e) => update(i, { netBf: e.target.value })} aria-label={`Component ${i + 1} net board-feet`} /> net bf</label>
+                    ) : c.kind === "part" ? (
+                      <label className="unit"><input className="num r" value={c.qty} onChange={(e) => update(i, { qty: e.target.value })} aria-label={`Component ${i + 1} quantity`} /> each</label>
+                    ) : (
+                      <label className="unit"><input className="num r" value={c.minutes} onChange={(e) => update(i, { minutes: e.target.value })} aria-label={`Component ${i + 1} minutes`} /> min</label>
+                    )}
+                  </td>
+                  <td className="r">
+                    {c.kind === "material" ? (
+                      <label className="unit"><input className="num r" value={c.yieldPct} onChange={(e) => update(i, { yieldPct: e.target.value })} aria-label={`Component ${i + 1} yield`} /> % yield</label>
+                    ) : c.kind === "part" ? (
+                      <label className="unit">$<input className="num r" value={c.unitCost} onChange={(e) => update(i, { unitCost: e.target.value })} aria-label={`Component ${i + 1} unit cost`} /> each</label>
+                    ) : (
+                      <label className="unit">$<input className="num r" value={c.ratePerHour} onChange={(e) => update(i, { ratePerHour: e.target.value })} aria-label={`Component ${i + 1} rate`} /> / h</label>
+                    )}
+                  </td>
+                  <td className="num r">
+                    {line ? formatRate(line.cost) : ""}
+                    {line?.grossBf && <div className="muted small">buys {formatQty(line.grossBf)} bf, wastes {formatQty(line.wasteBf)}</div>}
+                  </td>
+                  <td>
+                    <button className="link" onClick={() => { setComponents(components.filter((_, j) => j !== i)); setDirty(true); }} aria-label={`Remove component ${i + 1}`}>Remove</button>
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+          <tfoot>
+            <tr>
+              <td colSpan={6}>
+                <button className="link" onClick={() => { setComponents([...components, newComponent("material", materials[0]?.materialId ?? "")]); setDirty(true); }} disabled={!materials.length}>Add material</button>
+                {" · "}
+                <button className="link" onClick={() => { setComponents([...components, newComponent("part", "")]); setDirty(true); }}>Add part</button>
+                {" · "}
+                <button className="link" onClick={() => { setComponents([...components, newComponent("labour", "")]); setDirty(true); }}>Add labour</button>
+              </td>
+            </tr>
+          </tfoot>
+        </table>
+      </div>
+
+      {detail.sensitivity.length > 0 && (
+        <>
+          <h2>What moves the cost</h2>
+          <p className="muted indent">Unit cost and margin if every material's price moved, against every yield moving by points. The middle cell is today.</p>
+          <div className="grid-wrap">
+            <table className="grid sensitivity">
+              <thead>
+                <tr>
+                  <th>Yield \ material price</th>
+                  {priceMoves.map((p) => (
+                    <th key={p} className="r">{Number(p) > 0 ? `+${p}` : p}%</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {yieldMoves.map((y) => (
+                  <tr key={y}>
+                    <td>{Number(y) > 0 ? `+${y}` : y} pts</td>
+                    {priceMoves.map((p) => {
+                      const cell = detail.sensitivity.find((c) => c.priceMovePct === p && c.yieldMovePts === y);
+                      const today = Number(p) === 0 && Number(y) === 0;
+                      return (
+                        <td key={p} className={today ? "num r today" : "num r"}>
+                          {cell ? formatRate(cell.unitCost) : "—"}
+                          {cell?.marginPct && <div className="muted small">{cell.marginPct}%</div>}
+                        </td>
+                      );
+                    })}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
+
+      <h2>
+        Builds
+        {detail.components.length > 0 && !run && (
+          <button className="link inline" onClick={() => setRun({ on: todayIso(), qty: "", actual: {}, note: "" })}>Record a build</button>
+        )}
+      </h2>
+      {run && (
+        <div className="inline-form column">
+          <div className="row">
+            <input type="date" value={run.on} onChange={(e) => setRun({ ...run, on: e.target.value })} aria-label="Built on" />
+            <input className="num" value={run.qty} onChange={(e) => setRun({ ...run, qty: e.target.value })} placeholder="Units built" aria-label="Units built" />
+            <input value={run.note} onChange={(e) => setRun({ ...run, note: e.target.value })} placeholder="Note" aria-label="Note" />
+          </div>
+          {materialIds.map((m) => (
+            <div className="row" key={m}>
+              <span>{names.get(m) ?? m}: board-feet actually used</span>
+              <input className="num" value={run.actual[m] ?? ""} onChange={(e) => setRun({ ...run, actual: { ...run.actual, [m]: e.target.value } })} placeholder="blank = as the sheet says" aria-label={`Actual board-feet of ${names.get(m) ?? m}`} />
+            </div>
+          ))}
+          <div className="row">
+            <span className="spacer" />
+            <button className="button primary" onClick={() => void recordRun()}>Record build</button>
+            <button className="button" onClick={() => setRun(null)}>Cancel</button>
+          </div>
+        </div>
+      )}
+      <BuildsTable builds={detail.builds} />
+    </section>
+  );
+}
+
+function BuildsTable({ builds, showProduct }: { builds: BuildRow[]; showProduct?: (b: BuildRow) => JSX.Element }) {
+  if (builds.length === 0) return <p className="muted indent">No builds recorded.</p>;
+  return (
+    <div className="grid-wrap">
+      <table className="grid">
+        <thead>
+          <tr>
+            <th>Built</th>
+            {showProduct && <th>Product</th>}
+            <th className="r">Units</th>
+            <th className="r">Standard</th>
+            <th className="r">Actual</th>
+            <th className="r">Variance</th>
+            <th />
+          </tr>
+        </thead>
+        <tbody>
+          {builds.map((b) => (
+            <tr key={b.buildId}>
+              <td className="num">{formatDate(b.builtOn)}</td>
+              {showProduct && <td className="ellipsis">{showProduct(b)}</td>}
+              <td className="num r">{formatQty(b.quantity)}</td>
+              <td className="num r">{formatMoney(b.standardMinor)}</td>
+              <td className="num r">{formatMoney(b.actualMinor)}</td>
+              <td className={b.varianceMinor > 0 ? "num r crit-text" : "num r"}>{b.varianceMinor > 0 ? "+" : ""}{formatMoney(b.varianceMinor)}</td>
+              <td>{b.flagged && <span className="badge crit" title="More than 5% over the build sheet on a material">Over sheet</span>}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function BuildsView({ realm }: { realm: string }) {
+  const [rows, setRows] = useState<BuildRow[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    api.builds(realm).then(setRows, (e: ApiError) => setError(e.message));
+  }, [realm]);
+  const flagged = (rows ?? []).filter((b) => b.flagged).length;
+  const variance = (rows ?? []).reduce((sum, b) => sum + b.varianceMinor, 0);
+  return (
+    <section className="document">
+      <div className="toolbar">
+        <h1>Builds</h1>
+        <span className="spacer" />
+        {rows && <span className="muted">{rows.length} runs · {flagged} over sheet · net variance {formatMoney(variance)}</span>}
+      </div>
+      {error && <div className="error">{error}</div>}
+      {!rows && !error && <div className="muted pad">Loading…</div>}
+      {rows && (
+        <BuildsTable
+          builds={rows}
+          showProduct={(b) => <a href={href(realm, { view: "sheet", itemId: b.itemId })}>{b.name ?? b.itemId}</a>}
+        />
+      )}
+    </section>
+  );
 }

@@ -82,3 +82,31 @@ export function lineAmountMinor(qty: string, rate: string): number | null {
   if ((abs % divisor) * 2n >= divisor) cents += 1n;
   return Number(negative ? -cents : cents);
 }
+
+// A decimal string as stored (a cost rate, a board-foot count), grouped and
+// trimmed, never passed through a float.
+export function formatQty(raw: string | null | undefined, places = 4): string {
+  if (raw === null || raw === undefined || raw === "") return "";
+  const negative = raw.startsWith("-");
+  const [whole, frac = ""] = raw.replace("-", "").split(".");
+  const grouped = whole.replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+  const trimmed = frac.slice(0, places).replace(/0+$/, "");
+  return `${negative ? "−" : ""}${grouped}${trimmed ? "." + trimmed : ""}`;
+}
+
+// A cost rate in dollars: at least two places, up to four.
+export function formatRate(raw: string | null | undefined): string {
+  if (raw === null || raw === undefined || raw === "") return "";
+  const negative = raw.startsWith("-");
+  const [whole, frac = ""] = raw.replace("-", "").split(".");
+  const places = frac.slice(0, 4).replace(/0+$/, "").padEnd(2, "0");
+  const grouped = whole.replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+  return `${negative ? "−" : ""}${grouped}.${places}`;
+}
+
+// Landed cost per board-foot: always four places, so a column lines up.
+export function formatPerBf(raw: string | null | undefined): string {
+  if (raw === null || raw === undefined || raw === "") return "";
+  const [whole, frac = ""] = raw.split(".");
+  return `${whole.replace(/\B(?=(\d{3})+(?!\d))/g, ",")}.${frac.slice(0, 4).padEnd(4, "0")}`;
+}

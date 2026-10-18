@@ -43,7 +43,7 @@ backend in §2.1. Never in the repo, never in a dotfile Dropbox syncs.
 
 ## 1. Where the work stands
 
-`cargo test` — 280 tests, all offline, all green. `cargo clippy --all-targets` —
+`cargo test` — 293 tests, all offline, all green. `cargo clippy --all-targets` —
 clean.
 
 Built and tested:
@@ -71,6 +71,7 @@ Built and tested:
 | `ui/` | React UI (registers, document + chain, contact, `⌘K` palette, status bar) |
 | `../qbo-local-desktop` | Tauri 2 shell: one `api` command, replica from `QBO_LOCAL_DB` or the app home |
 
+| `mfg`, `mfg_store` | Phase 2 costing: landed cost, build sheets, sensitivity, builds (DECISIONS D15) |
 | `writes`, `compose`, `outbox_store` | M2: durable outbox, drain, gate, editor payloads (DECISIONS D14) |
 
 **Not built:** the §7.5 trial-balance diff. M0 code is complete; what remains is

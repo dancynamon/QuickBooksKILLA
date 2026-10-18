@@ -33,3 +33,17 @@ test("line amounts round like the server", () => {
   assert.equal(mod.lineAmountMinor("2.5", "18.4375"), 4609);
   assert.equal(mod.lineAmountMinor("x", "1"), null);
 });
+
+test("rates and quantities print exactly as stored", () => {
+  assert.equal(mod.formatRate("1.5"), "1.50");
+  assert.equal(mod.formatRate("8.8885"), "8.8885");
+  assert.equal(mod.formatRate("1234"), "1,234.00");
+  assert.equal(mod.formatQty("269.2308"), "269.2308");
+  assert.equal(mod.formatQty("64"), "64");
+  assert.equal(mod.formatQty("-20.7692"), "−20.7692");
+});
+
+test("per board-foot costs always show four places", () => {
+  assert.equal(mod.formatPerBf("1.527"), "1.5270");
+  assert.equal(mod.formatPerBf("2"), "2.0000");
+});

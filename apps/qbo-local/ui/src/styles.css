@@ -220,3 +220,17 @@ kbd { font-family: var(--mono); font-size: .85em; border: 1px solid var(--line);
 .grid td.actions { white-space: nowrap; }
 .grid td.actions .button + .button { margin-left: 6px; }
 code { font-family: var(--mono); font-size: .9em; background: var(--surface-2); padding: 0 4px; border-radius: 3px; }
+
+/* Manufacturing */
+.inline-form.column { flex-direction: column; align-items: stretch; }
+.inline-form .row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.inline-form select { background: var(--surface); border: 1px solid var(--line); border-radius: 4px; padding: 4px 8px; }
+.inline-form input.narrow { flex: 0 0 64px; width: 64px; }
+.grid tr.group-start td { border-top: 1px solid var(--line); }
+.components select, .components input:not(.num) { width: 100%; }
+.components td:nth-child(3) input, .components td:nth-child(4) input { width: 80px; }
+.unit { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; color: var(--ink-3); }
+.small { font-size: .82em; }
+.sensitivity td.today { background: var(--accent-soft); font-weight: 600; }
+.link.inline { margin-left: 12px; font-size: .9em; font-weight: normal; }
+.components td:first-child select { min-width: 96px; }
