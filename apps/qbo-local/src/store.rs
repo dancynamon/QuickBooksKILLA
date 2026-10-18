@@ -13,6 +13,7 @@ use thiserror::Error;
 use ledger_core::Money;
 
 pub mod lineage;
+pub mod outbox_store;
 pub mod reports;
 pub mod search;
 
@@ -359,6 +360,18 @@ CREATE TRIGGER lines_fts_au AFTER UPDATE ON document_lines BEGIN
     VALUES ('delete', old.rowid, old.description);
     INSERT INTO lines_fts(rowid, description) VALUES (new.rowid, new.description);
 END;
+"#,
+    },
+    Migration {
+        version: 3,
+        name: "realm environment, for sandbox-first writes",
+        sql: r#"
+-- Which Intuit environment a realm lives in. Writes may be switched on for a
+-- sandbox company at any time; a production company needs the two-week
+-- read-only soak first (DESIGN.md §8). Existing realms were all synced from
+-- production, which is the default.
+ALTER TABLE realms ADD COLUMN environment TEXT NOT NULL DEFAULT 'production'
+    CHECK (environment IN ('production', 'sandbox'));
 "#,
     },
 ];

@@ -42,6 +42,9 @@ pub enum OutboxState {
     Applied,
     Conflicted,
     Rejected,
+    /// A person looked at a failed write in the inbox and chose to drop it.
+    /// Kept, never deleted: the record of what was not sent is history too.
+    Discarded,
 }
 
 /// Why a drain attempt did not reach `Applied`.
@@ -58,7 +61,7 @@ pub enum DrainFailure {
 
 impl OutboxState {
     pub const fn is_terminal(self) -> bool {
-        matches!(self, OutboxState::Applied)
+        matches!(self, OutboxState::Applied | OutboxState::Discarded)
     }
 
     /// Whether this record belongs in the failure inbox (`DESIGN.md` §6.6).
@@ -84,6 +87,9 @@ impl OutboxState {
                 // Human resolution re-queues a failed record.
                 | (Conflicted, Pending)
                 | (Rejected, Pending)
+                // Only a person discards, and only what already failed.
+                | (Conflicted, Discarded)
+                | (Rejected, Discarded)
         )
     }
 
@@ -94,6 +100,37 @@ impl OutboxState {
             OutboxState::Applied => "applied",
             OutboxState::Conflicted => "conflicted",
             OutboxState::Rejected => "rejected",
+            OutboxState::Discarded => "discarded",
+        }
+    }
+
+    pub fn parse(raw: &str) -> Option<Self> {
+        [
+            OutboxState::Pending,
+            OutboxState::InFlight,
+            OutboxState::Applied,
+            OutboxState::Conflicted,
+            OutboxState::Rejected,
+            OutboxState::Discarded,
+        ]
+        .into_iter()
+        .find(|state| state.as_str() == raw)
+    }
+}
+
+impl Operation {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Operation::Create => "create",
+            Operation::Update => "update",
+        }
+    }
+
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw {
+            "create" => Some(Operation::Create),
+            "update" => Some(Operation::Update),
+            _ => None,
         }
     }
 }
@@ -250,6 +287,24 @@ impl OutboxRecord {
     pub fn resolve(&mut self, now: DateTime<Utc>) -> Result<(), OutboxError> {
         self.attempts = 0;
         self.last_error = None;
+        self.transition(OutboxState::Pending, now)
+    }
+
+    /// A person chose to drop a failed write (§6.6). Never automatic.
+    pub fn discard(&mut self, now: DateTime<Utc>) -> Result<(), OutboxError> {
+        self.transition(OutboxState::Discarded, now)
+    }
+
+    /// Recovery at startup for a record a crash left `in_flight` (§6.1).
+    ///
+    /// Back to `pending`, and the next drain resends it with the **same**
+    /// `RequestId`, which Intuit replays rather than repeats. Customer and Item
+    /// are not covered by that replay, and for them the drain path queries by
+    /// name before any create, so the resend adopts instead of duplicating.
+    pub fn recover_in_flight(&mut self, now: DateTime<Utc>) -> Result<(), OutboxError> {
+        if self.state != OutboxState::InFlight {
+            return Ok(());
+        }
         self.transition(OutboxState::Pending, now)
     }
 

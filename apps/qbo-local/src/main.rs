@@ -17,6 +17,7 @@
 //! qbo-local demo --db <path> [--invoices N]     # write a synthetic book
 //! qbo-local serve --db <path> [--port 8780]     # UI + API on 127.0.0.1
 //! qbo-local snapshot --db <path> --dir <dir> [--keep 14]   # dated copy, rotated
+//! qbo-local writes --db <path> --realm <id> [--enable [--confirm] | --disable]
 //! ```
 
 use chrono::Utc;
@@ -42,6 +43,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some("demo") => offline::demo(&args[1..]),
         Some("serve") => offline::serve(&args[1..]),
         Some("snapshot") => offline::snapshot(&args[1..]),
+        Some("writes") => offline::writes(&args[1..]),
         #[cfg(feature = "live")]
         Some(command) => live::run(command, &args[1..]),
         #[cfg(not(feature = "live"))]
@@ -146,6 +148,38 @@ mod offline {
         Ok(())
     }
 
+    /// Show or change whether a company takes writes (`DESIGN.md` §8). With
+    /// neither flag, reports the current state and what enabling would need.
+    pub fn writes(args: &[String]) -> Result<(), Error> {
+        let db = PathBuf::from(value(args, "--db").ok_or("--db is required")?);
+        let realm = qbo_local::domain::RealmId::parse(value(args, "--realm").ok_or("--realm is required")?)?;
+        let store = Store::open(&db)?;
+        if !store.realms()?.iter().any(|r| r.realm_id == realm) {
+            return Err(format!("{realm} is not in this replica").into());
+        }
+        let has = |name: &str| args.iter().any(|a| a == name);
+        if has("--disable") {
+            store.set_write_enabled(&realm, false)?;
+            println!("writes off for {realm}; queued writes stay queued");
+            return Ok(());
+        }
+        if has("--enable") {
+            qbo_local::writes::check_enable(&store, &realm, has("--confirm"), Utc::now())?;
+            store.set_write_enabled(&realm, true)?;
+            println!("writes on for {realm} ({})", store.realm_environment(&realm)?.as_str());
+            return Ok(());
+        }
+        let on = store.is_write_enabled(&realm)?;
+        println!("{realm}: {} company, writes {}", store.realm_environment(&realm)?.as_str(), if on { "on" } else { "off" });
+        if !on {
+            match qbo_local::writes::check_enable(&store, &realm, true, Utc::now()) {
+                Ok(()) => println!("can be enabled now with --enable --confirm"),
+                Err(why) => println!("cannot enable yet: {why}"),
+            }
+        }
+        Ok(())
+    }
+
     /// Run nightly from launchd or cron. Keeps the newest `--keep` dated
     /// snapshots in `--dir` and removes older ones it wrote itself.
     pub fn snapshot(args: &[String]) -> Result<(), Error> {
@@ -207,7 +241,10 @@ mod live {
     use qbo_local::http::live::UreqTransport;
     use qbo_local::http::{HttpQboClient, HttpQboConfig};
     use qbo_local::oauth::{authorize_url, await_callback, exchange_code, ClientCredentials, TokenManager};
+    use qbo_local::safety::{AuditLog, AuditedClient};
+    use qbo_local::store::outbox_store::Environment;
     use qbo_local::store::Store;
+    use qbo_local::writes::drain_once;
 
     type Error = Box<dyn std::error::Error>;
 
@@ -303,7 +340,7 @@ mod live {
         Ok(())
     }
 
-    type LiveDriver = SyncDriver<HttpQboClient<UreqTransport, Tokens>>;
+    type LiveDriver = SyncDriver<AuditedClient<HttpQboClient<UreqTransport, Tokens>>>;
 
     /// Store and driver for `--realm`, shared by `sync` and `reconcile`.
     fn open(args: &[String]) -> Result<(RealmId, Store, LiveDriver), Error> {
@@ -315,14 +352,23 @@ mod live {
         if db.to_string_lossy().to_lowercase().contains("dropbox") {
             return Err("refusing a replica path inside Dropbox".into());
         }
-        let config = if flag(args, "--sandbox") {
-            HttpQboConfig::sandbox()
-        } else {
-            HttpQboConfig::production()
-        };
+        let sandbox = flag(args, "--sandbox");
+        let config = if sandbox { HttpQboConfig::sandbox() } else { HttpQboConfig::production() };
         let store = Store::open(&db)?;
+        let known = store.realms()?.into_iter().any(|r| r.realm_id == realm);
         store.register_realm(&realm, realm.as_str(), Utc::now())?;
-        let client = HttpQboClient::new(UreqTransport::default(), tokens(&home, args)?, config);
+        if !known && sandbox {
+            store.set_realm_environment(&realm, Environment::Sandbox)?;
+        }
+        // A realm id names one company in one environment. Pointing a
+        // production replica at the sandbox host, or the reverse, would mix
+        // two books in one file.
+        let recorded = store.realm_environment(&realm)?;
+        if (recorded == Environment::Sandbox) != sandbox {
+            return Err(format!("this replica is a {} company; run with{} --sandbox", recorded.as_str(), if sandbox { "out" } else { "" }).into());
+        }
+        let audit = AuditLog::new(home.join(format!("audit-{realm}.jsonl")));
+        let client = AuditedClient::new(HttpQboClient::new(UreqTransport::default(), tokens(&home, args)?, config), audit);
         let driver = SyncDriver::new(client, SyncOptions::default(), Utc::now());
         Ok((realm, store, driver))
     }
@@ -362,6 +408,21 @@ mod live {
 
         loop {
             let started = Instant::now();
+            // Writes go first, so the sync that follows mirrors what they made.
+            if store.is_write_enabled(&realm)? {
+                match drain_once(&store, &realm, driver.client_mut(), Utc::now()) {
+                    Ok(report) => {
+                        let d = &report.drain;
+                        if d.applied + d.conflicted + d.rejected + d.retried + report.recovered > 0 {
+                            println!(
+                                "writes: {} applied ({} adopted), {} conflicted, {} rejected, {} retrying, {} recovered",
+                                d.applied, d.adopted, d.conflicted, d.rejected, d.retried, report.recovered
+                            );
+                        }
+                    }
+                    Err(error) => eprintln!("writes: {error}"),
+                }
+            }
             match driver.sync_realm(&store, &realm, &scope, Utc::now()) {
                 Ok(report) => {
                     for entity in &report.entities {

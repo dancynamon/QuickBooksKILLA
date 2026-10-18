@@ -1,4 +1,5 @@
-//! The UI's command surface. Read-only in M1.
+//! The UI's command surface: reads, plus (M2) the commands that queue writes
+//! in [`write_commands`], each refused while the company's writes are off.
 //!
 //! One entry point, [`dispatch`], taking a command name and JSON arguments and
 //! returning JSON. Both front doors call it: the Tauri shell's single `api`
@@ -31,6 +32,9 @@ pub enum ApiError {
     BadArguments(String),
     #[error("not found")]
     NotFound,
+    /// Refused by policy, not by a mistake in the request: writes are off.
+    #[error("{0}")]
+    Forbidden(String),
     #[error(transparent)]
     Store(#[from] StoreError),
 }
@@ -40,6 +44,7 @@ impl ApiError {
         match self {
             ApiError::UnknownCommand(_) | ApiError::NotFound => 404,
             ApiError::BadArguments(_) => 400,
+            ApiError::Forbidden(_) => 403,
             ApiError::Store(_) => 500,
         }
     }
@@ -55,6 +60,7 @@ pub struct RealmDto {
     pub realm_id: String,
     pub display_name: String,
     pub write_enabled: bool,
+    pub environment: String,
 }
 
 #[derive(Serialize, Debug, PartialEq)]
@@ -75,6 +81,9 @@ pub struct DocumentDto {
     pub po_number: Option<String>,
     pub private_note: Option<String>,
     pub customer_memo: Option<String>,
+    /// Set on a document that exists only in the outbox: its write state.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pending_write: Option<String>,
 }
 
 impl From<DocumentRow> for DocumentDto {
@@ -95,6 +104,7 @@ impl From<DocumentRow> for DocumentDto {
             po_number: row.po_number,
             private_note: row.private_note,
             customer_memo: row.customer_memo,
+            pending_write: None,
         }
     }
 }
@@ -146,13 +156,15 @@ pub struct DocumentDetailDto {
     pub links: Vec<LinkDto>,
     /// Linked ids the replica does not hold — shown as a gap, not hidden.
     pub unresolved: Vec<String>,
+    /// Queued or failed writes about this document (§6.7).
+    pub open_writes: Vec<write_commands::WriteDto>,
 }
 
 #[derive(Serialize, Debug, PartialEq)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum HitDto {
     #[serde(rename_all = "camelCase")]
-    Document { reason: String, document: DocumentDto },
+    Document { reason: String, document: Box<DocumentDto> },
     #[serde(rename_all = "camelCase")]
     Contact {
         reason: String,
@@ -204,6 +216,7 @@ pub struct EntityStatusDto {
 #[derive(Serialize, Debug, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct StatusDto {
+    pub environment: String,
     pub entity_types: Vec<EntityStatusDto>,
     /// The newest cursor across types: "last synced" in the chrome.
     pub last_synced: Option<String>,
@@ -340,8 +353,8 @@ fn date_arg(raw: &str) -> Result<String, ApiError> {
 // Dispatch
 // ---------------------------------------------------------------------------
 
-/// The commands, by name. Kept as a list so the dev server and the tests can
-/// enumerate them; there is deliberately nothing here that writes.
+/// The read commands, by name. Kept as a list so the tests can enumerate
+/// them; nothing in this list writes. Writes are [`WRITE_COMMANDS`].
 pub const COMMANDS: &[&str] = &[
     "realms",
     "status",
@@ -356,16 +369,31 @@ pub const COMMANDS: &[&str] = &[
     "itemDocuments",
 ];
 
+mod write_commands;
+pub use write_commands::WRITE_COMMANDS;
+
 pub fn dispatch(store: &Store, command: &str, args: Value) -> Result<Value, ApiError> {
+    dispatch_at(store, command, args, chrono::Utc::now())
+}
+
+/// [`dispatch`] at a given time, so write commands are testable with a fixed clock.
+pub fn dispatch_at(store: &Store, command: &str, args: Value, now: chrono::DateTime<chrono::Utc>) -> Result<Value, ApiError> {
+    if let Some(result) = write_commands::dispatch(store, command, args.clone(), now) {
+        return result;
+    }
     match command {
         "realms" => to_json(
             store
                 .realms()?
                 .into_iter()
                 .map(|row| RealmDto {
-                    realm_id: row.realm_id.to_string(),
                     display_name: row.display_name,
                     write_enabled: row.is_write_enabled,
+                    environment: store
+                        .realm_environment(&row.realm_id)
+                        .map(|e| e.as_str().to_string())
+                        .unwrap_or_else(|_| "production".into()),
+                    realm_id: row.realm_id.to_string(),
                 })
                 .collect::<Vec<_>>(),
         ),
@@ -378,6 +406,7 @@ pub fn dispatch(store: &Store, command: &str, args: Value) -> Result<Value, ApiE
                 .filter_map(|t| t.last_cdc_cursor.clone())
                 .max();
             to_json(StatusDto {
+                environment: store.realm_environment(&realm(&args.realm)?)?.as_str().to_string(),
                 entity_types: status
                     .entity_types
                     .into_iter()
@@ -408,7 +437,7 @@ pub fn dispatch(store: &Store, command: &str, args: Value) -> Result<Value, ApiE
                         match hit.hit {
                             Hit::Document(row) => HitDto::Document {
                                 reason,
-                                document: (*row).into(),
+                                document: Box::new((*row).into()),
                             },
                             Hit::Contact(contact) => HitDto::Contact {
                                 reason,
@@ -433,12 +462,29 @@ pub fn dispatch(store: &Store, command: &str, args: Value) -> Result<Value, ApiE
         }
         "documents" => {
             let args: ListArgs = parse(args)?;
-            let rows = store.list_documents(&realm(&args.realm)?, args.doc_type, args.limit.clamp(1, MAX_ROWS))?;
-            to_json(rows.into_iter().map(DocumentDto::from).collect::<Vec<_>>())
+            let realm = realm(&args.realm)?;
+            // Queued creates first: they are the newest, and a person who just
+            // saved one expects to see it at the top.
+            let mut out = write_commands::pending_documents(store, &realm, args.doc_type)?;
+            let rows = store.list_documents(&realm, args.doc_type, args.limit.clamp(1, MAX_ROWS))?;
+            out.extend(rows.into_iter().map(DocumentDto::from));
+            to_json(out)
         }
         "document" => {
             let args: DocumentArgs = parse(args)?;
             let realm = realm(&args.realm)?;
+            let open_writes = write_commands::open_writes(store, &realm, &args.qbo_id)?;
+            if args.qbo_id.starts_with(crate::worker::LOCAL_ID_PREFIX) {
+                // Not in QBO yet: shown from its queued payload, honestly marked.
+                let record = store
+                    .outbox_records(&realm, &[crate::outbox::OutboxState::Pending, crate::outbox::OutboxState::InFlight,
+                        crate::outbox::OutboxState::Conflicted, crate::outbox::OutboxState::Rejected])?
+                    .into_iter()
+                    .find(|r| r.local_entity_id == args.qbo_id)
+                    .ok_or(ApiError::NotFound)?;
+                let (document, lines) = write_commands::pending_document(store, &realm, &record)?.ok_or(ApiError::NotFound)?;
+                return to_json(DocumentDetailDto { related: vec![], links: vec![], unresolved: vec![], document, lines, open_writes });
+            }
             let document = store
                 .get_document(&realm, &args.qbo_id)?
                 .ok_or(ApiError::NotFound)?;
@@ -459,6 +505,7 @@ pub fn dispatch(store: &Store, command: &str, args: Value) -> Result<Value, ApiE
                     })
                     .collect(),
                 unresolved: lineage.unresolved,
+                open_writes,
             })
         }
         "contactDocuments" => {

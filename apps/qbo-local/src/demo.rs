@@ -295,6 +295,9 @@ pub fn generate(size: DemoSize, seed: u64, now: DateTime<Utc>) -> Vec<MirroredEn
 pub fn seed(store: &Store, size: DemoSize, seed: u64, now: DateTime<Utc>) -> Result<usize, StoreError> {
     let realm = RealmId::parse(DEMO_REALM).expect("constant is a valid realm id");
     store.register_realm(&realm, "Demo Company (synthetic)", now)?;
+    // Synthetic, so it is treated as a sandbox: writes can be switched on for
+    // it to exercise the write path without any soak period.
+    store.set_realm_environment(&realm, crate::store::outbox_store::Environment::Sandbox)?;
     let book = generate(size, seed, now);
     for chunk in book.chunks(500) {
         store.apply_batch(&realm, chunk, None, now)?;

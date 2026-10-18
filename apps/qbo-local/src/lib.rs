@@ -8,6 +8,7 @@
 //!
 //! - [`api`]      — the UI's read-only command surface (M1)
 //! - [`demo`]     — §11: a synthetic book for the UI and benchmarks
+//! - [`compose`]  — drafts typed in the UI to QBO payloads
 //! - [`domain`]   — §2: realm scoping, entity types
 //! - [`store`]    — §3: replica schema and migrations
 //! - [`project`]  — §3.2: raw payloads to the parsed projection
@@ -22,11 +23,13 @@
 //! - [`http`]     — the HTTP implementation of that boundary
 //! - [`keychain`] — §5.1: the macOS keychain token backend
 //! - [`oauth`]    — §5: authorisation, refresh, rotation against Intuit
+//! - [`writes`]   — §6/§8: queue locally, drain to QBO, the write gate
 //! - [`worker`]   — §6.3-6.5: draining the outbox, dependency resolution
 
 pub mod api;
 pub mod auth;
 pub mod client;
+pub mod compose;
 pub mod demo;
 pub mod domain;
 pub mod driver;
@@ -41,3 +44,4 @@ pub mod safety;
 pub mod serve;
 pub mod sync;
 pub mod worker;
+pub mod writes;
