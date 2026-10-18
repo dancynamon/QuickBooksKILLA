@@ -522,7 +522,13 @@ fn verify_on_a_freshly_imported_book_exits_0_with_no_findings() {
         stdout(&import)
     );
 
-    let verify = run(&["verify", "--db", db.to_str().unwrap(), "--company", "aquamentor"]);
+    let verify = run(&[
+        "verify",
+        "--db",
+        db.to_str().unwrap(),
+        "--company",
+        "aquamentor",
+    ]);
     assert!(
         verify.status.success(),
         "verify failed: {}",
@@ -658,7 +664,10 @@ fn nightly_with_a_1100_mismatch_exits_1_and_the_text_names_1100() {
     );
     let text = stdout(&nightly);
     assert!(text.contains("nightly: RED"), "{text}");
-    assert!(text.contains("1100"), "expected the report to name 1100:\n{text}");
+    assert!(
+        text.contains("1100"),
+        "expected the report to name 1100:\n{text}"
+    );
 
     let text_path = out_dir.join("tbdiff-2026-08-05.txt");
     assert!(text_path.exists());

@@ -65,8 +65,17 @@ fn ap_purchase(id: &str, date: &str, vendor: &str, amount: f64) -> Value {
 fn replica() -> Store {
     let store = Store::open_in_memory().unwrap();
     store.register_realm(&realm(), "Aquamentor", now()).unwrap();
-    for (id, name) in [("77", "Card Vendor"), ("78", "Old Vendor"), ("79", "Offset Vendor")] {
-        seed(&store, EntityType::Vendor, id, json!({ "Id": id, "DisplayName": name, "Active": true }));
+    for (id, name) in [
+        ("77", "Card Vendor"),
+        ("78", "Old Vendor"),
+        ("79", "Offset Vendor"),
+    ] {
+        seed(
+            &store,
+            EntityType::Vendor,
+            id,
+            json!({ "Id": id, "DisplayName": name, "Active": true }),
+        );
     }
     seed(
         &store,
@@ -80,7 +89,12 @@ fn replica() -> Store {
     account(&store, "AP1", "Accounts Payable", "Accounts Payable");
     account(&store, "EXP1", "Purchasing", "Expense");
 
-    seed(&store, EntityType::Purchase, "501", ap_purchase("501", "2026-06-01", "77", 100.00));
+    seed(
+        &store,
+        EntityType::Purchase,
+        "501",
+        ap_purchase("501", "2026-06-01", "77", 100.00),
+    );
     seed(
         &store,
         EntityType::BillPayment,
@@ -102,7 +116,12 @@ fn replica() -> Store {
                   "Entity": { "Type": "Vendor", "EntityRef": { "value": "79" } } } }
         ] }),
     );
-    seed(&store, EntityType::Purchase, "504", ap_purchase("504", "2019-11-22", "79", 7.34));
+    seed(
+        &store,
+        EntityType::Purchase,
+        "504",
+        ap_purchase("504", "2019-11-22", "79", 7.34),
+    );
     seed(
         &store,
         EntityType::BillPayment,

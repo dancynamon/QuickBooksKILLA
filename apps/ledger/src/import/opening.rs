@@ -6,7 +6,8 @@ use ledger_core::Money;
 
 use crate::chart;
 use crate::types::{
-    AccountId, ClassId, ContactRef, DocKind, DocLine, JournalEntry, JournalLine, LedgerDocument, LineKind,
+    AccountId, ClassId, ContactRef, DocKind, DocLine, JournalEntry, JournalLine, LedgerDocument,
+    LineKind,
 };
 
 use super::accounts::AccountMapping;

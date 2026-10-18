@@ -261,13 +261,13 @@ pub fn parse_csv(text: &str) -> Result<Vec<PayRun>, PayrollError> {
         };
 
         let run_id = required("run_id")?.to_string();
-        let pay_date = parse_date(required("pay_date")?).map_err(&malformed)?;
-        let period_start = optional_date(get("period_start")).map_err(&malformed)?;
-        let period_end = optional_date(get("period_end")).map_err(&malformed)?;
+        let pay_date = parse_date(required("pay_date")?).map_err(malformed)?;
+        let period_start = optional_date(get("period_start")).map_err(malformed)?;
+        let period_end = optional_date(get("period_end")).map_err(malformed)?;
         let section_raw = required("section")?;
         let section = Section::parse(section_raw)
             .ok_or_else(|| malformed(format!("unknown section {section_raw:?}")))?;
-        let amount = parse_amount(required("amount")?).map_err(&malformed)?;
+        let amount = parse_amount(required("amount")?).map_err(malformed)?;
         let department = match get("department") {
             "" => None,
             value => Some(value.to_string()),

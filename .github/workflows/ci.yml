@@ -43,9 +43,8 @@ jobs:
         env:
           QBO_BENCH_ASSERT: "1"
 
-  # apps/desktop/ui does not exist yet (a separate agent is adding it) — every
-  # step here is a no-op until it does, rather than the job failing to find
-  # something to run.
+  # Node 20's `--test` takes files, not a directory, so the tests are named by
+  # glob. `npm ci` needs the committed package-lock.json (no dependencies yet).
   desktop-ui:
     runs-on: ubuntu-latest
     steps:
@@ -57,7 +56,7 @@ jobs:
       - run: npm ci
         if: hashFiles('apps/desktop/ui/package.json') != ''
         working-directory: apps/desktop/ui
-      - run: node --test apps/desktop/ui/test
+      - run: node --test apps/desktop/ui/test/*.test.js
         if: hashFiles('apps/desktop/ui/package.json') != ''
 
   # No `cargo fmt --check` job: the tree is deliberately not fmt-clean

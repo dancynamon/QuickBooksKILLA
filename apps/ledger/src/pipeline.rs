@@ -340,7 +340,11 @@ pub(crate) fn materialize_accounts(
 /// An import fallback class (D28), added to the company's class list if
 /// absent, named from the chart when it is the standard one. Returns whether
 /// it was added.
-pub(crate) fn ensure_class(ledger: &Ledger, company: &str, id: &str) -> Result<bool, PipelineError> {
+pub(crate) fn ensure_class(
+    ledger: &Ledger,
+    company: &str,
+    id: &str,
+) -> Result<bool, PipelineError> {
     let name = if id == chart::IMPORT_FALLBACK_CLASS.0 {
         chart::IMPORT_FALLBACK_CLASS.1
     } else {

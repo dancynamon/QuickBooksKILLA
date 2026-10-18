@@ -101,7 +101,9 @@ fn call_tool(
         return Err(CommandError::Protocol { code, message });
     }
 
-    let result = response.get("result").ok_or(CommandError::MalformedResult)?;
+    let result = response
+        .get("result")
+        .ok_or(CommandError::MalformedResult)?;
 
     if result.get("isError").and_then(Value::as_bool) == Some(true) {
         let message = result
@@ -383,66 +385,110 @@ mod tests {
     fn ledger_query_create_document_takes_what_the_entry_screen_sends() {
         let ledger = seeded_ledger();
         for (tool, args) in [
-            ("upsert_contact", json!({ "contact": { "contact_id": "cust-blue-harbor", "kind": "Customer",
-                "display_name": "Blue Harbor Swim Club", "terms_days": 30, "default_class": "foam" } })),
-            ("upsert_contact", json!({ "contact": { "contact_id": "vend-spectra", "kind": "Vendor",
-                "display_name": "Spectra EVA", "terms_days": 30 } })),
-            ("upsert_item", json!({ "item": { "item_id": "rt-50-red", "sku": "RT-50-RED",
+            (
+                "upsert_contact",
+                json!({ "contact": { "contact_id": "cust-blue-harbor", "kind": "Customer",
+                "display_name": "Blue Harbor Swim Club", "terms_days": 30, "default_class": "foam" } }),
+            ),
+            (
+                "upsert_contact",
+                json!({ "contact": { "contact_id": "vend-spectra", "kind": "Vendor",
+                "display_name": "Spectra EVA", "terms_days": 30 } }),
+            ),
+            (
+                "upsert_item",
+                json!({ "item": { "item_id": "rt-50-red", "sku": "RT-50-RED",
                 "name": "Rescue tube", "item_type": "non_inventory", "income_account": "4100",
                 "expense_account": "5000", "default_class": "foam", "sales_price": "19.95",
-                "is_taxable": true } })),
+                "is_taxable": true } }),
+            ),
         ] {
             ledger_query(&ledger, COMPANY, tool, args).unwrap();
         }
 
-        let invoice = ledger_query(&ledger, COMPANY, "create_document", json!({ "actor": "dan", "document": {
-            "kind": "Invoice", "txn_date": "2026-10-01",
-            "contact": { "kind": "Customer", "id": "cust-blue-harbor" },
-            "lines": [{ "kind": "Item", "amount": "199.50", "is_taxable": true,
-                        "item_id": "rt-50-red", "qty": "10", "description": "Rescue tube" }]
-        }}))
+        let invoice = ledger_query(
+            &ledger,
+            COMPANY,
+            "create_document",
+            json!({ "actor": "dan", "document": {
+                "kind": "Invoice", "txn_date": "2026-10-01",
+                "contact": { "kind": "Customer", "id": "cust-blue-harbor" },
+                "lines": [{ "kind": "Item", "amount": "199.50", "is_taxable": true,
+                            "item_id": "rt-50-red", "qty": "10", "description": "Rescue tube" }]
+            }}),
+        )
         .unwrap();
         assert_eq!(invoice["tax"], json!("13.22"));
         assert_eq!(invoice["total"], json!("212.72"));
         assert_eq!(invoice["due_date"], json!("2026-10-31"));
         assert!(!invoice["entry_id"].is_null());
 
-        let bill = ledger_query(&ledger, COMPANY, "create_document", json!({ "actor": "dan", "document": {
-            "kind": "Bill", "txn_date": "2026-10-01", "number": "SPX-2001",
-            "contact": { "kind": "Vendor", "id": "vend-spectra" },
-            "lines": [{ "kind": "Account", "amount": "84.10", "is_taxable": false,
-                        "account": "6100", "class": "foam" }]
-        }}))
+        let bill = ledger_query(
+            &ledger,
+            COMPANY,
+            "create_document",
+            json!({ "actor": "dan", "document": {
+                "kind": "Bill", "txn_date": "2026-10-01", "number": "SPX-2001",
+                "contact": { "kind": "Vendor", "id": "vend-spectra" },
+                "lines": [{ "kind": "Account", "amount": "84.10", "is_taxable": false,
+                            "account": "6100", "class": "foam" }]
+            }}),
+        )
         .unwrap();
         assert_eq!(bill["number"], json!("SPX-2001"));
         assert_eq!(bill["total"], json!("84.10"));
 
-        ledger_query(&ledger, COMPANY, "create_document", json!({ "actor": "dan", "document": {
-            "kind": "Payment", "txn_date": "2026-10-10",
-            "contact": { "kind": "Customer", "id": "cust-blue-harbor" },
-            "applications": [{ "target_document_id": invoice["document_id"],
-                               "target_kind": "Invoice", "amount": "212.72" }],
-            "deposit_to": "1100"
-        }}))
+        ledger_query(
+            &ledger,
+            COMPANY,
+            "create_document",
+            json!({ "actor": "dan", "document": {
+                "kind": "Payment", "txn_date": "2026-10-10",
+                "contact": { "kind": "Customer", "id": "cust-blue-harbor" },
+                "applications": [{ "target_document_id": invoice["document_id"],
+                                   "target_kind": "Invoice", "amount": "212.72" }],
+                "deposit_to": "1100"
+            }}),
+        )
         .unwrap();
 
-        let ar = ledger_query(&ledger, COMPANY, "aging",
-            json!({ "book": "receivable", "as_of": "2026-10-15" })).unwrap();
+        let ar = ledger_query(
+            &ledger,
+            COMPANY,
+            "aging",
+            json!({ "book": "receivable", "as_of": "2026-10-15" }),
+        )
+        .unwrap();
         assert_eq!(ar["totals"]["total"], json!("0.00"));
-        let ap = ledger_query(&ledger, COMPANY, "aging",
-            json!({ "book": "payable", "as_of": "2026-10-15" })).unwrap();
+        let ap = ledger_query(
+            &ledger,
+            COMPANY,
+            "aging",
+            json!({ "book": "payable", "as_of": "2026-10-15" }),
+        )
+        .unwrap();
         assert_eq!(ap["totals"]["current"], json!("84.10"));
 
-        ledger_query(&ledger, COMPANY, "create_document", json!({ "actor": "dan", "document": {
-            "kind": "BillPayment", "txn_date": "2026-10-12",
-            "contact": { "kind": "Vendor", "id": "vend-spectra" },
-            "applications": [{ "target_document_id": bill["document_id"],
-                               "target_kind": "Bill", "amount": "84.10" }],
-            "pay_from": "1100"
-        }}))
+        ledger_query(
+            &ledger,
+            COMPANY,
+            "create_document",
+            json!({ "actor": "dan", "document": {
+                "kind": "BillPayment", "txn_date": "2026-10-12",
+                "contact": { "kind": "Vendor", "id": "vend-spectra" },
+                "applications": [{ "target_document_id": bill["document_id"],
+                                   "target_kind": "Bill", "amount": "84.10" }],
+                "pay_from": "1100"
+            }}),
+        )
         .unwrap();
-        let ap = ledger_query(&ledger, COMPANY, "aging",
-            json!({ "book": "payable", "as_of": "2026-10-15" })).unwrap();
+        let ap = ledger_query(
+            &ledger,
+            COMPANY,
+            "aging",
+            json!({ "book": "payable", "as_of": "2026-10-15" }),
+        )
+        .unwrap();
         assert_eq!(ap["totals"]["total"], json!("0.00"));
 
         let receipt = ledger_query(&ledger, COMPANY, "create_document", json!({ "actor": "dan", "document": {
@@ -461,9 +507,18 @@ mod tests {
         }}))
         .unwrap();
         assert_eq!(credit["number"], json!("1001"));
-        let open = ledger_query(&ledger, COMPANY, "open_documents",
-            json!({ "book": "receivable", "as_of": "2026-10-15" })).unwrap();
-        assert_eq!(open[0]["open"], json!("-21.27"), "an unapplied credit memo sits open as a negative");
+        let open = ledger_query(
+            &ledger,
+            COMPANY,
+            "open_documents",
+            json!({ "book": "receivable", "as_of": "2026-10-15" }),
+        )
+        .unwrap();
+        assert_eq!(
+            open[0]["open"],
+            json!("-21.27"),
+            "an unapplied credit memo sits open as a negative"
+        );
     }
 
     /// Editing, voiding and applying a credit exactly as the entry and
@@ -476,75 +531,139 @@ mod tests {
     fn ledger_query_edit_void_and_apply_credit_take_what_the_screens_send() {
         let ledger = seeded_ledger();
         for (tool, args) in [
-            ("upsert_contact", json!({ "contact": { "contact_id": "cust-blue-harbor", "kind": "Customer",
-                "display_name": "Blue Harbor Swim Club", "terms_days": 30, "default_class": "foam" } })),
-            ("upsert_item", json!({ "item": { "item_id": "rt-50-red", "sku": "RT-50-RED",
+            (
+                "upsert_contact",
+                json!({ "contact": { "contact_id": "cust-blue-harbor", "kind": "Customer",
+                "display_name": "Blue Harbor Swim Club", "terms_days": 30, "default_class": "foam" } }),
+            ),
+            (
+                "upsert_item",
+                json!({ "item": { "item_id": "rt-50-red", "sku": "RT-50-RED",
                 "name": "Rescue tube", "item_type": "non_inventory", "income_account": "4100",
                 "expense_account": "5000", "default_class": "foam", "sales_price": "19.95",
-                "is_taxable": true } })),
+                "is_taxable": true } }),
+            ),
         ] {
             ledger_query(&ledger, COMPANY, tool, args).unwrap();
         }
-        let line = |qty: &str, amount: &str| json!({ "kind": "Item", "amount": amount,
-            "is_taxable": true, "item_id": "rt-50-red", "qty": qty, "description": "Rescue tube" });
-        let invoice = ledger_query(&ledger, COMPANY, "create_document", json!({ "actor": "dan", "document": {
-            "kind": "Invoice", "txn_date": "2026-10-01",
-            "contact": { "kind": "Customer", "id": "cust-blue-harbor" },
-            "lines": [line("10", "199.50")]
-        }}))
+        let line = |qty: &str, amount: &str| {
+            json!({ "kind": "Item", "amount": amount,
+            "is_taxable": true, "item_id": "rt-50-red", "qty": qty, "description": "Rescue tube" })
+        };
+        let invoice = ledger_query(
+            &ledger,
+            COMPANY,
+            "create_document",
+            json!({ "actor": "dan", "document": {
+                "kind": "Invoice", "txn_date": "2026-10-01",
+                "contact": { "kind": "Customer", "id": "cust-blue-harbor" },
+                "lines": [line("10", "199.50")]
+            }}),
+        )
         .unwrap();
         let invoice_id = invoice["document_id"].as_str().unwrap().to_string();
 
-        let saved = ledger_query(&ledger, COMPANY, "get_document",
-            json!({ "document_id": invoice_id })).unwrap();
+        let saved = ledger_query(
+            &ledger,
+            COMPANY,
+            "get_document",
+            json!({ "document_id": invoice_id }),
+        )
+        .unwrap();
         assert_eq!(saved["number"], json!("1001"));
         assert_eq!(saved["lines"][0]["qty"], json!("10"));
         assert_eq!(saved["lines"][0]["item_id"], json!("rt-50-red"));
         assert_eq!(saved["total"], json!("212.72"));
 
-        let edited = ledger_query(&ledger, COMPANY, "update_document", json!({ "actor": "dan", "document": {
-            "document_id": invoice_id, "kind": "Invoice", "txn_date": "2026-10-01",
-            "number": "1001", "memo": "two more",
-            "contact": { "kind": "Customer", "id": "cust-blue-harbor" },
-            "lines": [line("12", "239.40")]
-        }}))
+        let edited = ledger_query(
+            &ledger,
+            COMPANY,
+            "update_document",
+            json!({ "actor": "dan", "document": {
+                "document_id": invoice_id, "kind": "Invoice", "txn_date": "2026-10-01",
+                "number": "1001", "memo": "two more",
+                "contact": { "kind": "Customer", "id": "cust-blue-harbor" },
+                "lines": [line("12", "239.40")]
+            }}),
+        )
         .unwrap();
         assert_eq!(edited["version"], json!(2));
         assert_eq!(edited["number"], json!("1001"));
         assert_eq!(edited["total"], json!("255.26"));
         assert_eq!(edited["reversal_entry_ids"].as_array().unwrap().len(), 1);
 
-        let credit = ledger_query(&ledger, COMPANY, "create_document", json!({ "actor": "dan", "document": {
-            "kind": "CreditMemo", "txn_date": "2026-10-05",
-            "contact": { "kind": "Customer", "id": "cust-blue-harbor" },
-            "lines": [line("1", "19.95")]
-        }}))
+        let credit = ledger_query(
+            &ledger,
+            COMPANY,
+            "create_document",
+            json!({ "actor": "dan", "document": {
+                "kind": "CreditMemo", "txn_date": "2026-10-05",
+                "contact": { "kind": "Customer", "id": "cust-blue-harbor" },
+                "lines": [line("1", "19.95")]
+            }}),
+        )
         .unwrap();
-        let applied = ledger_query(&ledger, COMPANY, "apply_credit", json!({
-            "credit_id": credit["document_id"], "target_document_id": invoice_id, "actor": "dan"
-        }))
+        let applied = ledger_query(
+            &ledger,
+            COMPANY,
+            "apply_credit",
+            json!({
+                "credit_id": credit["document_id"], "target_document_id": invoice_id, "actor": "dan"
+            }),
+        )
         .unwrap();
         assert_eq!(applied["applied"], json!("21.27"));
-        let ar = ledger_query(&ledger, COMPANY, "aging",
-            json!({ "book": "receivable", "as_of": "2026-10-15" })).unwrap();
+        let ar = ledger_query(
+            &ledger,
+            COMPANY,
+            "aging",
+            json!({ "book": "receivable", "as_of": "2026-10-15" }),
+        )
+        .unwrap();
         assert_eq!(ar["totals"]["total"], json!("233.99"));
-        let tb = ledger_query(&ledger, COMPANY, "trial_balance",
-            json!({ "as_of": "2026-10-15" })).unwrap();
-        let ar_row = tb["rows"].as_array().unwrap().iter()
-            .find(|row| row["account_id"] == json!("1200")).unwrap();
+        let tb = ledger_query(
+            &ledger,
+            COMPANY,
+            "trial_balance",
+            json!({ "as_of": "2026-10-15" }),
+        )
+        .unwrap();
+        let ar_row = tb["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["account_id"] == json!("1200"))
+            .unwrap();
         assert_eq!(ar_row["balance"], json!("233.99"), "the aging ties to 1200");
 
         // The invoice has a credit on it: refused, as a tool error the screen shows.
-        let refused = ledger_query(&ledger, COMPANY, "void_document",
-            json!({ "document_id": invoice_id, "reason": "entered twice", "actor": "dan" }));
-        assert!(matches!(refused, Err(CommandError::Tool { .. })), "{refused:?}");
+        let refused = ledger_query(
+            &ledger,
+            COMPANY,
+            "void_document",
+            json!({ "document_id": invoice_id, "reason": "entered twice", "actor": "dan" }),
+        );
+        assert!(
+            matches!(refused, Err(CommandError::Tool { .. })),
+            "{refused:?}"
+        );
         for id in [credit["document_id"].as_str().unwrap(), invoice_id.as_str()] {
-            let voided = ledger_query(&ledger, COMPANY, "void_document",
-                json!({ "document_id": id, "reason": "entered twice", "actor": "dan" })).unwrap();
+            let voided = ledger_query(
+                &ledger,
+                COMPANY,
+                "void_document",
+                json!({ "document_id": id, "reason": "entered twice", "actor": "dan" }),
+            )
+            .unwrap();
             assert_eq!(voided["is_voided"], json!(true));
         }
-        let ar = ledger_query(&ledger, COMPANY, "aging",
-            json!({ "book": "receivable", "as_of": "2026-10-15" })).unwrap();
+        let ar = ledger_query(
+            &ledger,
+            COMPANY,
+            "aging",
+            json!({ "book": "receivable", "as_of": "2026-10-15" }),
+        )
+        .unwrap();
         assert_eq!(ar["totals"]["total"], json!("0.00"));
     }
 
@@ -554,33 +673,61 @@ mod tests {
     fn ledger_query_sales_order_lists_and_converts_like_the_receivables_screen() {
         let ledger = seeded_ledger();
         for (tool, args) in [
-            ("upsert_contact", json!({ "contact": { "contact_id": "cust-blue-harbor", "kind": "Customer",
-                "display_name": "Blue Harbor Swim Club", "terms_days": 30, "default_class": "foam" } })),
-            ("upsert_item", json!({ "item": { "item_id": "rt-50-red", "name": "Rescue tube",
+            (
+                "upsert_contact",
+                json!({ "contact": { "contact_id": "cust-blue-harbor", "kind": "Customer",
+                "display_name": "Blue Harbor Swim Club", "terms_days": 30, "default_class": "foam" } }),
+            ),
+            (
+                "upsert_item",
+                json!({ "item": { "item_id": "rt-50-red", "name": "Rescue tube",
                 "item_type": "non_inventory", "income_account": "4100", "expense_account": "5000",
-                "default_class": "foam", "is_taxable": true } })),
+                "default_class": "foam", "is_taxable": true } }),
+            ),
         ] {
             ledger_query(&ledger, COMPANY, tool, args).unwrap();
         }
-        let so = ledger_query(&ledger, COMPANY, "create_document", json!({ "actor": "dan", "document": {
-            "kind": "SalesOrder", "txn_date": "2026-10-01",
-            "contact": { "kind": "Customer", "id": "cust-blue-harbor" },
-            "lines": [{ "kind": "Item", "amount": "199.50", "is_taxable": true,
-                        "item_id": "rt-50-red", "qty": "10" }]
-        }}))
+        let so = ledger_query(
+            &ledger,
+            COMPANY,
+            "create_document",
+            json!({ "actor": "dan", "document": {
+                "kind": "SalesOrder", "txn_date": "2026-10-01",
+                "contact": { "kind": "Customer", "id": "cust-blue-harbor" },
+                "lines": [{ "kind": "Item", "amount": "199.50", "is_taxable": true,
+                            "item_id": "rt-50-red", "qty": "10" }]
+            }}),
+        )
         .unwrap();
         assert!(so["entry_id"].is_null(), "a sales order posts nothing");
 
-        let open = ledger_query(&ledger, COMPANY, "open_sales_orders", json!({ "as_of": "2026-10-15" })).unwrap();
+        let open = ledger_query(
+            &ledger,
+            COMPANY,
+            "open_sales_orders",
+            json!({ "as_of": "2026-10-15" }),
+        )
+        .unwrap();
         assert_eq!(open[0]["open"], json!("199.50"));
 
-        let invoice = ledger_query(&ledger, COMPANY, "convert_to_invoice", json!({
-            "sales_order_id": so["document_id"], "txn_date": "2026-10-10", "actor": "dan"
-        }))
+        let invoice = ledger_query(
+            &ledger,
+            COMPANY,
+            "convert_to_invoice",
+            json!({
+                "sales_order_id": so["document_id"], "txn_date": "2026-10-10", "actor": "dan"
+            }),
+        )
         .unwrap();
         assert_eq!(invoice["total"], json!("212.72"));
         assert!(!invoice["entry_id"].is_null());
-        let open = ledger_query(&ledger, COMPANY, "open_sales_orders", json!({ "as_of": "2026-10-15" })).unwrap();
+        let open = ledger_query(
+            &ledger,
+            COMPANY,
+            "open_sales_orders",
+            json!({ "as_of": "2026-10-15" }),
+        )
+        .unwrap();
         assert_eq!(open, json!([]));
     }
 
@@ -590,23 +737,33 @@ mod tests {
     #[test]
     fn ledger_query_upserts_take_what_the_editors_send() {
         let ledger = seeded_ledger();
-        let contact = ledger_query(&ledger, COMPANY, "upsert_contact", json!({ "contact": {
-            "contact_id": "cust-lakeside-y", "kind": "Customer", "display_name": "Lakeside Y",
-            "company_name": null, "email": null, "phone": null, "bill_address": null,
-            "ship_address": null, "terms_days": 15, "is_tax_exempt": false,
-            "default_class": null, "is_active": true, "source_ref": null
-        }}))
+        let contact = ledger_query(
+            &ledger,
+            COMPANY,
+            "upsert_contact",
+            json!({ "contact": {
+                "contact_id": "cust-lakeside-y", "kind": "Customer", "display_name": "Lakeside Y",
+                "company_name": null, "email": null, "phone": null, "bill_address": null,
+                "ship_address": null, "terms_days": 15, "is_tax_exempt": false,
+                "default_class": null, "is_active": true, "source_ref": null
+            }}),
+        )
         .unwrap();
         assert_eq!(contact["contact"]["kind"], json!("customer"));
         assert_eq!(contact["contact"]["terms_days"], json!(15));
 
-        let item = ledger_query(&ledger, COMPANY, "upsert_item", json!({ "item": {
-            "item_id": "item-eva-2", "sku": "EVA-2", "name": "EVA sheet", "description": null,
-            "item_type": "inventory", "income_account": "4100", "expense_account": "5000",
-            "asset_account": "1300", "default_class": null, "sales_price": "80.00",
-            "purchase_cost": null, "unit_cost": null, "is_taxable": true, "is_active": true,
-            "source_ref": null
-        }}))
+        let item = ledger_query(
+            &ledger,
+            COMPANY,
+            "upsert_item",
+            json!({ "item": {
+                "item_id": "item-eva-2", "sku": "EVA-2", "name": "EVA sheet", "description": null,
+                "item_type": "inventory", "income_account": "4100", "expense_account": "5000",
+                "asset_account": "1300", "default_class": null, "sales_price": "80.00",
+                "purchase_cost": null, "unit_cost": null, "is_taxable": true, "is_active": true,
+                "source_ref": null
+            }}),
+        )
         .unwrap();
         assert_eq!(item["item"]["sales_price"], json!("80.00"));
         assert_eq!(item["item"]["asset_account"], json!("1300"));

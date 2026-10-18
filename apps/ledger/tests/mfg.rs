@@ -126,7 +126,11 @@ fn landed_cost_build_sheet_and_build_all_agree_to_the_cent() {
         "1300 is exactly the two receipts' landed cost, to the cent"
     );
     assert_eq!(
-        tb_balance(&ledger, ymd(2026, 8, 10), chart::INVENTORY_RECEIVED_NOT_BILLED),
+        tb_balance(
+            &ledger,
+            ymd(2026, 8, 10),
+            chart::INVENTORY_RECEIVED_NOT_BILLED
+        ),
         total_landed.checked_neg().unwrap(),
         "2050 carries the same total as a credit balance"
     );
@@ -181,10 +185,16 @@ fn landed_cost_build_sheet_and_build_all_agree_to_the_cent() {
     assert!(standard.total.minor() > 0);
     // Five points of yield beats a five percent foam discount on this
     // recipe (`prototype/README.md` "Manufacturing").
-    let scenarios = sheet::sensitivity(&sheet_full, &materials, Money::from_minor(4995))
-        .expect("sensitivity");
-    let yield_up = scenarios.iter().find(|s| s.name == "Yield +5 points").unwrap();
-    let foam_down = scenarios.iter().find(|s| s.name == "Foam price -5%").unwrap();
+    let scenarios =
+        sheet::sensitivity(&sheet_full, &materials, Money::from_minor(4995)).expect("sensitivity");
+    let yield_up = scenarios
+        .iter()
+        .find(|s| s.name == "Yield +5 points")
+        .unwrap();
+    let foam_down = scenarios
+        .iter()
+        .find(|s| s.name == "Foam price -5%")
+        .unwrap();
     assert!(yield_up.delta_vs_base > foam_down.delta_vs_base);
 
     // -- A build that overruns its recipe -------------------------------

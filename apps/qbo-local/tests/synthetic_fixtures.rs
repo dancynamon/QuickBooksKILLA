@@ -222,16 +222,24 @@ fn replaying_the_committed_synthetic_fixtures_matches_expected_counts() {
     let at = now();
 
     let store = Store::open_in_memory().unwrap();
-    store.register_realm(&realm, "synthetic-replay", at).unwrap();
+    store
+        .register_realm(&realm, "synthetic-replay", at)
+        .unwrap();
     let client = FixtureQbo::new(&dir);
     let mut driver = SyncDriver::new(client, SyncOptions::default(), at);
     let report = driver
         .sync_realm(&store, &realm, &entity_types(), at)
         .expect("replay sync failed");
 
-    assert_eq!(store.count_entities(&realm, EntityType::Customer).unwrap(), 2);
+    assert_eq!(
+        store.count_entities(&realm, EntityType::Customer).unwrap(),
+        2
+    );
     assert_eq!(store.count_entities(&realm, EntityType::Item).unwrap(), 1);
-    assert_eq!(store.count_entities(&realm, EntityType::Invoice).unwrap(), 2);
+    assert_eq!(
+        store.count_entities(&realm, EntityType::Invoice).unwrap(),
+        2
+    );
     assert_eq!(report.mirrored(), 5);
     assert_eq!(report.quarantined(), 0);
 }

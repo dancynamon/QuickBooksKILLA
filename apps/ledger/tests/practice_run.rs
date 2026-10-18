@@ -82,8 +82,18 @@ fn a_card_credit_debits_the_card_and_credits_the_expense() {
         "EXP1",
         json!({ "Id": "EXP1", "Name": "Supplies", "AccountType": "Expense", "Active": true }),
     );
-    seed(&store, EntityType::Purchase, "501", card_purchase("501", 100.00, false));
-    seed(&store, EntityType::Purchase, "502", card_purchase("502", 30.00, true));
+    seed(
+        &store,
+        EntityType::Purchase,
+        "501",
+        card_purchase("501", 100.00, false),
+    );
+    seed(
+        &store,
+        EntityType::Purchase,
+        "502",
+        card_purchase("502", 30.00, true),
+    );
 
     let ledger = Ledger::open_in_memory().unwrap();
     ledger
@@ -101,8 +111,12 @@ fn a_card_credit_debits_the_card_and_credits_the_expense() {
     assert!(report.rejected.is_empty(), "{:?}", report.rejected);
     assert_eq!(report.posted, 2);
 
-    let tb = report::trial_balance(&ledger, "aquamentor", NaiveDate::from_ymd_opt(2026, 7, 31).unwrap())
-        .unwrap();
+    let tb = report::trial_balance(
+        &ledger,
+        "aquamentor",
+        NaiveDate::from_ymd_opt(2026, 7, 31).unwrap(),
+    )
+    .unwrap();
     // 100 charged, 30 refunded: the card owes 70, the expense is 70.
     assert_eq!(balance_of(&tb, "CARD1"), Money::from_minor(-7_000));
     assert_eq!(balance_of(&tb, "EXP1"), Money::from_minor(7_000));
@@ -173,8 +187,12 @@ fn a_deposit_line_linked_to_a_payment_sweeps_undeposited_funds() {
     .unwrap();
     assert!(report.rejected.is_empty(), "{:?}", report.rejected);
 
-    let tb = report::trial_balance(&ledger, "aquamentor", NaiveDate::from_ymd_opt(2026, 7, 31).unwrap())
-        .unwrap();
+    let tb = report::trial_balance(
+        &ledger,
+        "aquamentor",
+        NaiveDate::from_ymd_opt(2026, 7, 31).unwrap(),
+    )
+    .unwrap();
     assert_eq!(balance_of(&tb, "UDF1"), Money::ZERO);
     assert_eq!(balance_of(&tb, "BANK1"), Money::from_minor(250_000));
 }
@@ -239,8 +257,12 @@ fn a_bill_line_for_an_item_named_shipping_is_a_cost_not_a_shipping_charge() {
     .unwrap();
     assert!(report.rejected.is_empty(), "{:?}", report.rejected);
 
-    let tb = report::trial_balance(&ledger, "aquamentor", NaiveDate::from_ymd_opt(2026, 8, 31).unwrap())
-        .unwrap();
+    let tb = report::trial_balance(
+        &ledger,
+        "aquamentor",
+        NaiveDate::from_ymd_opt(2026, 8, 31).unwrap(),
+    )
+    .unwrap();
     assert_eq!(balance_of(&tb, "AP1"), Money::from_minor(-13_366));
     assert_eq!(balance_of(&tb, "EXP2"), Money::from_minor(13_366));
 }
@@ -292,8 +314,12 @@ fn a_bill_payment_with_nothing_applied_posts_its_total_as_an_ap_debit() {
     .unwrap();
     assert!(report.rejected.is_empty(), "{:?}", report.rejected);
 
-    let tb = report::trial_balance(&ledger, "aquamentor", NaiveDate::from_ymd_opt(2026, 7, 31).unwrap())
-        .unwrap();
+    let tb = report::trial_balance(
+        &ledger,
+        "aquamentor",
+        NaiveDate::from_ymd_opt(2026, 7, 31).unwrap(),
+    )
+    .unwrap();
     assert_eq!(balance_of(&tb, "BANK1"), Money::from_minor(-15_440));
     assert_eq!(balance_of(&tb, "AP1"), Money::from_minor(15_440));
 }
@@ -350,8 +376,12 @@ fn an_inventory_adjustment_posts_to_the_items_own_inventory_account_when_it_is_n
     .unwrap();
     assert!(report.rejected.is_empty(), "{:?}", report.rejected);
 
-    let tb = report::trial_balance(&ledger, "aquamentor", NaiveDate::from_ymd_opt(2026, 10, 16).unwrap())
-        .unwrap();
+    let tb = report::trial_balance(
+        &ledger,
+        "aquamentor",
+        NaiveDate::from_ymd_opt(2026, 10, 16).unwrap(),
+    )
+    .unwrap();
     assert_eq!(balance_of(&tb, "INV2"), Money::from_minor(10_000));
     assert_eq!(balance_of(&tb, "SHR1"), Money::from_minor(-10_000));
 }
@@ -414,11 +444,20 @@ fn a_bill_payment_dated_before_its_bill_ages_as_a_vendor_credit_until_the_bill_e
     .unwrap();
     assert!(report.rejected.is_empty(), "{:?}", report.rejected);
 
-    let july = books::aging(&ledger, "aquamentor", Book::Payable, NaiveDate::from_ymd_opt(2026, 7, 31).unwrap())
-        .unwrap();
+    let july = books::aging(
+        &ledger,
+        "aquamentor",
+        Book::Payable,
+        NaiveDate::from_ymd_opt(2026, 7, 31).unwrap(),
+    )
+    .unwrap();
     assert_eq!(july.totals.total, Money::from_minor(-63_151), "{july:?}");
-    let september =
-        books::aging(&ledger, "aquamentor", Book::Payable, NaiveDate::from_ymd_opt(2026, 9, 30).unwrap())
-            .unwrap();
+    let september = books::aging(
+        &ledger,
+        "aquamentor",
+        Book::Payable,
+        NaiveDate::from_ymd_opt(2026, 9, 30).unwrap(),
+    )
+    .unwrap();
     assert_eq!(september.totals.total, Money::ZERO, "{september:?}");
 }

@@ -28,8 +28,8 @@ pub use classes::{map_classes, ClassMapping, MappedClass};
 pub use driver::{run, ImportError, ImportOptions, ImportReport};
 pub use opening::{boundary_year, opening_balance_entry, TbAgreement};
 pub use translate::{
-    qbo_document_id, translate, ClassFallback, ClassSource, ItemContext, TranslateContext, TranslateError,
-    Translated,
+    qbo_document_id, translate, ClassFallback, ClassSource, ItemContext, TranslateContext,
+    TranslateError, Translated,
 };
 
 /// `opening_balance_entry` and the §7 nightly diff (`crate::report`) both once
@@ -45,6 +45,5 @@ pub use crate::report::QboTbRow;
 /// needs the raw masters, so the fetch itself stays `pub(crate)` on
 /// [`driver`].
 pub(crate) use driver::{
-    build_exempt_customers, build_item_contexts, parsed_accounts, parsed_classes,
-    translate_context,
+    build_exempt_customers, build_item_contexts, parsed_accounts, parsed_classes, translate_context,
 };

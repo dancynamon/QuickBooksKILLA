@@ -257,7 +257,12 @@ fn a_transfer_and_a_journal_entry_with_the_same_qbo_id_both_post() {
 
     let ledger = Ledger::open_in_memory().unwrap();
     ledger
-        .create_company("aquamentor", "Aquamentor LLC", Some(realm().as_str()), now())
+        .create_company(
+            "aquamentor",
+            "Aquamentor LLC",
+            Some(realm().as_str()),
+            now(),
+        )
         .unwrap();
     let report = import_replica(
         &ledger,
@@ -268,7 +273,11 @@ fn a_transfer_and_a_journal_entry_with_the_same_qbo_id_both_post() {
         now(),
     )
     .unwrap();
-    assert!(report.rejected.is_empty(), "rejected: {:?}", report.rejected);
+    assert!(
+        report.rejected.is_empty(),
+        "rejected: {:?}",
+        report.rejected
+    );
     assert_eq!(report.posted, 2);
     let as_of = NaiveDate::from_ymd_opt(2026, 12, 31).unwrap();
     let tb = report::trial_balance(&ledger, "aquamentor", as_of).unwrap();

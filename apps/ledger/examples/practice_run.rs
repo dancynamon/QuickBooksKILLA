@@ -117,8 +117,10 @@ fn read_qbo_tb(path: &Path) -> Result<Vec<QboTbRow>, String> {
         let [id, name, balance] = fields[..] else {
             return Err(format!("{}: bad row {line:?}", path.display()));
         };
-        let value: rust_decimal::Decimal =
-            balance.trim().parse().map_err(|e| format!("{balance:?}: {e}"))?;
+        let value: rust_decimal::Decimal = balance
+            .trim()
+            .parse()
+            .map_err(|e| format!("{balance:?}: {e}"))?;
         let minor = (value * rust_decimal::Decimal::from(100))
             .round()
             .try_into()
@@ -142,7 +144,11 @@ fn csv_field(raw: &str) -> String {
 
 fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
     if args.db.exists() {
-        return Err(format!("{} exists; the practice run only builds a fresh ledger", args.db.display()).into());
+        return Err(format!(
+            "{} exists; the practice run only builds a fresh ledger",
+            args.db.display()
+        )
+        .into());
     }
     fs::create_dir_all(&args.out)?;
     let realm = RealmId::parse(args.realm.clone())?;
@@ -160,12 +166,17 @@ fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
         }),
         ..ImportOptions::default()
     };
-    let import = pipeline::import_replica(&ledger, &replica, &realm, COMPANY, &options, Utc::now())?;
+    let import =
+        pipeline::import_replica(&ledger, &replica, &realm, COMPANY, &options, Utc::now())?;
     let import_secs = started.elapsed().as_secs_f64();
     fs::write(args.out.join("import.txt"), import.render_text())?;
     let mut rejected = String::from("document_id,reason\n");
     for row in &import.rejected {
-        rejected.push_str(&format!("{},{}\n", csv_field(&row.document_id), csv_field(&row.reason)));
+        rejected.push_str(&format!(
+            "{},{}\n",
+            csv_field(&row.document_id),
+            csv_field(&row.reason)
+        ));
     }
     fs::write(args.out.join("rejected.csv"), rejected)?;
     println!(
@@ -181,16 +192,28 @@ fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
 
     let started = Instant::now();
     let opening_rows = read_qbo_tb(&args.qbo_dir.join(format!("tb-{}.csv", args.opening)))?;
-    let opening = pipeline::apply_opening_balance(&ledger, COMPANY, args.opening, &opening_rows, Utc::now())?;
-    println!("opening {} as of {}: {:.1}s", opening.document_id, args.opening, started.elapsed().as_secs_f64());
+    let opening =
+        pipeline::apply_opening_balance(&ledger, COMPANY, args.opening, &opening_rows, Utc::now())?;
+    println!(
+        "opening {} as of {}: {:.1}s",
+        opening.document_id,
+        args.opening,
+        started.elapsed().as_secs_f64()
+    );
 
     for &as_of in &args.as_of {
         let started = Instant::now();
         let tb = report::trial_balance(&ledger, COMPANY, as_of)?;
         let qbo = read_qbo_tb(&args.qbo_dir.join(format!("tb-{as_of}.csv")))?;
         let diff = report::tb_diff(&tb, &qbo, &TierRules::default())?;
-        fs::write(args.out.join(format!("tbdiff-{as_of}.txt")), diff.render_text(COMPANY, as_of))?;
-        fs::write(args.out.join(format!("tbdiff-{as_of}.csv")), diff.render_csv())?;
+        fs::write(
+            args.out.join(format!("tbdiff-{as_of}.txt")),
+            diff.render_text(COMPANY, as_of),
+        )?;
+        fs::write(
+            args.out.join(format!("tbdiff-{as_of}.csv")),
+            diff.render_csv(),
+        )?;
 
         let mut per_account = String::from("number,source_ref,needs_mapping,name,balance\n");
         for row in tb.rows.iter().filter(|r| !r.balance.is_zero()) {
@@ -209,7 +232,12 @@ fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
             let aging = books::aging(&ledger, COMPANY, book, as_of)?;
             let mut out = String::from("contact_id,name,total\n");
             for row in &aging.rows {
-                out.push_str(&format!("{},{},{}\n", row.contact_id, csv_field(&row.contact_name), money(row.total)));
+                out.push_str(&format!(
+                    "{},{},{}\n",
+                    row.contact_id,
+                    csv_field(&row.contact_name),
+                    money(row.total)
+                ));
             }
             out.push_str(&format!(",TOTAL,{}\n", money(aging.totals.total)));
             fs::write(args.out.join(format!("aging-{tag}-{as_of}.csv")), out)?;

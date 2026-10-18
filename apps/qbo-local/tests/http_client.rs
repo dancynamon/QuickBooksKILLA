@@ -701,8 +701,14 @@ fn report_hits_the_reports_path_with_the_given_params_and_parses() {
         path,
         format!("/v3/company/{}/reports/TrialBalance", realm().as_str())
     );
-    assert_eq!(query.get("start_date").map(String::as_str), Some("2026-01-01"));
-    assert_eq!(query.get("end_date").map(String::as_str), Some("2026-09-10"));
+    assert_eq!(
+        query.get("start_date").map(String::as_str),
+        Some("2026-01-01")
+    );
+    assert_eq!(
+        query.get("end_date").map(String::as_str),
+        Some("2026-09-10")
+    );
     assert_eq!(
         query.get("accounting_method").map(String::as_str),
         Some("Accrual")
@@ -730,12 +736,25 @@ fn report_only_sends_the_params_that_are_given() {
     let mut client = fresh_client(&server, directory.path());
 
     client
-        .report(&realm(), ReportName::AgedReceivables, &ReportParams::default())
+        .report(
+            &realm(),
+            ReportName::AgedReceivables,
+            &ReportParams::default(),
+        )
         .unwrap();
 
     let query = captured.lock().unwrap().clone().unwrap();
-    for absent in ["start_date", "end_date", "accounting_method", "date_macro", "aging_method"] {
-        assert!(!query.contains_key(absent), "unexpected {absent} in {query:?}");
+    for absent in [
+        "start_date",
+        "end_date",
+        "accounting_method",
+        "date_macro",
+        "aging_method",
+    ] {
+        assert!(
+            !query.contains_key(absent),
+            "unexpected {absent} in {query:?}"
+        );
     }
 }
 
@@ -764,8 +783,14 @@ fn a_trial_balance_as_of_a_date_sends_that_date_as_start_and_end() {
         ..ReportParams::default()
     };
     let query = captured_report_query(ReportName::TrialBalance, &params);
-    assert_eq!(query.get("start_date").map(String::as_str), Some("2026-06-30"));
-    assert_eq!(query.get("end_date").map(String::as_str), Some("2026-06-30"));
+    assert_eq!(
+        query.get("start_date").map(String::as_str),
+        Some("2026-06-30")
+    );
+    assert_eq!(
+        query.get("end_date").map(String::as_str),
+        Some("2026-06-30")
+    );
 }
 
 /// An aging report's as-of date is `report_date`; QBO ignores `end_date`
@@ -779,7 +804,10 @@ fn an_aging_report_sends_its_as_of_date_as_report_date() {
             ..ReportParams::default()
         };
         let query = captured_report_query(name, &params);
-        assert_eq!(query.get("report_date").map(String::as_str), Some("2026-07-31"));
+        assert_eq!(
+            query.get("report_date").map(String::as_str),
+            Some("2026-07-31")
+        );
         assert!(!query.contains_key("end_date"), "{query:?}");
         assert!(!query.contains_key("start_date"), "{query:?}");
     }

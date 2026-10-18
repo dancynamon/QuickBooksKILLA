@@ -80,7 +80,10 @@ fn the_real_binary_speaks_jsonrpc_over_stdio_and_writes_nothing_else_to_stdout()
         responses[0]["result"]["protocolVersion"],
         json!("2025-06-18")
     );
-    assert_eq!(responses[0]["result"]["serverInfo"]["name"], json!("ledger"));
+    assert_eq!(
+        responses[0]["result"]["serverInfo"]["name"],
+        json!("ledger")
+    );
 
     assert_eq!(responses[1]["id"], json!(2));
     let tools = responses[1]["result"]["tools"].as_array().unwrap();

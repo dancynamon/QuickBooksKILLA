@@ -356,7 +356,11 @@ mod tests {
     #[test]
     fn parse_trial_balance_reads_leaves_and_ignores_summaries() {
         let rows = parse_trial_balance(&trial_balance_json()).unwrap();
-        assert_eq!(rows.len(), 3, "the two section Summary rows must not appear: {rows:?}");
+        assert_eq!(
+            rows.len(),
+            3,
+            "the two section Summary rows must not appear: {rows:?}"
+        );
 
         assert_eq!(rows[0].qbo_account_id.as_deref(), Some("35"));
         assert_eq!(rows[0].name, "Checking");
@@ -402,10 +406,7 @@ mod tests {
             credit: Money::ZERO,
         }];
         let csv = trial_balance_csv(&rows);
-        assert_eq!(
-            csv,
-            "qbo_account_id,name,balance\n1,Fees  Bank,1.00\n"
-        );
+        assert_eq!(csv, "qbo_account_id,name,balance\n1,Fees  Bank,1.00\n");
     }
 
     fn aging_json() -> Value {
@@ -441,7 +442,11 @@ mod tests {
     #[test]
     fn parse_aging_reads_the_seven_columns_and_ignores_the_grand_total() {
         let rows = parse_aging(&aging_json()).unwrap();
-        assert_eq!(rows.len(), 1, "the trailing Total row has no ColData of its own: {rows:?}");
+        assert_eq!(
+            rows.len(),
+            1,
+            "the trailing Total row has no ColData of its own: {rows:?}"
+        );
         let row = &rows[0];
         assert_eq!(row.entity_id.as_deref(), Some("31"));
         assert_eq!(row.name, "Blue Harbor Swim Club");
@@ -540,8 +545,8 @@ mod tests {
             value: trial_balance_json(),
         };
         let directory = tempfile::tempdir().unwrap();
-        let written = write_year_end_snapshots(&mut client, &realm(), 2024..=2025, directory.path())
-            .unwrap();
+        let written =
+            write_year_end_snapshots(&mut client, &realm(), 2024..=2025, directory.path()).unwrap();
 
         assert_eq!(written.len(), 2);
         for (year, path) in [(2024, &written[0]), (2025, &written[1])] {

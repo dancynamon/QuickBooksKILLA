@@ -11,7 +11,10 @@ const REALM: &str = "1234567890123456";
 /// `apps/qbo-local/tests/fixtures/synthetic/reports/`, the fixtures the
 /// report/snapshots commands below replay against.
 fn fixtures_dir() -> &'static Path {
-    Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/synthetic"))
+    Path::new(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/synthetic"
+    ))
 }
 
 fn qbo_local(args: &[&str]) -> Output {
@@ -47,7 +50,11 @@ fn report_trial_balance_replays_and_writes_the_tbdiff_csv_shape() {
         "--replay",
         fixtures_dir().to_str().unwrap(),
     ]);
-    assert!(output.status.success(), "report failed: {}", stderr(&output));
+    assert!(
+        output.status.success(),
+        "report failed: {}",
+        stderr(&output)
+    );
 
     let csv = std::fs::read_to_string(&out).unwrap();
     let mut lines = csv.lines();
@@ -79,7 +86,11 @@ fn report_ar_aging_replays_and_ignores_the_grand_total_row() {
         "--replay",
         fixtures_dir().to_str().unwrap(),
     ]);
-    assert!(output.status.success(), "report failed: {}", stderr(&output));
+    assert!(
+        output.status.success(),
+        "report failed: {}",
+        stderr(&output)
+    );
 
     let csv = std::fs::read_to_string(&out).unwrap();
     let mut lines = csv.lines();
@@ -144,7 +155,11 @@ fn report_also_records_when_record_dir_is_given() {
         "--record",
         record_dir.to_str().unwrap(),
     ]);
-    assert!(output.status.success(), "report failed: {}", stderr(&output));
+    assert!(
+        output.status.success(),
+        "report failed: {}",
+        stderr(&output)
+    );
 
     assert!(record_dir
         .join("reports/TrialBalance-none-2026-09-10-Accrual-none-none.json")
@@ -205,5 +220,9 @@ fn snapshots_rejects_from_year_after_to_year() {
         fixtures_dir().to_str().unwrap(),
     ]);
     assert_eq!(output.status.code(), Some(2));
-    assert!(stderr(&output).contains("--from-year"), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains("--from-year"),
+        "{}",
+        stderr(&output)
+    );
 }

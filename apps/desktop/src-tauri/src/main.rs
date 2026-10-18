@@ -99,7 +99,11 @@ fn ledger_query(state: State<AppState>, tool: String, args: Value) -> Result<Val
 /// Where `BUNZBOOKS_SELFTEST`'s page script reports. Refused outside self-test
 /// mode, so a page can never use it to quit the app.
 #[tauri::command]
-fn selftest_report(app: tauri::AppHandle, state: State<AppState>, report: Value) -> Result<(), String> {
+fn selftest_report(
+    app: tauri::AppHandle,
+    state: State<AppState>,
+    report: Value,
+) -> Result<(), String> {
     let selftest = state
         .selftest
         .as_ref()
@@ -153,7 +157,10 @@ fn open_replica() -> (Result<Mutex<Store>, String>, Vec<Value>) {
             (Ok(Mutex::new(store)), realms)
         }
         Err(err) => {
-            let why = format!("failed to open the replica {} read-only: {err}", path.display());
+            let why = format!(
+                "failed to open the replica {} read-only: {err}",
+                path.display()
+            );
             eprintln!("bunzbooks: {why}");
             (Err(why), Vec::new())
         }
@@ -176,8 +183,8 @@ fn open_ledger() -> (Ledger, String) {
             .unwrap_or_else(|err| panic!("failed to create {}: {err}", parent.display()));
     }
     let is_new = !path.exists();
-    let ledger =
-        Ledger::open(&path).unwrap_or_else(|err| panic!("failed to open {}: {err}", path.display()));
+    let ledger = Ledger::open(&path)
+        .unwrap_or_else(|err| panic!("failed to open {}: {err}", path.display()));
     if is_default_scratch || is_new {
         let display_name = match company.as_str() {
             "waterline" => "WaterLine CNC (scratch)",
@@ -185,7 +192,9 @@ fn open_ledger() -> (Ledger, String) {
         };
         ledger
             .create_company(&company, display_name, None, chrono::Utc::now())
-            .unwrap_or_else(|err| panic!("failed to seed {company:?} in {}: {err}", path.display()));
+            .unwrap_or_else(|err| {
+                panic!("failed to seed {company:?} in {}: {err}", path.display())
+            });
     }
     eprintln!(
         "bunzbooks: ledger {} company {company}{}",
@@ -199,7 +208,10 @@ fn open_ledger() -> (Ledger, String) {
 /// `js/data/realms.js` (the shipped list is invented placeholder data), and in
 /// self-test mode the self-test itself.
 fn initialization_script(realms: &[Value], selftest: bool) -> String {
-    let mut script = format!("window.__BUNZBOOKS_REALMS__ = {};\n", Value::from(realms.to_vec()));
+    let mut script = format!(
+        "window.__BUNZBOOKS_REALMS__ = {};\n",
+        Value::from(realms.to_vec())
+    );
     if selftest {
         script.push_str(SELFTEST_JS);
     }
@@ -250,11 +262,13 @@ window.addEventListener("load", () => setTimeout(async () => {
 fn main() {
     let (store, realms) = open_replica();
     let (ledger, ledger_company) = open_ledger();
-    let selftest = std::env::var("BUNZBOOKS_SELFTEST").is_ok_and(|v| v == "1").then(|| SelfTest {
-        exit_after_secs: std::env::var("BUNZBOOKS_SELFTEST_EXIT_AFTER")
-            .ok()
-            .and_then(|v| v.parse().ok()),
-    });
+    let selftest = std::env::var("BUNZBOOKS_SELFTEST")
+        .is_ok_and(|v| v == "1")
+        .then(|| SelfTest {
+            exit_after_secs: std::env::var("BUNZBOOKS_SELFTEST_EXIT_AFTER")
+                .ok()
+                .and_then(|v| v.parse().ok()),
+        });
     let init_script = initialization_script(&realms, selftest.is_some());
 
     tauri::Builder::default()
@@ -264,7 +278,11 @@ fn main() {
             ledger_company,
             selftest,
         })
-        .invoke_handler(tauri::generate_handler![query, ledger_query, selftest_report])
+        .invoke_handler(tauri::generate_handler![
+            query,
+            ledger_query,
+            selftest_report
+        ])
         .setup(move |app| {
             // `tauri.conf.json`'s window has `"create": false` so it can be
             // built here with the initialization script attached.

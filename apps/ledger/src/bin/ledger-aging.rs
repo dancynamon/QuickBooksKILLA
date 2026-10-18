@@ -60,7 +60,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             csv.push_str(&row(r));
         }
         std::fs::write(out.join(format!("{tag}-{as_of}.csv")), csv)?;
-        println!("{tag} {as_of}: {} contacts, total {}", aging.rows.len(), money(aging.totals.total));
+        println!(
+            "{tag} {as_of}: {} contacts, total {}",
+            aging.rows.len(),
+            money(aging.totals.total)
+        );
     }
     Ok(())
 }
