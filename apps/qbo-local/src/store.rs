@@ -473,6 +473,18 @@ impl Store {
     }
 
     /// Writes stay off until explicitly enabled, per realm, one realm at a time.
+    /// Write a consistent copy of the whole replica — outbox included — to a
+    /// new file (`DESIGN.md` §8). `VACUUM INTO` reads inside one transaction,
+    /// so the copy is a single point in time even while sync is writing, and
+    /// it refuses to overwrite an existing file.
+    pub fn snapshot_to(&self, path: &std::path::Path) -> Result<(), StoreError> {
+        let target = path
+            .to_str()
+            .ok_or_else(|| StoreError::Corrupt(format!("snapshot path is not UTF-8: {}", path.display())))?;
+        self.connection.execute("VACUUM INTO ?1", params![target])?;
+        Ok(())
+    }
+
     /// Every registered realm — the company switcher's list.
     pub fn realms(&self) -> Result<Vec<RealmRow>, StoreError> {
         let mut statement = self.connection.prepare(

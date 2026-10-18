@@ -43,7 +43,7 @@ backend in §2.1. Never in the repo, never in a dotfile Dropbox syncs.
 
 ## 1. Where the work stands
 
-`cargo test` — 240 tests, all offline, all green. `cargo clippy --all-targets` —
+`cargo test` — 247 tests, all offline, all green. `cargo clippy --all-targets` —
 clean.
 
 Built and tested:
@@ -67,6 +67,7 @@ Built and tested:
 | `api` | The UI's read-only command surface; one `dispatch` behind both front doors |
 | `serve` | Loopback dev server over `api` for browser testing |
 | `demo` | Seeded synthetic book; no real names, `.invalid` emails |
+| `safety` | §8: `AuditedClient` write audit (JSONL, fsynced, failure is transient so the retry replays), dated snapshots with rotation that only touches its own `snapshot-YYYY-MM-DD.db` files |
 | `ui/` | React UI (registers, document + chain, contact, `⌘K` palette, status bar) |
 | `../qbo-local-desktop` | Tauri 2 shell: one `api` command, replica from `QBO_LOCAL_DB` or the app home |
 

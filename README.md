@@ -31,7 +31,7 @@ than engineering judgement.
 ## Build
 
 ```sh
-cargo test          # 240 tests, all offline
+cargo test          # 247 tests, all offline
 cargo clippy --all-targets
 cargo run --bin qbo-local
 
@@ -83,6 +83,9 @@ Built and tested:
   chrome, light/dark, text scaling. Served by `qbo-local serve` or the Tauri
   shell in `apps/qbo-local-desktop`; both call one `api::dispatch`
 - Synthetic book generator (`demo`) for UI work and §11 measurements
+- §8 safety nets for M2: `AuditedClient` appends every QBO write (request,
+  `RequestId`, result) to an fsynced JSONL file; `snapshot` writes a dated
+  `VACUUM INTO` copy of the replica, outbox included, keeping the newest N
 
 Not built yet: writes from the UI (M2, gated), the trial-balance diff (§7.5,
 ledger territory), the Tauri shell, the React UI.

@@ -16,6 +16,7 @@
 //! ```text
 //! qbo-local demo --db <path> [--invoices N]     # write a synthetic book
 //! qbo-local serve --db <path> [--port 8780]     # UI + API on 127.0.0.1
+//! qbo-local snapshot --db <path> --dir <dir> [--keep 14]   # dated copy, rotated
 //! ```
 
 use chrono::Utc;
@@ -40,6 +41,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         None | Some("status") => status(),
         Some("demo") => offline::demo(&args[1..]),
         Some("serve") => offline::serve(&args[1..]),
+        Some("snapshot") => offline::snapshot(&args[1..]),
         #[cfg(feature = "live")]
         Some(command) => live::run(command, &args[1..]),
         #[cfg(not(feature = "live"))]
@@ -141,6 +143,28 @@ mod offline {
             started.elapsed().as_secs_f64(),
             demo::DEMO_REALM
         );
+        Ok(())
+    }
+
+    /// Run nightly from launchd or cron. Keeps the newest `--keep` dated
+    /// snapshots in `--dir` and removes older ones it wrote itself.
+    pub fn snapshot(args: &[String]) -> Result<(), Error> {
+        let db = PathBuf::from(value(args, "--db").ok_or("--db is required")?);
+        let dir = PathBuf::from(value(args, "--dir").ok_or("--dir is required")?);
+        if dir.to_string_lossy().to_lowercase().contains("dropbox") {
+            return Err("refusing a snapshot directory inside Dropbox".into());
+        }
+        let keep: usize = value(args, "--keep").unwrap_or("14").parse()?;
+        let store = Store::open(&db)?;
+        let report = qbo_local::safety::snapshot_and_rotate(&store, &dir, keep, Utc::now())?;
+        match &report.written {
+            Some(path) => println!("wrote {}", path.display()),
+            None => println!("today's snapshot already exists"),
+        }
+        for path in &report.removed {
+            println!("removed {}", path.display());
+        }
+        println!("{} snapshots kept", report.kept.len());
         Ok(())
     }
 

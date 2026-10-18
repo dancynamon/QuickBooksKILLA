@@ -11,6 +11,7 @@
 //! - [`domain`]   — §2: realm scoping, entity types
 //! - [`store`]    — §3: replica schema and migrations
 //! - [`project`]  — §3.2: raw payloads to the parsed projection
+//! - [`safety`]   — §8: write audit log and dated replica snapshots
 //! - [`serve`]    — loopback dev server over [`api`] for browser testing
 //! - [`sync`]     — §4: CDC cursor strategy and its failure modes
 //! - [`driver`]   — §4: the loop that runs them against a client and a store
@@ -36,6 +37,7 @@ pub mod outbox;
 pub mod project;
 pub mod ratelimit;
 pub mod store;
+pub mod safety;
 pub mod serve;
 pub mod sync;
 pub mod worker;
