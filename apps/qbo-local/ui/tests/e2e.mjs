@@ -28,7 +28,8 @@ const started = Date.now();
 await page.goto(`${base}/`);
 await page.waitForSelector(".grid tbody tr[data-index]");
 console.log(`cold load to register: ${Date.now() - started} ms`);
-assert.match(await page.textContent(".toolbar .muted"), /^9,000 of 9,000/);
+const [shown, total] = (await page.textContent(".toolbar .muted")).match(/[\d,]+/g).map((n) => Number(n.replace(/,/g, "")));
+assert.ok(total >= 9000 && shown === total, "the whole invoice register loads");
 
 // Virtualized: thousands of rows, a few dozen in the DOM.
 assert.ok((await page.locator(".grid tbody tr[data-index]").count()) < 120);

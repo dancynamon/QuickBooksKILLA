@@ -55,3 +55,30 @@ export const DOC_PLURALS: Record<string, string> = {
   JournalEntry: "Journal entries",
   Purchase: "Expenses",
 };
+
+// Exact decimal arithmetic for the editor's line amounts, on scaled BigInts.
+// Mirrors the server's LineExtension rounding (half away from zero, to the
+// cent) so the amount a person sees is the amount that will be sent.
+function toScaled(raw: string): { value: bigint; scale: number } | null {
+  const text = raw.trim().replace(/,/g, "");
+  if (!/^-?\d*(\.\d*)?$/.test(text) || text === "" || text === "-" || text === ".") return null;
+  const negative = text.startsWith("-");
+  const [whole, frac = ""] = text.replace("-", "").split(".");
+  const value = BigInt((whole || "0") + frac) * (negative ? -1n : 1n);
+  return { value, scale: frac.length };
+}
+
+export function lineAmountMinor(qty: string, rate: string): number | null {
+  const q = toScaled(qty);
+  const r = toScaled(rate);
+  if (!q || !r) return null;
+  const product = q.value * r.value;
+  const scale = q.scale + r.scale;
+  if (scale <= 2) return Number(product * 10n ** BigInt(2 - scale));
+  const divisor = 10n ** BigInt(scale - 2);
+  const negative = product < 0n;
+  const abs = negative ? -product : product;
+  let cents = abs / divisor;
+  if ((abs % divisor) * 2n >= divisor) cents += 1n;
+  return Number(negative ? -cents : cents);
+}

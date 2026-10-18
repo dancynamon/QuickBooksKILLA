@@ -845,7 +845,7 @@ Measured through the HTTP dev server, so the Tauri IPC path will differ.
 
 | # | Item | Blocks |
 |---|---|---|
-| 1 | Confirm §0 ⚠️ items against `developer.intuit.com` — batch limit, CDC entity exclusions, `RequestId` scope | M2 write path |
+| 1 | Confirm §0 ⚠️ items against `developer.intuit.com` — batch limit, CDC entity exclusions, `RequestId` scope | Turning M2 writes on for production (the code is built; DECISIONS D14) |
 | 2 | OAuth client id/secret and a sandbox company, on the machine that will run the first live sync | M0 completion |
 | 3 | Confirm QBO's tax rounding mode (§1) | ledger project, not this one |
 | 4 | Confirm the query endpoint accepts a `MetaData.LastUpdatedTime` range and honours `ORDERBY` on it (§4.3) — CDC truncation recovery depends on it | M1 |

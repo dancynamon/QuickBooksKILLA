@@ -31,7 +31,7 @@ than engineering judgement.
 ## Build
 
 ```sh
-cargo test          # 253 tests, all offline
+cargo test          # 278 tests, all offline
 cargo clippy --all-targets
 cargo run --bin qbo-local
 
@@ -39,6 +39,8 @@ cargo run --bin qbo-local
 cargo run --release --bin qbo-local -- demo --db /tmp/demo.db --invoices 9000
 (cd apps/qbo-local/ui && npm install && npm run build && npm test)
 cargo run --release --bin qbo-local -- serve --db /tmp/demo.db   # http://127.0.0.1:8780/
+# ... or with writes landing in a stand-in QuickBooks (synthetic book only)
+cargo run --release --bin qbo-local -- serve --db /tmp/demo.db --demo-writes
 
 # Desktop shell (own workspace; needs a webview toolchain — Xcode CLT on macOS)
 (cd apps/qbo-local-desktop && cargo install tauri-cli --version "^2" && cargo tauri build)
@@ -90,7 +92,13 @@ Built and tested:
   `RequestId`, result) to an fsynced JSONL file; `snapshot` writes a dated
   `VACUUM INTO` copy of the replica, outbox included, keeping the newest N
 
-Not built yet: writes from the UI (M2, gated), the trial-balance diff (§7.5,
+- M2 write path, built and switched off: invoice, estimate and sales-receipt
+  editor, new customers usable before QuickBooks has them, a sync queue to
+  retry or discard what QuickBooks refused, all through the durable outbox
+  and the write gate (`qbo-local writes`; DECISIONS D14). Try it end to end
+  on the synthetic book with `serve --demo-writes`
+
+Not built yet: the trial-balance diff (§7.5,
 ledger territory), the Tauri shell, the React UI.
 
 The first live authentication run should happen wherever the OAuth credentials

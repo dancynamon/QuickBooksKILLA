@@ -240,6 +240,9 @@ pub struct WriteReport {
     /// Records a crash had left `in_flight`, returned to the queue.
     pub recovered: usize,
     pub drain: DrainReport,
+    /// What landed this pass, as `(type, QBO id)`: the records a caller may
+    /// want to re-read rather than wait for the next poll.
+    pub landed: Vec<(EntityType, String)>,
 }
 
 /// One pass: recover, drain, persist every state change and id mapping.
@@ -282,10 +285,14 @@ pub fn drain_once(
     let mut persist = |record: &OutboxRecord| store.save_outbox_state(record).map_err(|e| e.to_string());
     report.drain = drainer.drain_with(&mut records, client, now, &mut persist);
 
-    for record in records.iter().filter(|r| r.state == OutboxState::Applied && r.operation == Operation::Create) {
-        if let Some(qbo_id) = drainer.resolved_id(realm, &record.local_entity_id) {
-            store.record_id_mapping(realm, &record.local_entity_id, record.entity_type, qbo_id, now)?;
+    for record in records.iter().filter(|r| r.state == OutboxState::Applied && r.updated_at == now) {
+        let qbo_id = drainer.resolved_id(realm, &record.local_entity_id).cloned();
+        if record.operation == Operation::Create {
+            if let Some(qbo_id) = &qbo_id {
+                store.record_id_mapping(realm, &record.local_entity_id, record.entity_type, qbo_id, now)?;
+            }
         }
+        report.landed.push((record.entity_type, qbo_id.unwrap_or_else(|| record.local_entity_id.clone())));
     }
     Ok(report)
 }
@@ -444,6 +451,22 @@ mod tests {
         // A sandbox company needs none of it.
         store.set_realm_environment(&other, Environment::Sandbox).unwrap();
         assert!(check_enable(&store, &other, false, now()).is_ok());
+    }
+
+    #[test]
+    fn the_app_and_the_sync_process_share_one_file() {
+        // The desktop app queues; a separate `sync --watch` process drains.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("replica.db");
+        let app = Store::open(&path).unwrap();
+        app.register_realm(&realm(), "Test", now()).unwrap();
+        app.set_write_enabled(&realm(), true).unwrap();
+        let sync = Store::open(&path).unwrap();
+
+        let queued = queue_create(&app, &realm(), EntityType::Invoice, json!({ "DocNumber": "T-1" }), now()).unwrap();
+        let report = drain_once(&sync, &realm(), &mut MockQbo::new(now()), now()).unwrap();
+        assert_eq!(report.drain.applied, 1);
+        assert_eq!(app.outbox_record(queued.id).unwrap().unwrap().state, OutboxState::Applied);
     }
 
     #[test]

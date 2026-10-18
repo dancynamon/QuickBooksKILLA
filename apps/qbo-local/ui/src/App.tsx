@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Aging, api, ApiError, ContactType, DocType, Document, DocumentDetail, Hit, Item, Realm, SalesRow, SearchResult, Status } from "./api";
+import { Aging, api, ApiError, ContactType, Customer, DocType, Document, DocumentDetail, Draft, DraftLine, Hit, Item, Realm, SalesRow, SearchResult, Status, Write } from "./api";
 import { createContext, useContext } from "react";
-import { ago, DOC_LABELS, DOC_PLURALS, formatDate, formatDecimal, formatMoney } from "./format";
+import { ago, DOC_LABELS, DOC_PLURALS, formatDate, formatDecimal, formatMoney, lineAmountMinor } from "./format";
 
 // ---------------------------------------------------------------------------
 // Routing: the hash is the whole navigation state, so back/forward and a
@@ -15,6 +15,9 @@ type Route =
   | { view: "report"; report: Report }
   | { view: "items" }
   | { view: "item"; itemId: string }
+  | { view: "new"; docType: DocType }
+  | { view: "edit"; qboId: string }
+  | { view: "writes" }
   | { view: "doc"; qboId: string }
   | { view: "contact"; contactType: ContactType; contactId: string };
 
@@ -29,6 +32,9 @@ function parseRoute(hash: string): { realm: string | null; route: Route } {
   if (parts[2] === "report" && (parts[3] === "ar" || parts[3] === "ap" || parts[3] === "sales"))
     return { realm, route: { view: "report", report: parts[3] } };
   if (parts[2] === "items") return { realm, route: { view: "items" } };
+  if (parts[2] === "writes") return { realm, route: { view: "writes" } };
+  if (parts[2] === "new" && EDITABLE.includes(parts[3] as DocType)) return { realm, route: { view: "new", docType: parts[3] as DocType } };
+  if (parts[2] === "edit" && parts[3]) return { realm, route: { view: "edit", qboId: parts[3] } };
   if (parts[2] === "item" && parts[3]) return { realm, route: { view: "item", itemId: parts[3] } };
   if (parts[2] === "list" && parts[3] && parts[3] in DOC_LABELS)
     return { realm, route: { view: "list", docType: parts[3] as DocType } };
@@ -49,6 +55,12 @@ function href(realm: string, route: Route): string {
       return `#/r/${realm}/items`;
     case "item":
       return `#/r/${realm}/item/${encodeURIComponent(route.itemId)}`;
+    case "new":
+      return `#/r/${realm}/new/${route.docType}`;
+    case "edit":
+      return `#/r/${realm}/edit/${encodeURIComponent(route.qboId)}`;
+    case "writes":
+      return `#/r/${realm}/writes`;
   }
 }
 
@@ -94,6 +106,17 @@ function useClassName() {
   return (id: string | null) => (id ? classes[id] ?? id : "");
 }
 
+// Document types the editor writes; the rest are entered in QuickBooks.
+const EDITABLE: DocType[] = ["Invoice", "Estimate", "SalesReceipt"];
+
+// Whether this company takes writes, and a way to refresh the chrome after one.
+interface WriteState {
+  enabled: boolean;
+  environment: "production" | "sandbox";
+  refresh: () => void;
+}
+const Writes = createContext<WriteState>({ enabled: false, environment: "production", refresh: () => {} });
+
 const REPORT_LABELS: Record<Report, string> = {
   ar: "A/R aging",
   ap: "A/P aging",
@@ -136,6 +159,9 @@ export function App() {
   }, [realm]);
 
   // The chrome's sync state: polled, never something to go and look for.
+  // Faster while writes are in flight, so "queued" turns to "landed" promptly.
+  const [statusTick, setStatusTick] = useState(0);
+  const busy = (status?.outboxPending ?? 0) > 0;
   useEffect(() => {
     if (!realm) return;
     let live = true;
@@ -148,12 +174,12 @@ export function App() {
     const timer = window.setInterval(() => {
       load();
       setNow(Date.now());
-    }, 15_000);
+    }, busy ? 3_000 : 15_000);
     return () => {
       live = false;
       window.clearInterval(timer);
     };
-  }, [realm]);
+  }, [realm, busy, statusTick]);
 
   useEffect(() => {
     if (theme === "auto") delete document.documentElement.dataset.theme;
@@ -185,7 +211,14 @@ export function App() {
     window.location.hash = href(realm, next);
   };
 
+  const writeState: WriteState = {
+    enabled: status?.writeEnabled ?? false,
+    environment: status?.environment ?? "production",
+    refresh: () => setStatusTick((t) => t + 1),
+  };
+
   return (
+    <Writes.Provider value={writeState}>
     <Classes.Provider value={classes}>
     <div className="shell">
       <header className="chrome">
@@ -247,6 +280,14 @@ export function App() {
           <a className={route.view === "items" || route.view === "item" ? "rail-item active" : "rail-item"} href={href(realm, { view: "items" })}>
             <span>Products and services</span>
           </a>
+          <a className={route.view === "writes" ? "rail-item active" : "rail-item"} href={href(realm, { view: "writes" })}>
+            <span>Sync queue</span>
+            {status && status.outboxPending + status.outboxNeedsAttention > 0 && (
+              <span className={status.outboxNeedsAttention > 0 ? "rail-count crit-text num" : "rail-count num"}>
+                {status.outboxPending + status.outboxNeedsAttention}
+              </span>
+            )}
+          </a>
         </div>
         <div className="rail-group">
           <div className="rail-head">Reports</div>
@@ -267,16 +308,20 @@ export function App() {
         {route.view === "report" && route.report === "sales" && <SalesReport key={realm} realm={realm} />}
         {route.view === "items" && <ItemsView key={realm} realm={realm} go={go} />}
         {route.view === "item" && <ItemView key={`${realm}:${route.itemId}`} realm={realm} itemId={route.itemId} />}
+        {route.view === "new" && <Editor key={`${realm}:new:${route.docType}`} realm={realm} docType={route.docType} go={go} />}
+        {route.view === "edit" && <Editor key={`${realm}:edit:${route.qboId}`} realm={realm} qboId={route.qboId} go={go} />}
+        {route.view === "writes" && <WritesView key={realm} realm={realm} />}
         {route.view === "contact" && (
           <ContactView key={`${realm}:${route.contactId}`} realm={realm} contactType={route.contactType} contactId={route.contactId} go={go} />
         )}
       </main>
 
-      <StatusBar status={status} now={now} />
+      <StatusBar status={status} now={now} realm={realm} />
 
       {paletteOpen && <Palette realm={realm} go={go} close={() => setPaletteOpen(false)} />}
     </div>
     </Classes.Provider>
+    </Writes.Provider>
   );
 }
 
@@ -297,17 +342,18 @@ function Bun() {
 // Status bar
 // ---------------------------------------------------------------------------
 
-function StatusBar({ status, now }: { status: Status | null; now: number }) {
+function StatusBar({ status, now, realm }: { status: Status | null; now: number; realm: string }) {
   if (!status) return <footer className="statusbar">Status unavailable</footer>;
   const total = status.entityTypes.reduce((sum, t) => sum + t.count, 0);
   return (
     <footer className="statusbar" role="status">
       <span title={status.lastSynced ?? "never"}>Synced {ago(status.lastSynced, now)}</span>
-      <span className={status.outboxPending > 0 ? "pill warn" : "pill"}>{status.outboxPending} queued</span>
-      <span className={status.outboxNeedsAttention > 0 ? "pill crit" : "pill"}>{status.outboxNeedsAttention} need attention</span>
+      <a href={href(realm, { view: "writes" })} className={status.outboxPending > 0 ? "pill warn" : "pill"}>{status.outboxPending} queued</a>
+      <a href={href(realm, { view: "writes" })} className={status.outboxNeedsAttention > 0 ? "pill crit" : "pill"}>{status.outboxNeedsAttention} need attention</a>
       {status.quarantined > 0 && <span className="pill warn">{status.quarantined} quarantined</span>}
       <span className="spacer" />
       <span className="num">{total.toLocaleString()} records on disk</span>
+      {status.environment === "sandbox" && <span className="pill">Sandbox</span>}
       <span className={status.writeEnabled ? "pill warn" : "pill ok"}>{status.writeEnabled ? "Writes on" : "Read-only"}</span>
     </footer>
   );
@@ -443,6 +489,7 @@ function Register({ realm, docType, go }: { realm: string; docType: DocType; go:
           </label>
         )}
         <span className="spacer" />
+        {EDITABLE.includes(docType) && <NewButton realm={realm} docType={docType} />}
         {elapsed !== null && rows && (
           <span className="muted num">
             {visible.length.toLocaleString()} of {rows.length.toLocaleString()} · {elapsed.toFixed(0)} ms
@@ -525,6 +572,10 @@ function Register({ realm, docType, go }: { realm: string; docType: DocType; go:
 }
 
 function Badge({ doc }: { doc: Document }) {
+  if (doc.pendingWrite) {
+    const failed = doc.pendingWrite === "conflicted" || doc.pendingWrite === "rejected";
+    return <span className={failed ? "badge crit" : "badge warn"}>{doc.status}</span>;
+  }
   if (doc.balanceMinor !== null) {
     if (doc.balanceMinor === 0) return <span className="badge ok">Paid</span>;
     const overdue = doc.dueDate && doc.dueDate < new Date().toISOString().slice(0, 10);
@@ -542,9 +593,18 @@ function DocumentView({ realm, qboId, go }: { realm: string; qboId: string; go: 
   const [detail, setDetail] = useState<DocumentDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  const writes = useContext(Writes);
+  const [tick, setTick] = useState(0);
   useEffect(() => {
     api.document(realm, qboId).then(setDetail, (e: ApiError) => setError(e.message));
-  }, [realm, qboId]);
+  }, [realm, qboId, tick]);
+  // While a write about this document is on its way, look again until it lands.
+  const waiting = !!detail && (!!detail.document.pendingWrite || detail.openWrites.some((w) => w.state === "pending" || w.state === "in_flight"));
+  useEffect(() => {
+    if (!waiting) return;
+    const timer = window.setTimeout(() => setTick((t) => t + 1), 3_000);
+    return () => window.clearTimeout(timer);
+  }, [waiting, tick]);
 
   const className = useClassName();
   if (error) return <div className="error pad">{error}</div>;
@@ -562,8 +622,28 @@ function DocumentView({ realm, qboId, go }: { realm: string; qboId: string; go: 
         </h1>
         <Badge doc={d} />
         <span className="spacer" />
-        <span className="muted">Read-only replica · edit in QuickBooks</span>
+        {EDITABLE.includes(d.docType) && !d.pendingWrite && writes.enabled ? (
+          <a className="button" href={href(realm, { view: "edit", qboId: d.qboId })}>Edit</a>
+        ) : (
+          <span className="muted">{writes.enabled ? "Edit in QuickBooks" : "Read-only · edit in QuickBooks"}</span>
+        )}
       </div>
+      {d.pendingWrite && (
+        <p className={d.pendingWrite === "conflicted" || d.pendingWrite === "rejected" ? "banner crit" : "banner"}>
+          {d.pendingWrite === "rejected" || d.pendingWrite === "conflicted"
+            ? <>QuickBooks did not accept this document. <a href={href(realm, { view: "writes" })}>Open the sync queue</a> to retry or discard it.</>
+            : "Saved here. Not yet in QuickBooks: it will be sent in the background, and this page updates when it lands. Tax is added by QuickBooks."}
+        </p>
+      )}
+      {!d.pendingWrite && detail.openWrites.map((w) => (
+        <p key={w.id} className={w.state === "conflicted" || w.state === "rejected" ? "banner crit" : "banner"}>
+          {w.state === "conflicted"
+            ? <>Someone changed this {DOC_LABELS[d.docType].toLowerCase()} in QuickBooks after your edit was made. <a href={href(realm, { view: "writes" })}>Review it in the sync queue</a>.</>
+            : w.state === "rejected"
+              ? <>QuickBooks refused your edit: {w.lastError}. <a href={href(realm, { view: "writes" })}>Open the sync queue</a>.</>
+              : "Your edit is saved here and on its way to QuickBooks. The figures below are QuickBooks' until it lands."}
+        </p>
+      ))}
 
       <dl className="facts">
         <div>
@@ -1124,4 +1204,388 @@ function ItemView({ realm, itemId }: { realm: string; itemId: string }) {
       </div>
     </section>
   );
+}
+
+// ---------------------------------------------------------------------------
+// Writing (M2): the editor and the sync queue
+// ---------------------------------------------------------------------------
+
+function NewButton({ realm, docType }: { realm: string; docType: DocType }) {
+  const writes = useContext(Writes);
+  if (!writes.enabled) {
+    return (
+      <span className="button disabled" title="Writes are off for this company. They are turned on after the read-only period.">
+        New {DOC_LABELS[docType].toLowerCase()}
+      </span>
+    );
+  }
+  return (
+    <a className="button primary" href={href(realm, { view: "new", docType })}>
+      New {DOC_LABELS[docType].toLowerCase()}
+    </a>
+  );
+}
+
+const emptyLine = (): DraftLine => ({ itemId: null, description: "", qty: "1", rate: "", classId: null, taxable: false });
+
+const plusDays = (iso: string, days: number) => {
+  const d = new Date(iso + "T00:00:00");
+  d.setDate(d.getDate() + days);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+};
+
+function Editor({ realm, docType, qboId, go }: { realm: string; docType?: DocType; qboId?: string; go: (r: Route) => void }) {
+  const writes = useContext(Writes);
+  const classes = useContext(Classes);
+  const [draft, setDraft] = useState<Draft | null>(null);
+  const [customers, setCustomers] = useState<Customer[]>([]);
+  const [items, setItems] = useState<Item[]>([]);
+  const [customerText, setCustomerText] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [adding, setAdding] = useState<{ name: string; email: string } | null>(null);
+
+  useEffect(() => {
+    api.customers(realm).then(setCustomers, (e: ApiError) => setError(e.message));
+    api.items(realm).then((all) => setItems(all.filter((i) => i.active)), () => setItems([]));
+    if (qboId) {
+      api.documentDraft(realm, qboId).then(
+        (r) => {
+          setDraft({ ...r.draft, lines: r.draft.lines.length ? r.draft.lines : [emptyLine()] });
+          setCustomerText(r.contactName ?? "");
+        },
+        (e: ApiError) => setError(e.message),
+      );
+    } else if (docType) {
+      const today = todayIso();
+      setDraft({
+        docType,
+        customerId: "",
+        txnDate: today,
+        dueDate: docType === "Invoice" ? plusDays(today, 30) : null,
+        docNumber: null,
+        poNumber: null,
+        privateNote: null,
+        customerMemo: null,
+        classId: null,
+        lines: [emptyLine()],
+      });
+    }
+  }, [realm, docType, qboId]);
+
+  if (!writes.enabled) {
+    return <div className="pad">Writes are off for this company. They are turned on with <code>qbo-local writes --enable</code> after the read-only period.</div>;
+  }
+  if (!draft) return error ? <div className="error pad">{error}</div> : <div className="muted pad">Loading…</div>;
+
+  const set = (patch: Partial<Draft>) => setDraft({ ...draft, ...patch });
+  const setLine = (index: number, patch: Partial<DraftLine>) =>
+    set({ lines: draft.lines.map((l, i) => (i === index ? { ...l, ...patch } : l)) });
+  const amounts = draft.lines.map((l) => lineAmountMinor(l.qty, l.rate));
+  const subtotal = amounts.reduce<number>((sum, a) => sum + (a ?? 0), 0);
+  const label = DOC_LABELS[draft.docType];
+
+  const chooseCustomer = (text: string) => {
+    setCustomerText(text);
+    const match = customers.find((c) => c.displayName === text);
+    set({ customerId: match ? match.qboId : "" });
+  };
+
+  const chooseItem = (index: number, name: string) => {
+    const item = items.find((i) => i.name === name);
+    if (!item) {
+      setLine(index, { itemId: null, description: name });
+      return;
+    }
+    const line = draft.lines[index];
+    setLine(index, {
+      itemId: item.qboId,
+      description: line.description && line.itemId === null ? line.description : item.name,
+      rate: line.rate || formatDecimal(item.unitPrice).replace(/,/g, ""),
+    });
+  };
+
+  const addCustomer = async () => {
+    if (!adding) return;
+    setError(null);
+    try {
+      const created = await api.createCustomer(realm, adding.name, undefined, adding.email || undefined);
+      const customer: Customer = { qboId: created.entityId, displayName: created.displayName, companyName: null, pending: true };
+      setCustomers([...customers, customer]);
+      setCustomerText(created.displayName);
+      set({ customerId: created.entityId });
+      setAdding(null);
+      writes.refresh();
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  };
+
+  const save = async () => {
+    setError(null);
+    if (!draft.customerId) return setError("Choose a customer from the list, or add a new one.");
+    if (amounts.some((a) => a === null)) return setError("Every line needs a number for quantity and rate.");
+    setSaving(true);
+    try {
+      const result = await api.saveDocument(realm, draft, qboId);
+      writes.refresh();
+      go({ view: "doc", qboId: qboId ?? result.entityId });
+    } catch (e) {
+      setError((e as Error).message);
+      setSaving(false);
+    }
+  };
+
+  const onKey = (e: React.KeyboardEvent) => {
+    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "s") {
+      e.preventDefault();
+      void save();
+    }
+  };
+
+  const classNames = Object.entries(classes);
+
+  return (
+    <section className="document editor" onKeyDown={onKey}>
+      <div className="toolbar">
+        <a className="back" href={qboId ? href(realm, { view: "doc", qboId }) : href(realm, { view: "list", docType: draft.docType })}>
+          ← {qboId ? "Back" : DOC_PLURALS[draft.docType]}
+        </a>
+        <h1>{qboId ? `Edit ${label.toLowerCase()} ${draft.docNumber ?? ""}` : `New ${label.toLowerCase()}`}</h1>
+        <span className="spacer" />
+        {writes.environment === "sandbox" && <span className="pill">Sandbox</span>}
+        <button className="button primary" onClick={() => void save()} disabled={saving}>
+          {saving ? "Saving…" : "Save"} <kbd>{navigator.platform.includes("Mac") ? "⌘S" : "Ctrl S"}</kbd>
+        </button>
+      </div>
+      {error && <div className="error">{error}</div>}
+
+      <div className="form-grid">
+        <label className="field wide">
+          <span>Customer</span>
+          <input list="bb-customers" value={customerText} onChange={(e) => chooseCustomer(e.target.value)} placeholder="Start typing a name" autoFocus={!qboId} />
+          <datalist id="bb-customers">
+            {customers.map((c) => (
+              <option key={c.qboId} value={c.displayName}>{c.pending ? "new, not yet in QuickBooks" : c.companyName ?? ""}</option>
+            ))}
+          </datalist>
+          {!draft.customerId && customerText && !adding && (
+            <button className="link" onClick={() => setAdding({ name: customerText, email: "" })}>Add “{customerText}” as a new customer</button>
+          )}
+        </label>
+        <label className="field">
+          <span>Date</span>
+          <input type="date" value={draft.txnDate} onChange={(e) => set({ txnDate: e.target.value })} />
+        </label>
+        {draft.docType === "Invoice" && (
+          <label className="field">
+            <span>Due</span>
+            <input type="date" value={draft.dueDate ?? ""} onChange={(e) => set({ dueDate: e.target.value || null })} />
+          </label>
+        )}
+        <label className="field">
+          <span>No.</span>
+          <input value={draft.docNumber ?? ""} onChange={(e) => set({ docNumber: e.target.value || null })} placeholder="QuickBooks assigns" />
+        </label>
+        <label className="field">
+          <span>Customer PO</span>
+          <input value={draft.poNumber ?? ""} onChange={(e) => set({ poNumber: e.target.value || null })} />
+        </label>
+        {classNames.length > 0 && (
+          <label className="field">
+            <span>Class</span>
+            <select value={draft.classId ?? ""} onChange={(e) => set({ classId: e.target.value || null })}>
+              <option value="">None</option>
+              {classNames.map(([id, name]) => (
+                <option key={id} value={id}>{name}</option>
+              ))}
+            </select>
+          </label>
+        )}
+      </div>
+
+      {adding && (
+        <div className="inline-form">
+          <strong>New customer</strong>
+          <input value={adding.name} onChange={(e) => setAdding({ ...adding, name: e.target.value })} aria-label="Customer name" />
+          <input value={adding.email} onChange={(e) => setAdding({ ...adding, email: e.target.value })} placeholder="Billing email (optional)" aria-label="Billing email" />
+          <button className="button primary" onClick={() => void addCustomer()}>Add customer</button>
+          <button className="button" onClick={() => setAdding(null)}>Cancel</button>
+          <span className="muted">Usable on this {label.toLowerCase()} now; sent to QuickBooks first.</span>
+        </div>
+      )}
+
+      <datalist id="bb-items">
+        {items.map((i) => (
+          <option key={i.qboId} value={i.name}>{i.sku ?? ""}</option>
+        ))}
+      </datalist>
+      <div className="grid-wrap">
+        <table className="grid lines edit-lines">
+          <thead>
+            <tr>
+              <th>#</th>
+              <th>Product or service</th>
+              <th>Description</th>
+              <th className="r">Qty</th>
+              <th className="r">Rate</th>
+              <th className="r">Amount</th>
+              <th>Tax</th>
+              <th />
+            </tr>
+          </thead>
+          <tbody>
+            {draft.lines.map((line, i) => {
+              const itemName = items.find((it) => it.qboId === line.itemId)?.name ?? "";
+              return (
+                <tr key={i}>
+                  <td className="num muted">{i + 1}</td>
+                  <td><input list="bb-items" defaultValue={itemName} onBlur={(e) => chooseItem(i, e.target.value)} aria-label={`Line ${i + 1} product`} /></td>
+                  <td><input value={line.description ?? ""} onChange={(e) => setLine(i, { description: e.target.value })} aria-label={`Line ${i + 1} description`} /></td>
+                  <td className="r"><input className="num r" inputMode="decimal" value={line.qty} onChange={(e) => setLine(i, { qty: e.target.value })} aria-label={`Line ${i + 1} quantity`} /></td>
+                  <td className="r"><input className="num r" inputMode="decimal" value={line.rate} onChange={(e) => setLine(i, { rate: e.target.value })} aria-label={`Line ${i + 1} rate`} /></td>
+                  <td className={amounts[i] === null && line.rate ? "num r crit-text" : "num r"}>{amounts[i] === null ? (line.rate ? "?" : "") : formatMoney(amounts[i])}</td>
+                  <td><input type="checkbox" checked={line.taxable} onChange={(e) => setLine(i, { taxable: e.target.checked })} aria-label={`Line ${i + 1} taxable`} /></td>
+                  <td>
+                    {draft.lines.length > 1 && (
+                      <button className="link" onClick={() => set({ lines: draft.lines.filter((_, j) => j !== i) })} aria-label={`Remove line ${i + 1}`}>Remove</button>
+                    )}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+          <tfoot>
+            <tr>
+              <td colSpan={2}>
+                <button className="link" onClick={() => set({ lines: [...draft.lines, emptyLine()] })}>Add a line</button>
+              </td>
+              <td colSpan={3} className="r">Subtotal · tax is added by QuickBooks</td>
+              <td className="num r">{formatMoney(subtotal)}</td>
+              <td colSpan={2} />
+            </tr>
+          </tfoot>
+        </table>
+      </div>
+
+      <div className="form-grid">
+        <label className="field wide">
+          <span>Message on {label.toLowerCase()}</span>
+          <textarea rows={2} value={draft.customerMemo ?? ""} onChange={(e) => set({ customerMemo: e.target.value || null })} />
+        </label>
+        <label className="field wide">
+          <span>Internal note</span>
+          <textarea rows={2} value={draft.privateNote ?? ""} onChange={(e) => set({ privateNote: e.target.value || null })} />
+        </label>
+      </div>
+    </section>
+  );
+}
+
+function WritesView({ realm }: { realm: string }) {
+  const writes = useContext(Writes);
+  const [rows, setRows] = useState<Write[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [tick, setTick] = useState(0);
+  useEffect(() => {
+    api.outbox(realm).then(setRows, (e: ApiError) => setError(e.message));
+  }, [realm, tick]);
+  useEffect(() => {
+    const timer = window.setTimeout(() => setTick((t) => t + 1), 3_000);
+    return () => window.clearTimeout(timer);
+  }, [tick]);
+
+  const act = async (id: string, action: "retry" | "discard") => {
+    setError(null);
+    try {
+      await api.resolveWrite(realm, id, action);
+      writes.refresh();
+      setTick((t) => t + 1);
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  };
+
+  const failed = (rows ?? []).filter((r) => r.state === "conflicted" || r.state === "rejected");
+  const queued = (rows ?? []).filter((r) => r.state === "pending" || r.state === "in_flight");
+
+  return (
+    <section className="document">
+      <div className="toolbar">
+        <h1>Sync queue</h1>
+        <span className="spacer" />
+        <span className="muted">Writes saved here and not yet confirmed by QuickBooks. Nothing is dropped or merged without you.</span>
+      </div>
+      {error && <div className="error">{error}</div>}
+      {!rows && !error && <div className="muted pad">Loading…</div>}
+      {rows && rows.length === 0 && <p className="muted indent">Nothing waiting. Every saved change is in QuickBooks.</p>}
+      {failed.length > 0 && (
+        <>
+          <h2>Needs you ({failed.length})</h2>
+          <div className="grid-wrap">
+            <table className="grid">
+              <thead>
+                <tr><th>Change</th><th>What happened</th><th>Saved</th><th /></tr>
+              </thead>
+              <tbody>
+                {failed.map((w) => (
+                  <tr key={w.id}>
+                    <td>
+                      <WriteLink realm={realm} write={w} />
+                      <div className="muted">{w.operation === "create" ? "New" : "Edit"} · {w.entityType}</div>
+                    </td>
+                    <td className="wrap">
+                      <span className="badge crit">{w.status}</span>
+                      <div className="muted">{w.state === "conflicted" ? "Someone changed it in QuickBooks after this edit was made. Retry applies your edit on top of their version once the replica has it." : w.lastError}</div>
+                    </td>
+                    <td className="num muted">{new Date(w.createdAt).toLocaleString()}</td>
+                    <td className="actions">
+                      <button className="button" onClick={() => void act(w.id, "retry")}>Retry</button>
+                      <button className="button" onClick={() => void act(w.id, "discard")}>Discard</button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
+      {queued.length > 0 && (
+        <>
+          <h2>On the way ({queued.length})</h2>
+          <div className="grid-wrap">
+            <table className="grid">
+              <thead>
+                <tr><th>Change</th><th>Status</th><th className="r">Tries</th><th>Saved</th></tr>
+              </thead>
+              <tbody>
+                {queued.map((w) => (
+                  <tr key={w.id}>
+                    <td>
+                      <WriteLink realm={realm} write={w} />
+                      <div className="muted">{w.operation === "create" ? "New" : "Edit"} · {w.entityType}</div>
+                    </td>
+                    <td>
+                      <span className="badge warn">{w.blockedBy ? `Waiting for ${w.blockedBy}` : w.status}</span>
+                      {w.lastError && <div className="muted">Last try: {w.lastError}</div>}
+                    </td>
+                    <td className="num r muted">{w.attempts}</td>
+                    <td className="num muted">{new Date(w.createdAt).toLocaleString()}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
+    </section>
+  );
+}
+
+function WriteLink({ realm, write }: { realm: string; write: Write }) {
+  const isDocument = !["Customer", "Vendor", "Item"].includes(write.entityType);
+  if (isDocument) return <a href={href(realm, { view: "doc", qboId: write.entityId })}>{write.label}</a>;
+  if (write.entityType === "Customer" && !write.entityId.startsWith("local:"))
+    return <a href={href(realm, { view: "contact", contactType: "Customer", contactId: write.entityId })}>{write.label}</a>;
+  return <span>{write.label}</span>;
 }

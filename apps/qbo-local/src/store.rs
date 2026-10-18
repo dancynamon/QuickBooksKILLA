@@ -419,6 +419,10 @@ impl Store {
         // journal_mode returns a row, so it cannot go through execute_batch.
         let _: String =
             connection.query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))?;
+        // The desktop app and the sync process open the same file: the app
+        // queues writes while sync drains them and mirrors. Waiting briefly on
+        // the other's lock beats failing a save with "database is locked".
+        connection.busy_timeout(std::time::Duration::from_secs(5))?;
         connection.execute_batch(
             "PRAGMA foreign_keys = ON;
              PRAGMA synchronous = FULL;",
@@ -830,7 +834,9 @@ impl Store {
         Ok(report)
     }
 
-    fn all_entities(&self, realm: &RealmId) -> Result<Vec<MirroredEntity>, StoreError> {
+    /// Every mirrored entity of a realm: the reprojection source, and the
+    /// seed for a test double built from a replica.
+    pub fn all_entities(&self, realm: &RealmId) -> Result<Vec<MirroredEntity>, StoreError> {
         let mut statement = self.connection.prepare(
             "SELECT entity_type, qbo_id, sync_token, last_updated_utc, is_deleted, raw_json
              FROM entities WHERE realm_id = ?1

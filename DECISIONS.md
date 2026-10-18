@@ -232,3 +232,41 @@ that was never fully covered — the partial pages are already mirrored, so the
 re-sweep is idempotent, not wasted. And batching is now the normal path rather
 than an optimisation, which fixes the one-transaction-per-entity cost flagged in
 §11 for initial sync.
+
+## D14 — M2 write path: what was decided while building it
+
+18 Oct 2026, in build. Writes exist in code and stay off: no realm has them on.
+
+- **The gate is enforced in code, not only by a disabled button.** `writes::check_enable`
+  allows a sandbox company at any time; a production company only 14 days after its
+  first complete sweep, only with `--confirm` (the explicit go), and only while no
+  other production company has writes on. `queue_*` and `drain_once` refuse while a
+  realm's writes are off, so the API returns 403 rather than queueing something that
+  will never be sent.
+- **Realms carry their environment** (migration 3). A replica cannot be pointed at the
+  other Intuit host than the one it was first synced from; the CLI refuses.
+- **A human "discard" state.** §6 said failed writes are never silently dropped. They
+  still are not: `Discarded` is reachable only from `conflicted` or `rejected`, only by
+  a person in the sync queue, and the record is kept.
+- **Conflict retry re-bases, and only on the newer version.** Retrying a conflicted
+  update takes the replica's current `SyncToken`, and is refused until the replica has
+  actually picked up the other edit — so the person retrying has seen it. This is the
+  opposite of last-writer-wins: nothing is overwritten that nobody looked at.
+- **Updates are sparse.** QuickBooks changes only the fields sent, so fields the editor
+  does not know about survive an edit.
+- **Tax is QuickBooks'.** The editor sends a tax code per line and shows a pre-tax
+  subtotal; the replica shows QuickBooks' tax once the document lands. Line amounts are
+  computed once, with `LineExtension` rounding, and the UI uses the same rule in exact
+  integer arithmetic so the amount on screen is the amount sent.
+- **The customer PO goes in the book's own custom field**, whose `DefinitionId` is read
+  from existing documents. A PO with no such field is refused, never dropped.
+- **Queued creates are shown, not mirrored.** A saved document lists in its register and
+  opens from its outbox payload, marked "Not yet in QuickBooks"; nothing is written to
+  the replica's mirror until QuickBooks has it. A page left open on a queued document
+  follows it to its real id when it lands.
+- **The dev server refuses cross-site requests** now that it can queue writes: JSON
+  content type required (a form post or `no-cors` fetch cannot set it without a
+  preflight), and a browser `Origin` must be its own.
+- **The drain runs in the sync process.** The desktop app only queues; `sync --watch`
+  drains before each poll. Both open the same file, so the store waits up to 5 s on the
+  other's lock rather than failing a save.

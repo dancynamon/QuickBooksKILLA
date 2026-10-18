@@ -15,6 +15,7 @@ export interface Realm {
   realmId: string;
   displayName: string;
   writeEnabled: boolean;
+  environment: "production" | "sandbox";
 }
 
 export interface Document {
@@ -33,6 +34,8 @@ export interface Document {
   poNumber: string | null;
   privateNote: string | null;
   customerMemo: string | null;
+  /** Set when the document exists only in the outbox: its write state. */
+  pendingWrite?: string;
 }
 
 export interface Line {
@@ -59,6 +62,51 @@ export interface DocumentDetail {
   related: Document[];
   links: Link[];
   unresolved: string[];
+  openWrites: Write[];
+}
+
+export interface Write {
+  id: string;
+  entityType: string;
+  operation: "create" | "update";
+  entityId: string;
+  label: string;
+  state: "pending" | "in_flight" | "conflicted" | "rejected" | "applied" | "discarded";
+  status: string;
+  attempts: number;
+  lastError: string | null;
+  blockedBy: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface DraftLine {
+  itemId: string | null;
+  description: string | null;
+  qty: string;
+  rate: string;
+  classId: string | null;
+  taxable: boolean;
+}
+
+export interface Draft {
+  docType: DocType;
+  customerId: string;
+  txnDate: string;
+  dueDate: string | null;
+  docNumber: string | null;
+  poNumber: string | null;
+  privateNote: string | null;
+  customerMemo: string | null;
+  classId: string | null;
+  lines: DraftLine[];
+}
+
+export interface Customer {
+  qboId: string;
+  displayName: string;
+  companyName: string | null;
+  pending: boolean;
 }
 
 export type Hit =
@@ -79,6 +127,7 @@ export interface EntityStatus {
 }
 
 export interface Status {
+  environment: "production" | "sandbox";
   entityTypes: EntityStatus[];
   lastSynced: string | null;
   outboxPending: number;
@@ -160,6 +209,15 @@ export const api = {
   salesByCustomer: (realm: string, from: string, to: string) => call<SalesRow[]>("salesByCustomer", { realm, from, to }),
   items: (realm: string) => call<Item[]>("items", { realm }),
   itemDocuments: (realm: string, itemId: string) => call<Document[]>("itemDocuments", { realm, itemId }),
+  customers: (realm: string) => call<Customer[]>("customers", { realm }),
+  documentDraft: (realm: string, qboId: string) =>
+    call<{ draft: Draft; contactName: string | null; openWrites: number }>("documentDraft", { realm, qboId }),
+  saveDocument: (realm: string, draft: Draft, qboId?: string) =>
+    call<{ outboxId: string; entityId: string; state: string }>("saveDocument", { realm, draft, qboId }),
+  createCustomer: (realm: string, displayName: string, companyName?: string, email?: string) =>
+    call<{ outboxId: string; entityId: string; displayName: string }>("createCustomer", { realm, displayName, companyName, email }),
+  outbox: (realm: string) => call<Write[]>("outbox", { realm }),
+  resolveWrite: (realm: string, id: string, action: "retry" | "discard") => call<Write>("resolveWrite", { realm, id, action }),
   classes: (realm: string) => call<Record<string, string>>("classes", { realm }),
   documents: (realm: string, docType: DocType, limit = 50_000) => call<Document[]>("documents", { realm, docType, limit }),
   document: (realm: string, qboId: string) => call<DocumentDetail>("document", { realm, qboId }),

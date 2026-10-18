@@ -188,3 +188,35 @@ kbd { font-family: var(--mono); font-size: .85em; border: 1px solid var(--line);
 .bar-col { width: 30%; }
 .inline-bar { display: block; height: 8px; border-radius: 4px; background: var(--accent); opacity: .75; }
 .grid tr.inactive td { color: var(--ink-3); }
+
+/* M2: writing */
+.button { display: inline-flex; align-items: center; gap: 6px; background: var(--surface); border: 1px solid var(--line); border-radius: 4px; padding: 3px 10px; cursor: pointer; color: var(--ink); text-decoration: none; white-space: nowrap; }
+.button:hover { background: var(--surface-2); text-decoration: none; color: var(--ink); }
+.button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+.button.primary:hover { filter: brightness(1.05); color: var(--accent-ink); }
+.button.disabled { opacity: .5; cursor: not-allowed; }
+.button:disabled { opacity: .6; cursor: wait; }
+.button kbd { background: transparent; border-color: currentColor; color: inherit; opacity: .8; }
+.link { background: none; border: 0; padding: 0; color: var(--accent); cursor: pointer; text-decoration: underline; font: inherit; }
+.banner { margin: 10px 14px 0; padding: 8px 12px; border-radius: 4px; background: var(--warn-soft); color: var(--ink); }
+.banner.crit { background: var(--crit-soft); }
+.banner a { color: var(--accent); text-decoration: underline; }
+.statusbar a.pill:hover { text-decoration: none; filter: brightness(.95); color: inherit; }
+.form-grid { display: flex; flex-wrap: wrap; gap: 12px 18px; margin: 14px; }
+.field { display: flex; flex-direction: column; gap: 3px; min-width: 140px; }
+.field.wide { flex: 1 1 320px; }
+.field > span { font-size: .78em; text-transform: uppercase; letter-spacing: .05em; color: var(--ink-3); }
+.field input, .field select, .field textarea, .edit-lines input:not([type=checkbox]), .inline-form input {
+  background: var(--surface); border: 1px solid var(--line); border-radius: 4px; padding: 4px 8px; width: 100%; min-width: 0;
+}
+.field input:focus, .field select:focus, .field textarea:focus, .edit-lines input:focus, .inline-form input:focus { outline: 2px solid var(--accent-soft); border-color: var(--accent); }
+.edit-lines td { padding-top: 3px; padding-bottom: 3px; }
+.edit-lines td:nth-child(2) { width: 22%; }
+.edit-lines td:nth-child(3) { width: 36%; }
+.edit-lines td:nth-child(4), .edit-lines td:nth-child(5) { width: 9%; }
+.inline-form { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 0 14px 12px; padding: 10px 12px; background: var(--surface); border: 1px solid var(--accent-line, var(--line)); border-radius: 4px; }
+.inline-form input { width: auto; flex: 1 1 180px; }
+.grid td.wrap { white-space: normal; }
+.grid td.actions { white-space: nowrap; }
+.grid td.actions .button + .button { margin-left: 6px; }
+code { font-family: var(--mono); font-size: .9em; background: var(--surface-2); padding: 0 4px; border-radius: 3px; }

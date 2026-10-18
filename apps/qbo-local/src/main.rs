@@ -15,7 +15,7 @@
 //!
 //! ```text
 //! qbo-local demo --db <path> [--invoices N]     # write a synthetic book
-//! qbo-local serve --db <path> [--port 8780]     # UI + API on 127.0.0.1
+//! qbo-local serve --db <path> [--port 8780] [--demo-writes]   # UI + API on 127.0.0.1
 //! qbo-local snapshot --db <path> --dir <dir> [--keep 14]   # dated copy, rotated
 //! qbo-local writes --db <path> --realm <id> [--enable [--confirm] | --disable]
 //! ```
@@ -213,12 +213,26 @@ mod offline {
             .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("ui/dist"));
         let started = Instant::now();
         let store = Store::open(&db)?;
+        // `--demo-writes`: the synthetic book only. Turns its writes on and
+        // lands them in a stand-in QuickBooks, so the write path can be used
+        // end to end in a browser.
+        let mut demo_qbo = if args.iter().any(|a| a == "--demo-writes") {
+            let realm = qbo_local::domain::RealmId::parse(demo::DEMO_REALM)?;
+            if !store.realms()?.iter().any(|r| r.realm_id == realm) {
+                return Err("--demo-writes needs a replica written by `qbo-local demo`".into());
+            }
+            store.set_write_enabled(&realm, true)?;
+            Some(qbo_local::serve::DemoQbo::new(&store, &realm, chrono::Duration::seconds(3))?)
+        } else {
+            None
+        };
         let listener = TcpListener::bind(("127.0.0.1", port))?;
         println!(
-            "replica open in {:.0} ms; serving http://127.0.0.1:{port}/ (read-only)",
-            started.elapsed().as_secs_f64() * 1000.0
+            "replica open in {:.0} ms; serving http://127.0.0.1:{port}/{}",
+            started.elapsed().as_secs_f64() * 1000.0,
+            if demo_qbo.is_some() { " (demo writes on)" } else { "" }
         );
-        qbo_local::serve::run(listener, &store, &ui)?;
+        qbo_local::serve::run(listener, &store, &ui, demo_qbo.as_mut())?;
         Ok(())
     }
 }

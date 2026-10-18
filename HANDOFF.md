@@ -43,7 +43,7 @@ backend in §2.1. Never in the repo, never in a dotfile Dropbox syncs.
 
 ## 1. Where the work stands
 
-`cargo test` — 253 tests, all offline, all green. `cargo clippy --all-targets` —
+`cargo test` — 278 tests, all offline, all green. `cargo clippy --all-targets` —
 clean.
 
 Built and tested:
@@ -71,8 +71,23 @@ Built and tested:
 | `ui/` | React UI (registers, document + chain, contact, `⌘K` palette, status bar) |
 | `../qbo-local-desktop` | Tauri 2 shell: one `api` command, replica from `QBO_LOCAL_DB` or the app home |
 
-**Not built:** the §7.5 trial-balance diff, writes from the UI (M2). M0 code is
-complete; what remains is the live run.
+| `writes`, `compose`, `outbox_store` | M2: durable outbox, drain, gate, editor payloads (DECISIONS D14) |
+
+**Not built:** the §7.5 trial-balance diff. M0 code is complete; what remains is
+the live run. M2 is built and off.
+
+### 1.3 Turning writes on (after the soak)
+
+```sh
+qbo-local writes --db <replica> --realm <id>                     # state, and what enabling needs
+qbo-local writes --db <replica> --realm <id> --enable --confirm  # production: 14 days after first sync
+cargo run --release --features live --bin qbo-local -- sync --realm <id> --watch 30   # drains, then mirrors
+```
+
+Sandbox first: sync a sandbox company with `--sandbox` (its realm is recorded as
+sandbox and can take writes at once), use BunzBooks against it, then repeat for
+production after the soak. Every write is appended to `audit-<realm>.jsonl` in
+the app home. `--disable` turns writes off; anything queued stays queued.
 
 ### 1.2 Running the UI on the Mac
 

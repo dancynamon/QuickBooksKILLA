@@ -471,8 +471,17 @@ pub fn dispatch_at(store: &Store, command: &str, args: Value, now: chrono::DateT
             to_json(out)
         }
         "document" => {
-            let args: DocumentArgs = parse(args)?;
+            let mut args: DocumentArgs = parse(args)?;
             let realm = realm(&args.realm)?;
+            // A local id QBO has since assigned a real id to opens the real
+            // document, so a page left open on a queued write follows it.
+            if args.qbo_id.starts_with(crate::worker::LOCAL_ID_PREFIX) {
+                if let Some(real) = store.resolve_local_id(&realm, &args.qbo_id)? {
+                    if store.get_document(&realm, &real)?.is_some() {
+                        args.qbo_id = real;
+                    }
+                }
+            }
             let open_writes = write_commands::open_writes(store, &realm, &args.qbo_id)?;
             if args.qbo_id.starts_with(crate::worker::LOCAL_ID_PREFIX) {
                 // Not in QBO yet: shown from its queued payload, honestly marked.

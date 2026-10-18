@@ -23,3 +23,13 @@ test("decimals keep precision past two places", () => {
 test("dates render US style", () => {
   assert.equal(mod.formatDate("2026-07-14"), "07/14/2026");
 });
+
+test("line amounts round like the server", () => {
+  assert.equal(mod.lineAmountMinor("20", "49.25"), 98500);
+  assert.equal(mod.lineAmountMinor("3", "0.335"), 101);
+  assert.equal(mod.lineAmountMinor("1,000", "0.1"), 10000);
+  assert.equal(mod.lineAmountMinor("1", "0.005"), 1);
+  assert.equal(mod.lineAmountMinor("-1", "0.005"), -1);
+  assert.equal(mod.lineAmountMinor("2.5", "18.4375"), 4609);
+  assert.equal(mod.lineAmountMinor("x", "1"), null);
+});
