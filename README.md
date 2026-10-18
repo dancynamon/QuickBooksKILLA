@@ -31,9 +31,17 @@ than engineering judgement.
 ## Build
 
 ```sh
-cargo test          # 228 tests, all offline
+cargo test          # 240 tests, all offline
 cargo clippy --all-targets
 cargo run --bin qbo-local
+
+# The UI against a synthetic book — no Intuit, no real data
+cargo run --release --bin qbo-local -- demo --db /tmp/demo.db --invoices 9000
+(cd apps/qbo-local/ui && npm install && npm run build && npm test)
+cargo run --release --bin qbo-local -- serve --db /tmp/demo.db   # http://127.0.0.1:8780/
+
+# Desktop shell (own workspace; needs a webview toolchain — Xcode CLT on macOS)
+(cd apps/qbo-local-desktop && cargo install tauri-cli --version "^2" && cargo tauri build)
 
 # Live commands (need Intuit credentials; see HANDOFF.md §1.1)
 cargo run --features live --bin qbo-local -- authorize
@@ -68,7 +76,15 @@ Built and tested:
 
 - macOS keychain token store via `security -i` (secret never on argv)
 
-Not built yet: the trial-balance diff (§7.5,
+- M1 read-only UI ("BunzBooks"): React registers for every document type
+  (virtualized, sortable, filterable, keyboard-driven), document view with
+  lines and the estimate→invoice→payment / PO→bill→payment chain, contact
+  view, `⌘K` palette with match reasons and local timing, sync state in the
+  chrome, light/dark, text scaling. Served by `qbo-local serve` or the Tauri
+  shell in `apps/qbo-local-desktop`; both call one `api::dispatch`
+- Synthetic book generator (`demo`) for UI work and §11 measurements
+
+Not built yet: writes from the UI (M2, gated), the trial-balance diff (§7.5,
 ledger territory), the Tauri shell, the React UI.
 
 The first live authentication run should happen wherever the OAuth credentials

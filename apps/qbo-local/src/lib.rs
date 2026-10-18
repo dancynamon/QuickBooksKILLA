@@ -6,9 +6,12 @@
 //!
 //! See `DESIGN.md` at the repository root. Module layout follows its sections:
 //!
+//! - [`api`]      — the UI's read-only command surface (M1)
+//! - [`demo`]     — §11: a synthetic book for the UI and benchmarks
 //! - [`domain`]   — §2: realm scoping, entity types
 //! - [`store`]    — §3: replica schema and migrations
 //! - [`project`]  — §3.2: raw payloads to the parsed projection
+//! - [`serve`]    — loopback dev server over [`api`] for browser testing
 //! - [`sync`]     — §4: CDC cursor strategy and its failure modes
 //! - [`driver`]   — §4: the loop that runs them against a client and a store
 //! - [`auth`]     — §5: token rotation and durable persistence
@@ -20,8 +23,10 @@
 //! - [`oauth`]    — §5: authorisation, refresh, rotation against Intuit
 //! - [`worker`]   — §6.3-6.5: draining the outbox, dependency resolution
 
+pub mod api;
 pub mod auth;
 pub mod client;
+pub mod demo;
 pub mod domain;
 pub mod driver;
 pub mod http;
@@ -31,5 +36,6 @@ pub mod outbox;
 pub mod project;
 pub mod ratelimit;
 pub mod store;
+pub mod serve;
 pub mod sync;
 pub mod worker;

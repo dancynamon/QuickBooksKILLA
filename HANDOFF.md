@@ -43,7 +43,7 @@ backend in §2.1. Never in the repo, never in a dotfile Dropbox syncs.
 
 ## 1. Where the work stands
 
-`cargo test` — 228 tests, all offline, all green. `cargo clippy --all-targets` —
+`cargo test` — 240 tests, all offline, all green. `cargo clippy --all-targets` —
 clean.
 
 Built and tested:
@@ -64,8 +64,31 @@ Built and tested:
 | `driver` | Initial sweep, CDC poll, truncation backfill; `reconcile` (§7): heal missing/stale, quarantine extras, orphaned-line check |
 | `keychain` | `KeychainTokenStore`: one login-keychain item per realm (service `qbo-local`), written via `security -i` with hex `-X` so the token is never on argv; default on macOS, `--file-tokens` for the 0700 file store |
 
-**Not built:** the §7.5 trial-balance diff, the Tauri shell, the React UI. M0
-code is complete; what remains is the live run.
+| `api` | The UI's read-only command surface; one `dispatch` behind both front doors |
+| `serve` | Loopback dev server over `api` for browser testing |
+| `demo` | Seeded synthetic book; no real names, `.invalid` emails |
+| `ui/` | React UI (registers, document + chain, contact, `⌘K` palette, status bar) |
+| `../qbo-local-desktop` | Tauri 2 shell: one `api` command, replica from `QBO_LOCAL_DB` or the app home |
+
+**Not built:** the §7.5 trial-balance diff, writes from the UI (M2). M0 code is
+complete; what remains is the live run.
+
+### 1.2 Running the UI on the Mac
+
+After `sync` has written `replica-<realm>.db` to the app home:
+
+```sh
+cd apps/qbo-local/ui && npm install && npm run build
+cd ../../qbo-local-desktop && cargo install tauri-cli --version "^2" --locked
+cargo tauri dev        # hot reload; or `cargo tauri build` for BunzBooks.app
+```
+
+The shell opens the first `replica-*.db` in the app home, or `QBO_LOCAL_DB`.
+A bare `cargo build --release` produces a dev-mode binary that looks for the
+Vite server; build through `cargo tauri build`, or add
+`--features tauri/custom-protocol`. Verified on Linux under Xvfb against the
+synthetic book: 9,000-row register over IPC in ~200 ms with software rendering.
+It is read-only by construction: `api::dispatch` has no write command.
 
 ### 1.1 Running M0 on the Mac
 

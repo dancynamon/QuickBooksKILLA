@@ -7,6 +7,9 @@ apps/*/target
 node_modules/
 dist/
 
+# Tauri's generated capability schemas
+apps/qbo-local-desktop/gen/
+
 # SQLite — the replica and its sidecars never belong in git
 *.db
 *.db-wal

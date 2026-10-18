@@ -1,0 +1,17 @@
+[package]
+name = "qbo-local-desktop"
+version = "0.1.0"
+edition = "2021"
+description = "BunzBooks: the Tauri shell around qbo-local's read-only UI."
+
+# Its own workspace, so `cargo test` at the repository root never needs a
+# webview toolchain. Build here: `cargo tauri dev` / `cargo tauri build`.
+[workspace]
+
+[dependencies]
+qbo-local = { path = "../qbo-local" }
+serde_json = "1"
+tauri = { version = "2", features = [] }
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }

@@ -10,6 +10,13 @@
 //! qbo-local sync --realm <id> [--db <path>] [--sandbox] [--watch <seconds>]
 //! qbo-local reconcile --realm <id> [--db <path>] [--sandbox]
 //! ```
+//!
+//! Always available, no Intuit involved:
+//!
+//! ```text
+//! qbo-local demo --db <path> [--invoices N]     # write a synthetic book
+//! qbo-local serve --db <path> [--port 8780]     # UI + API on 127.0.0.1
+//! ```
 
 use chrono::Utc;
 use qbo_local::domain::{EntityType, RealmId, SyncTier};
@@ -31,6 +38,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
         None | Some("status") => status(),
+        Some("demo") => offline::demo(&args[1..]),
+        Some("serve") => offline::serve(&args[1..]),
         #[cfg(feature = "live")]
         Some(command) => live::run(command, &args[1..]),
         #[cfg(not(feature = "live"))]
@@ -92,6 +101,68 @@ fn status() -> Result<(), Box<dyn std::error::Error>> {
     println!("  generated at {}", Utc::now().to_rfc3339());
 
     Ok(())
+}
+
+mod offline {
+    //! Commands that never reach Intuit: the synthetic book and the dev server.
+
+    use std::net::TcpListener;
+    use std::path::PathBuf;
+    use std::time::Instant;
+
+    use chrono::Utc;
+    use qbo_local::demo::{self, DemoSize};
+    use qbo_local::store::Store;
+
+    type Error = Box<dyn std::error::Error>;
+
+    fn value<'a>(args: &'a [String], name: &str) -> Option<&'a str> {
+        args.iter()
+            .position(|a| a == name)
+            .and_then(|i| args.get(i + 1))
+            .map(String::as_str)
+    }
+
+    pub fn demo(args: &[String]) -> Result<(), Error> {
+        let db = PathBuf::from(value(args, "--db").ok_or("--db is required")?);
+        if db.exists() {
+            return Err(format!("{} exists; demo writes only to a new file", db.display()).into());
+        }
+        let mut size = DemoSize::default();
+        if let Some(invoices) = value(args, "--invoices") {
+            size.invoices = invoices.parse()?;
+        }
+        let store = Store::open(&db)?;
+        let started = Instant::now();
+        let written = demo::seed(&store, size, 42, Utc::now())?;
+        println!(
+            "wrote {written} synthetic entities to {} in {:.2}s (realm {})",
+            db.display(),
+            started.elapsed().as_secs_f64(),
+            demo::DEMO_REALM
+        );
+        Ok(())
+    }
+
+    pub fn serve(args: &[String]) -> Result<(), Error> {
+        let db = PathBuf::from(value(args, "--db").ok_or("--db is required")?);
+        if !db.exists() {
+            return Err(format!("{} does not exist", db.display()).into());
+        }
+        let port: u16 = value(args, "--port").unwrap_or("8780").parse()?;
+        let ui = value(args, "--ui")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("ui/dist"));
+        let started = Instant::now();
+        let store = Store::open(&db)?;
+        let listener = TcpListener::bind(("127.0.0.1", port))?;
+        println!(
+            "replica open in {:.0} ms; serving http://127.0.0.1:{port}/ (read-only)",
+            started.elapsed().as_secs_f64() * 1000.0
+        );
+        qbo_local::serve::run(listener, &store, &ui)?;
+        Ok(())
+    }
 }
 
 #[cfg(feature = "live")]

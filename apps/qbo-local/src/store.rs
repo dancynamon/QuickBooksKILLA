@@ -473,6 +473,75 @@ impl Store {
     }
 
     /// Writes stay off until explicitly enabled, per realm, one realm at a time.
+    /// Every registered realm — the company switcher's list.
+    pub fn realms(&self) -> Result<Vec<RealmRow>, StoreError> {
+        let mut statement = self.connection.prepare(
+            "SELECT realm_id, display_name, is_write_enabled FROM realms ORDER BY display_name",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, i64>(2)?))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (id, display_name, write) = row?;
+            out.push(RealmRow {
+                realm_id: RealmId::parse(id).map_err(|e| StoreError::Corrupt(e.to_string()))?,
+                display_name,
+                is_write_enabled: write != 0,
+            });
+        }
+        Ok(out)
+    }
+
+    /// Class id to display name, for labelling lines and documents (§2.4).
+    pub fn class_names(&self, realm: &RealmId) -> Result<Vec<(String, String)>, StoreError> {
+        let mut statement = self.connection.prepare(
+            "SELECT qbo_id, COALESCE(fully_qualified_name, name) FROM classes
+             WHERE realm_id = ?1 AND is_deleted = 0 ORDER BY 2",
+        )?;
+        let rows = statement.query_map(params![realm.as_str()], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// What the chrome shows at all times (`DESIGN.md` §6.7): how current each
+    /// type is, how many writes are queued, how many need a human.
+    pub fn sync_status(&self, realm: &RealmId) -> Result<SyncStatus, StoreError> {
+        let mut statement = self.connection.prepare(
+            "SELECT e.entity_type, COUNT(*), c.last_cdc_cursor, c.last_full_sweep
+             FROM entities e
+             LEFT JOIN sync_cursors c
+               ON c.realm_id = e.realm_id AND c.entity_type = e.entity_type
+             WHERE e.realm_id = ?1 AND e.is_deleted = 0
+             GROUP BY e.entity_type ORDER BY e.entity_type",
+        )?;
+        let types = statement
+            .query_map(params![realm.as_str()], |row| {
+                Ok(EntityStatus {
+                    entity_type: row.get(0)?,
+                    count: row.get(1)?,
+                    last_cdc_cursor: row.get(2)?,
+                    last_full_sweep: row.get(3)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        let count = |sql: &str| -> Result<i64, StoreError> {
+            Ok(self.connection.query_row(sql, params![realm.as_str()], |row| row.get(0))?)
+        };
+        Ok(SyncStatus {
+            entity_types: types,
+            outbox_pending: count(
+                "SELECT COUNT(*) FROM outbox WHERE realm_id = ?1
+                 AND state IN ('pending', 'in_flight')",
+            )?,
+            outbox_needs_attention: count(
+                "SELECT COUNT(*) FROM outbox WHERE realm_id = ?1
+                 AND state IN ('conflicted', 'rejected')",
+            )?,
+            quarantined: count("SELECT COUNT(*) FROM quarantine_entities WHERE realm_id = ?1")?,
+            is_write_enabled: self.is_write_enabled(realm)?,
+        })
+    }
+
     pub fn is_write_enabled(&self, realm: &RealmId) -> Result<bool, StoreError> {
         let enabled: Option<i64> = self
             .connection
@@ -957,6 +1026,32 @@ pub struct ReprojectReport {
     pub parsed: usize,
     pub not_projected: usize,
     pub quarantined: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RealmRow {
+    pub realm_id: RealmId,
+    pub display_name: String,
+    pub is_write_enabled: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EntityStatus {
+    pub entity_type: String,
+    pub count: i64,
+    pub last_cdc_cursor: Option<String>,
+    pub last_full_sweep: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SyncStatus {
+    pub entity_types: Vec<EntityStatus>,
+    /// Queued and not yet confirmed by QBO.
+    pub outbox_pending: i64,
+    /// Conflicted or rejected — the failure inbox (§6.6).
+    pub outbox_needs_attention: i64,
+    pub quarantined: i64,
+    pub is_write_enabled: bool,
 }
 
 /// One row of [`Store::entity_index`].
