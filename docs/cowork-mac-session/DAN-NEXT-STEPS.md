@@ -130,7 +130,20 @@ which the sales-order sync in step 3 needs. Then, at his OK, he runs the
 sync line from `docs/CUTOVER.md` ("Sales orders: the feed"). Screenshot
 `tools/nightly.sh status` and record the result.
 
-## 8. Joel's list (draft only)
+## 8. Review the real test fixture (D31)
+
+A scrubbed slice of the real books (168 records, real names and amounts
+replaced) is at `.local/fixtures/slice-20261017-210155/scrubbed/`. Its leak
+check passed. Before any of it is committed, Dan reads it:
+
+1. Open a few files from each folder (Customer, Vendor, Invoice, Bill,
+   Payment) side by side with Dan. Point out anything that still looks real:
+   a name, street, email, phone, memo text, or an amount he recognises.
+2. Record "looks clean" or each finding (file and field, never the value) in
+   `answers.md`. Copying it into `apps/qbo-local/tests/fixtures/real-slice/`
+   and committing is the Claude Code session's job once he says it's clean.
+
+## 9. Joel's list (draft only)
 
 Draft, do not send, an email from Dan to Joel (the CPA) asking for:
 
