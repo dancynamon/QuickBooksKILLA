@@ -281,7 +281,8 @@ fn as_quickbooks_returns(raw: &serde_json::Value, id: &str, token: &str, entity_
             .sum();
         let number = serde_json::Number::from_str(&total.normalize().to_string()).expect("decimal");
         object.insert("TotalAmt".into(), serde_json::Value::Number(number.clone()));
-        if entity_type == crate::domain::EntityType::Invoice && !object.contains_key("Balance") {
+        let has_balance = matches!(entity_type, crate::domain::EntityType::Invoice | crate::domain::EntityType::Bill);
+        if has_balance && !object.contains_key("Balance") {
             object.insert("Balance".into(), serde_json::Value::Number(number));
         }
     }
@@ -384,7 +385,7 @@ mod demo_tests {
         let mut qbo = DemoQbo::new(&store, &realm, Duration::seconds(2)).unwrap();
 
         let customer = store.contacts(&realm, crate::domain::ContactType::Customer).unwrap().remove(0).0;
-        let draft = json!({ "docType": "Invoice", "customerId": customer, "txnDate": "2026-11-02",
+        let draft = json!({ "docType": "Invoice", "contactId": customer, "txnDate": "2026-11-02",
                             "lines": [ { "description": "Kickboard", "qty": "3", "rate": "11.50" } ] });
         let saved = dispatch_at(&store, "saveDocument", json!({ "realm": DEMO_REALM, "draft": draft }), now).unwrap();
         let local = saved["entityId"].as_str().unwrap().to_string();

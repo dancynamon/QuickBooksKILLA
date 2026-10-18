@@ -107,7 +107,7 @@ function useClassName() {
 }
 
 // Document types the editor writes; the rest are entered in QuickBooks.
-const EDITABLE: DocType[] = ["Invoice", "Estimate", "SalesReceipt"];
+const EDITABLE: DocType[] = ["Estimate", "Invoice", "SalesReceipt", "CreditMemo", "PurchaseOrder", "Bill"];
 
 // Whether this company takes writes, and a way to refresh the chrome after one.
 interface WriteState {
@@ -779,8 +779,14 @@ function ContactView({
 }) {
   const [rows, setRows] = useState<Document[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [aging, setAging] = useState<Aging["rows"][number] | null>(null);
   useEffect(() => {
     api.contactDocuments(realm, contactType, contactId).then(setRows, (e: ApiError) => setError(e.message));
+    // The statement view: this contact's open balance by days past due.
+    api.aging(realm, contactType === "Customer" ? "receivable" : "payable").then(
+      (a) => setAging(a.rows.find((r) => r.contactId === contactId) ?? null),
+      () => setAging(null),
+    );
   }, [realm, contactType, contactId]);
 
   if (error) return <div className="error pad">{error}</div>;
@@ -797,6 +803,16 @@ function ContactView({
         <span className="spacer" />
         <span className="num">Open {formatMoney(open)}</span>
       </div>
+      {aging && (
+        <dl className="facts aging-strip" aria-label="Open balance by days past due">
+          {AGING_COLUMNS.map((c) => (
+            <div key={c.key}>
+              <dt>{c.label}</dt>
+              <dd className={c.key === "over90Minor" && aging.over90Minor ? "num crit-text" : "num"}>{formatMoney(aging[c.key] as number)}</dd>
+            </div>
+          ))}
+        </dl>
+      )}
       <div className="grid-wrap">
         <table className="grid">
           <thead>
@@ -1245,8 +1261,12 @@ function Editor({ realm, docType, qboId, go }: { realm: string; docType?: DocTyp
   const [saving, setSaving] = useState(false);
   const [adding, setAdding] = useState<{ name: string; email: string } | null>(null);
 
+  const purchase = draft ? VENDOR_SIDE.has(draft.docType) : docType ? VENDOR_SIDE.has(docType) : false;
+  // Contacts follow the document's side, known once the draft has loaded.
   useEffect(() => {
-    api.customers(realm).then(setCustomers, (e: ApiError) => setError(e.message));
+    (purchase ? api.vendors(realm) : api.customers(realm)).then(setCustomers, (e: ApiError) => setError(e.message));
+  }, [realm, purchase]);
+  useEffect(() => {
     api.items(realm).then((all) => setItems(all.filter((i) => i.active)), () => setItems([]));
     if (qboId) {
       api.documentDraft(realm, qboId).then(
@@ -1260,9 +1280,9 @@ function Editor({ realm, docType, qboId, go }: { realm: string; docType?: DocTyp
       const today = todayIso();
       setDraft({
         docType,
-        customerId: "",
+        contactId: "",
         txnDate: today,
-        dueDate: docType === "Invoice" ? plusDays(today, 30) : null,
+        dueDate: docType === "Invoice" || docType === "Bill" ? plusDays(today, 30) : null,
         docNumber: null,
         poNumber: null,
         privateNote: null,
@@ -1288,7 +1308,7 @@ function Editor({ realm, docType, qboId, go }: { realm: string; docType?: DocTyp
   const chooseCustomer = (text: string) => {
     setCustomerText(text);
     const match = customers.find((c) => c.displayName === text);
-    set({ customerId: match ? match.qboId : "" });
+    set({ contactId: match ? match.qboId : "" });
   };
 
   const chooseItem = (index: number, name: string) => {
@@ -1301,7 +1321,7 @@ function Editor({ realm, docType, qboId, go }: { realm: string; docType?: DocTyp
     setLine(index, {
       itemId: item.qboId,
       description: line.description && line.itemId === null ? line.description : item.name,
-      rate: line.rate || formatDecimal(item.unitPrice).replace(/,/g, ""),
+      rate: line.rate || formatDecimal(purchase ? item.purchaseCost : item.unitPrice).replace(/,/g, ""),
     });
   };
 
@@ -1313,7 +1333,7 @@ function Editor({ realm, docType, qboId, go }: { realm: string; docType?: DocTyp
       const customer: Customer = { qboId: created.entityId, displayName: created.displayName, companyName: null, pending: true };
       setCustomers([...customers, customer]);
       setCustomerText(created.displayName);
-      set({ customerId: created.entityId });
+      set({ contactId: created.entityId });
       setAdding(null);
       writes.refresh();
     } catch (e) {
@@ -1323,11 +1343,15 @@ function Editor({ realm, docType, qboId, go }: { realm: string; docType?: DocTyp
 
   const save = async () => {
     setError(null);
-    if (!draft.customerId) return setError("Choose a customer from the list, or add a new one.");
+    // The list may have arrived after the name was typed; resolve it now.
+    const contactId = draft.contactId || customers.find((c) => c.displayName === customerText)?.qboId || "";
+    const toSave = { ...draft, contactId };
+    if (!contactId) return setError(purchase ? "Choose a vendor from the list." : "Choose a customer from the list, or add a new one.");
+    if (purchase && draft.lines.some((l) => !l.itemId)) return setError("Every purchase line needs a product from the list.");
     if (amounts.some((a) => a === null)) return setError("Every line needs a number for quantity and rate.");
     setSaving(true);
     try {
-      const result = await api.saveDocument(realm, draft, qboId);
+      const result = await api.saveDocument(realm, toSave, qboId);
       writes.refresh();
       go({ view: "doc", qboId: qboId ?? result.entityId });
     } catch (e) {
@@ -1362,14 +1386,14 @@ function Editor({ realm, docType, qboId, go }: { realm: string; docType?: DocTyp
 
       <div className="form-grid">
         <label className="field wide">
-          <span>Customer</span>
+          <span>{purchase ? "Vendor" : "Customer"}</span>
           <input list="bb-customers" value={customerText} onChange={(e) => chooseCustomer(e.target.value)} placeholder="Start typing a name" autoFocus={!qboId} />
           <datalist id="bb-customers">
             {customers.map((c) => (
               <option key={c.qboId} value={c.displayName}>{c.pending ? "new, not yet in QuickBooks" : c.companyName ?? ""}</option>
             ))}
           </datalist>
-          {!draft.customerId && customerText && !adding && (
+          {!purchase && !draft.contactId && customerText && !adding && (
             <button className="link" onClick={() => setAdding({ name: customerText, email: "" })}>Add “{customerText}” as a new customer</button>
           )}
         </label>
@@ -1377,7 +1401,7 @@ function Editor({ realm, docType, qboId, go }: { realm: string; docType?: DocTyp
           <span>Date</span>
           <input type="date" value={draft.txnDate} onChange={(e) => set({ txnDate: e.target.value })} />
         </label>
-        {draft.docType === "Invoice" && (
+        {(draft.docType === "Invoice" || draft.docType === "Bill") && (
           <label className="field">
             <span>Due</span>
             <input type="date" value={draft.dueDate ?? ""} onChange={(e) => set({ dueDate: e.target.value || null })} />
@@ -1387,10 +1411,12 @@ function Editor({ realm, docType, qboId, go }: { realm: string; docType?: DocTyp
           <span>No.</span>
           <input value={draft.docNumber ?? ""} onChange={(e) => set({ docNumber: e.target.value || null })} placeholder="QuickBooks assigns" />
         </label>
-        <label className="field">
-          <span>Customer PO</span>
-          <input value={draft.poNumber ?? ""} onChange={(e) => set({ poNumber: e.target.value || null })} />
-        </label>
+        {!purchase && (
+          <label className="field">
+            <span>Customer PO</span>
+            <input value={draft.poNumber ?? ""} onChange={(e) => set({ poNumber: e.target.value || null })} />
+          </label>
+        )}
         {classNames.length > 0 && (
           <label className="field">
             <span>Class</span>
@@ -1430,7 +1456,7 @@ function Editor({ realm, docType, qboId, go }: { realm: string; docType?: DocTyp
               <th className="r">Qty</th>
               <th className="r">Rate</th>
               <th className="r">Amount</th>
-              <th>Tax</th>
+              {!purchase && <th>Tax</th>}
               <th />
             </tr>
           </thead>
@@ -1445,7 +1471,7 @@ function Editor({ realm, docType, qboId, go }: { realm: string; docType?: DocTyp
                   <td className="r"><input className="num r" inputMode="decimal" value={line.qty} onChange={(e) => setLine(i, { qty: e.target.value })} aria-label={`Line ${i + 1} quantity`} /></td>
                   <td className="r"><input className="num r" inputMode="decimal" value={line.rate} onChange={(e) => setLine(i, { rate: e.target.value })} aria-label={`Line ${i + 1} rate`} /></td>
                   <td className={amounts[i] === null && line.rate ? "num r crit-text" : "num r"}>{amounts[i] === null ? (line.rate ? "?" : "") : formatMoney(amounts[i])}</td>
-                  <td><input type="checkbox" checked={line.taxable} onChange={(e) => setLine(i, { taxable: e.target.checked })} aria-label={`Line ${i + 1} taxable`} /></td>
+                  {!purchase && <td><input type="checkbox" checked={line.taxable} onChange={(e) => setLine(i, { taxable: e.target.checked })} aria-label={`Line ${i + 1} taxable`} /></td>}
                   <td>
                     {draft.lines.length > 1 && (
                       <button className="link" onClick={() => set({ lines: draft.lines.filter((_, j) => j !== i) })} aria-label={`Remove line ${i + 1}`}>Remove</button>
@@ -1460,9 +1486,9 @@ function Editor({ realm, docType, qboId, go }: { realm: string; docType?: DocTyp
               <td colSpan={2}>
                 <button className="link" onClick={() => set({ lines: [...draft.lines, emptyLine()] })}>Add a line</button>
               </td>
-              <td colSpan={3} className="r">Subtotal · tax is added by QuickBooks</td>
+              <td colSpan={3} className="r">{purchase ? "Total" : "Subtotal · tax is added by QuickBooks"}</td>
               <td className="num r">{formatMoney(subtotal)}</td>
-              <td colSpan={2} />
+              <td colSpan={purchase ? 1 : 2} />
             </tr>
           </tfoot>
         </table>
@@ -1470,7 +1496,7 @@ function Editor({ realm, docType, qboId, go }: { realm: string; docType?: DocTyp
 
       <div className="form-grid">
         <label className="field wide">
-          <span>Message on {label.toLowerCase()}</span>
+          <span>{purchase ? "Message to vendor" : `Message on ${label.toLowerCase()}`}</span>
           <textarea rows={2} value={draft.customerMemo ?? ""} onChange={(e) => set({ customerMemo: e.target.value || null })} />
         </label>
         <label className="field wide">

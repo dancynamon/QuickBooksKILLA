@@ -32,8 +32,10 @@ pub struct DraftLine {
 #[serde(rename_all = "camelCase")]
 pub struct DocumentDraft {
     pub doc_type: DocumentType,
-    /// A QBO id, or a `local:` id for a customer created moments ago.
-    pub customer_id: String,
+    /// The customer on a sales document, the vendor on a purchase document: a
+    /// QBO id, or a `local:` id for a customer created moments ago.
+    #[serde(alias = "customerId")]
+    pub contact_id: String,
     pub txn_date: String,
     pub due_date: Option<String>,
     pub doc_number: Option<String>,
@@ -54,9 +56,23 @@ fn invalid(message: impl Into<String>) -> ComposeError {
     ComposeError::Invalid(message.into())
 }
 
-/// The document types the editor writes. Payments, bills and the rest are
-/// entered in QuickBooks until their editors exist.
-pub const EDITABLE: &[DocumentType] = &[DocumentType::Invoice, DocumentType::Estimate, DocumentType::SalesReceipt];
+/// The document types the editor writes. Payments, expenses, refunds and
+/// journal entries are entered in QuickBooks until their editors exist: each
+/// needs a bank or expense account chosen, which these do not.
+pub const EDITABLE: &[DocumentType] = &[
+    DocumentType::Estimate,
+    DocumentType::Invoice,
+    DocumentType::SalesReceipt,
+    DocumentType::CreditMemo,
+    DocumentType::PurchaseOrder,
+    DocumentType::Bill,
+];
+
+/// Vendor-side documents: a `VendorRef`, item-based expense lines, no sales
+/// tax code.
+pub const fn is_purchase(doc_type: DocumentType) -> bool {
+    matches!(doc_type, DocumentType::PurchaseOrder | DocumentType::Bill)
+}
 
 fn decimal(raw: &str, what: &str) -> Result<Decimal, ComposeError> {
     let trimmed = raw.trim().replace(',', "");
@@ -105,8 +121,9 @@ pub fn to_payload(draft: &DocumentDraft, po_definition_id: Option<&str>, update:
     if !EDITABLE.contains(&draft.doc_type) {
         return Err(invalid(format!("{} is not editable here yet", draft.doc_type.as_str())));
     }
-    if draft.customer_id.trim().is_empty() {
-        return Err(invalid("choose a customer"));
+    let purchase = is_purchase(draft.doc_type);
+    if draft.contact_id.trim().is_empty() {
+        return Err(invalid(if purchase { "choose a vendor" } else { "choose a customer" }));
     }
     if draft.lines.is_empty() {
         return Err(invalid("add at least one line"));
@@ -127,15 +144,21 @@ pub fn to_payload(draft: &DocumentDraft, po_definition_id: Option<&str>, update:
         if let Some(class) = line.class_id.as_ref().or(draft.class_id.as_ref()) {
             detail.insert("ClassRef".into(), json!({ "value": class }));
         }
-        detail.insert("TaxCodeRef".into(), json!({ "value": if line.taxable { "TAX" } else { "NON" } }));
+        if !purchase {
+            detail.insert("TaxCodeRef".into(), json!({ "value": if line.taxable { "TAX" } else { "NON" } }));
+        }
+        let detail_type = if purchase { "ItemBasedExpenseLineDetail" } else { "SalesItemLineDetail" };
+        if purchase && line.item_id.is_none() {
+            return Err(invalid(format!("line {}: a purchase line needs a product, which carries its expense account", index + 1)));
+        }
         let mut out = Map::new();
         out.insert("LineNum".into(), json!(index + 1));
-        out.insert("DetailType".into(), json!("SalesItemLineDetail"));
+        out.insert("DetailType".into(), json!(detail_type));
         out.insert("Amount".into(), money(amount));
         if let Some(description) = line.description.as_deref().filter(|d| !d.trim().is_empty()) {
             out.insert("Description".into(), json!(description));
         }
-        out.insert("SalesItemLineDetail".into(), Value::Object(detail));
+        out.insert(detail_type.into(), Value::Object(detail));
         lines.push(Value::Object(out));
     }
 
@@ -143,7 +166,10 @@ pub fn to_payload(draft: &DocumentDraft, po_definition_id: Option<&str>, update:
     if update {
         body.insert("sparse".into(), json!(true));
     }
-    body.insert("CustomerRef".into(), json!({ "value": draft.customer_id }));
+    body.insert(
+        if purchase { "VendorRef" } else { "CustomerRef" }.into(),
+        json!({ "value": draft.contact_id }),
+    );
     body.insert("TxnDate".into(), json!(date(&draft.txn_date, "date")?));
     if let Some(due) = draft.due_date.as_deref().filter(|d| !d.is_empty()) {
         body.insert("DueDate".into(), json!(date(due, "due date")?));
@@ -158,7 +184,15 @@ pub fn to_payload(draft: &DocumentDraft, po_definition_id: Option<&str>, update:
         body.insert("PrivateNote".into(), json!(note));
     }
     if let Some(memo) = &draft.customer_memo {
-        body.insert("CustomerMemo".into(), json!({ "value": memo }));
+        // A purchase order's message to the vendor; sales documents' to the customer.
+        if purchase {
+            body.insert("Memo".into(), json!(memo));
+        } else {
+            body.insert("CustomerMemo".into(), json!({ "value": memo }));
+        }
+    }
+    if purchase && draft.po_number.as_deref().is_some_and(|p| !p.trim().is_empty()) {
+        return Err(invalid("a customer PO belongs on the sales document, not the purchase"));
     }
     if let Some(po) = draft.po_number.as_deref().filter(|p| !p.trim().is_empty()) {
         let definition = po_definition_id
@@ -214,7 +248,7 @@ mod tests {
     fn draft(lines: Vec<DraftLine>) -> DocumentDraft {
         DocumentDraft {
             doc_type: DocumentType::Invoice,
-            customer_id: "31".into(),
+            contact_id: "31".into(),
             txn_date: "2026-11-02".into(),
             due_date: Some("2026-12-02".into()),
             doc_number: None,
@@ -270,12 +304,31 @@ mod tests {
         blank.item_id = None;
         blank.description = None;
         assert!(to_payload(&draft(vec![blank]), None, false).unwrap_err().to_string().contains("line 1"));
-        let mut bill = draft(vec![line("1", "1")]);
-        bill.doc_type = DocumentType::Bill;
-        assert!(to_payload(&bill, None, false).is_err());
+        let mut deposit = draft(vec![line("1", "1")]);
+        deposit.doc_type = DocumentType::Deposit;
+        assert!(to_payload(&deposit, None, false).is_err());
         let mut bad_date = draft(vec![line("1", "1")]);
         bad_date.txn_date = "11/02/2026".into();
         assert!(to_payload(&bad_date, None, false).is_err());
+    }
+
+    #[test]
+    fn a_purchase_order_goes_to_a_vendor_with_expense_lines() {
+        let mut po = draft(vec![line("40", "18.4375")]);
+        po.doc_type = DocumentType::PurchaseOrder;
+        po.customer_memo = Some("Deliver to dock 2".into());
+        let body = to_payload(&po, None, false).unwrap();
+        assert_eq!(body["VendorRef"]["value"], "31");
+        assert!(body.get("CustomerRef").is_none());
+        assert_eq!(body["Line"][0]["DetailType"], "ItemBasedExpenseLineDetail");
+        assert_eq!(body["Line"][0]["Amount"].to_string(), "737.5");
+        assert!(body["Line"][0]["ItemBasedExpenseLineDetail"].get("TaxCodeRef").is_none());
+        assert_eq!(body["Memo"], "Deliver to dock 2");
+
+        let mut no_item = line("1", "5");
+        no_item.item_id = None;
+        po.lines = vec![no_item];
+        assert!(to_payload(&po, None, false).unwrap_err().to_string().contains("needs a product"));
     }
 
     #[test]

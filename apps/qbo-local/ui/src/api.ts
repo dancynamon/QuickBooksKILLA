@@ -91,7 +91,8 @@ export interface DraftLine {
 
 export interface Draft {
   docType: DocType;
-  customerId: string;
+  /** The customer on a sales document, the vendor on a purchase. */
+  contactId: string;
   txnDate: string;
   dueDate: string | null;
   docNumber: string | null;
@@ -210,6 +211,7 @@ export const api = {
   items: (realm: string) => call<Item[]>("items", { realm }),
   itemDocuments: (realm: string, itemId: string) => call<Document[]>("itemDocuments", { realm, itemId }),
   customers: (realm: string) => call<Customer[]>("customers", { realm }),
+  vendors: (realm: string) => call<Customer[]>("vendors", { realm }),
   documentDraft: (realm: string, qboId: string) =>
     call<{ draft: Draft; contactName: string | null; openWrites: number }>("documentDraft", { realm, qboId }),
   saveDocument: (realm: string, draft: Draft, qboId?: string) =>

@@ -31,7 +31,7 @@ than engineering judgement.
 ## Build
 
 ```sh
-cargo test          # 278 tests, all offline
+cargo test          # 280 tests, all offline
 cargo clippy --all-targets
 cargo run --bin qbo-local
 
@@ -86,14 +86,15 @@ Built and tested:
   shell in `apps/qbo-local-desktop`; both call one `api::dispatch`
 - Read-only reports and lists: A/R and A/P aging (as-of date, five buckets),
   sales by customer (line amounts before tax, net of credits), products and
-  services with price, cost, margin, on-hand and where-used
+  services with price, cost, margin, on-hand and where-used; a statement
+  strip (open balance by days past due) on every customer and vendor
 - Synthetic book generator (`demo`) for UI work and §11 measurements
 - §8 safety nets for M2: `AuditedClient` appends every QBO write (request,
   `RequestId`, result) to an fsynced JSONL file; `snapshot` writes a dated
   `VACUUM INTO` copy of the replica, outbox included, keeping the newest N
 
-- M2 write path, built and switched off: invoice, estimate and sales-receipt
-  editor, new customers usable before QuickBooks has them, a sync queue to
+- M2 write path, built and switched off: editor for estimates, invoices,
+  sales receipts, credit memos, purchase orders and bills, new customers usable before QuickBooks has them, a sync queue to
   retry or discard what QuickBooks refused, all through the durable outbox
   and the write gate (`qbo-local writes`; DECISIONS D14). Try it end to end
   on the synthetic book with `serve --demo-writes`

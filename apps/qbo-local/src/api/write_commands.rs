@@ -24,6 +24,7 @@ use crate::writes::{self, Resolution, WriteError};
 /// writes are off.
 pub const WRITE_COMMANDS: &[&str] = &[
     "customers",
+    "vendors",
     "documentDraft",
     "saveDocument",
     "createCustomer",
@@ -88,6 +89,15 @@ pub(super) fn pending_document(store: &Store, realm: &RealmId, record: &OutboxRe
         return Ok(None);
     };
     let payload = &record.payload_json;
+    let purchase = crate::compose::is_purchase(doc_type);
+    let contact_type = if purchase { ContactType::Vendor } else { ContactType::Customer };
+    let contact_id = text(payload, if purchase { "/VendorRef/value" } else { "/CustomerRef/value" });
+    let contact_name = match &contact_id {
+        Some(id) if purchase => store.contact_name(realm, ContactType::Vendor, id)?,
+        Some(id) => customer_name(store, realm, id)?,
+        None => None,
+    };
+    let detail_type = if purchase { "ItemBasedExpenseLineDetail" } else { "SalesItemLineDetail" };
     let lines: Vec<LineDto> = payload
         .get("Line")
         .and_then(|l| l.as_array())
@@ -96,20 +106,15 @@ pub(super) fn pending_document(store: &Store, realm: &RealmId, record: &OutboxRe
         .enumerate()
         .map(|(i, line)| LineDto {
             line_no: i as i64 + 1,
-            item_id: text(line, "/SalesItemLineDetail/ItemRef/value"),
+            item_id: text(line, &format!("/{detail_type}/ItemRef/value")),
             description: text(line, "/Description"),
-            qty: line.pointer("/SalesItemLineDetail/Qty").map(|v| v.to_string()),
-            unit_price: line.pointer("/SalesItemLineDetail/UnitPrice").map(|v| v.to_string()),
+            qty: line.pointer(&format!("/{detail_type}/Qty")).map(|v| v.to_string()),
+            unit_price: line.pointer(&format!("/{detail_type}/UnitPrice")).map(|v| v.to_string()),
             amount_minor: line.get("Amount").map(minor_of).unwrap_or(0),
-            class_id: text(line, "/SalesItemLineDetail/ClassRef/value"),
-            taxable: text(line, "/SalesItemLineDetail/TaxCodeRef/value").as_deref() == Some("TAX"),
+            class_id: text(line, &format!("/{detail_type}/ClassRef/value")),
+            taxable: text(line, &format!("/{detail_type}/TaxCodeRef/value")).as_deref() == Some("TAX"),
         })
         .collect();
-    let contact_id = text(payload, "/CustomerRef/value");
-    let contact_name = match &contact_id {
-        Some(id) => customer_name(store, realm, id)?,
-        None => None,
-    };
     let document = DocumentDto {
         qbo_id: record.local_entity_id.clone(),
         doc_type,
@@ -117,7 +122,7 @@ pub(super) fn pending_document(store: &Store, realm: &RealmId, record: &OutboxRe
         txn_date: text(payload, "/TxnDate").unwrap_or_default(),
         due_date: text(payload, "/DueDate"),
         contact_id,
-        contact_type: Some(ContactType::Customer),
+        contact_type: Some(contact_type),
         contact_name,
         class_id: text(payload, "/ClassRef/value"),
         // Before tax: QuickBooks adds tax when it accepts the document.
@@ -126,7 +131,7 @@ pub(super) fn pending_document(store: &Store, realm: &RealmId, record: &OutboxRe
         status: Some(write_status(record.state).to_string()),
         po_number: text(payload, "/CustomField/0/StringValue"),
         private_note: text(payload, "/PrivateNote"),
-        customer_memo: text(payload, "/CustomerMemo/value"),
+        customer_memo: text(payload, "/CustomerMemo/value").or_else(|| text(payload, "/Memo")),
         pending_write: Some(record.state.as_str().to_string()),
     };
     Ok(Some((document, lines)))
@@ -233,6 +238,7 @@ struct ResolveArgs {
 pub(super) fn dispatch(store: &Store, command: &str, args: Value, now: DateTime<Utc>) -> Option<Result<Value, ApiError>> {
     let result = match command {
         "customers" => customers(store, args),
+        "vendors" => vendors(store, args),
         "documentDraft" => document_draft(store, args),
         "saveDocument" => save_document(store, args, now),
         "createCustomer" => create_customer(store, args, now),
@@ -265,6 +271,17 @@ fn customers(store: &Store, args: Value) -> Result<Value, ApiError> {
     to_json(out)
 }
 
+fn vendors(store: &Store, args: Value) -> Result<Value, ApiError> {
+    let args: RealmOnly = parse(args)?;
+    to_json(
+        store
+            .contacts(&realm(&args.realm)?, ContactType::Vendor)?
+            .into_iter()
+            .map(|(id, name, company)| serde_json::json!({ "qboId": id, "displayName": name, "companyName": company, "pending": false }))
+            .collect::<Vec<_>>(),
+    )
+}
+
 /// An existing document as an editable draft.
 fn document_draft(store: &Store, args: Value) -> Result<Value, ApiError> {
     let args: DraftArgs = parse(args)?;
@@ -288,7 +305,7 @@ fn document_draft(store: &Store, args: Value) -> Result<Value, ApiError> {
         .collect();
     let draft = serde_json::json!({
         "docType": doc.doc_type,
-        "customerId": doc.contact_id,
+        "contactId": doc.contact_id,
         "txnDate": doc.txn_date,
         "dueDate": doc.due_date,
         "docNumber": doc.doc_number,
@@ -411,7 +428,7 @@ mod tests {
 
     fn draft(customer: &str) -> serde_json::Value {
         json!({
-            "docType": "Invoice", "customerId": customer, "txnDate": "2026-11-02", "dueDate": "2026-12-02",
+            "docType": "Invoice", "contactId": customer, "txnDate": "2026-11-02", "dueDate": "2026-12-02",
             "lines": [ { "itemId": "1035", "description": "Rescue tube, red", "qty": "20", "rate": "49.25", "taxable": false } ]
         })
     }
@@ -478,6 +495,21 @@ mod tests {
         // The total the editor would send equals what the replica holds.
         let sent: i64 = record.payload_json["Line"].as_array().unwrap().iter().map(|l| super::minor_of(&l["Amount"])).sum();
         assert_eq!(sent, invoice.total.minor());
+    }
+
+    #[test]
+    fn a_purchase_order_queues_for_a_vendor_and_lists_under_purchase_orders() {
+        let store = book(true);
+        let realm = crate::domain::RealmId::parse(DEMO_REALM).unwrap();
+        let vendor = store.contacts(&realm, crate::domain::ContactType::Vendor).unwrap().remove(0);
+        let item = store.items(&realm).unwrap().remove(0).qbo_id;
+        let po = json!({ "docType": "PurchaseOrder", "contactId": vendor.0, "txnDate": "2026-11-02",
+                         "lines": [ { "itemId": item, "description": "XLPE sheet", "qty": "40", "rate": "18.4375" } ] });
+        dispatch_at(&store, "saveDocument", json!({ "realm": DEMO_REALM, "draft": po }), now()).unwrap();
+        let register = dispatch_at(&store, "documents", json!({ "realm": DEMO_REALM, "docType": "PurchaseOrder" }), now()).unwrap();
+        assert_eq!(register[0]["contactName"], vendor.1.as_str());
+        assert_eq!(register[0]["contactType"], "Vendor");
+        assert_eq!(register[0]["totalMinor"], 73_750);
     }
 
     #[test]

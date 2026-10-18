@@ -27,6 +27,7 @@ await page.goto(`${base}/#/r/${realm}/list/Invoice`);
 await page.waitForSelector(".grid tbody tr[data-index]");
 await page.click("text=New invoice");
 await page.waitForSelector(".editor");
+await page.waitForSelector("#bb-items option", { state: "attached" });
 
 // A customer that does not exist yet, added inline.
 const name = `Gull Pond Swim Team ${Date.now() % 100000}`;
@@ -85,6 +86,25 @@ assert.match(await page.textContent(".banner"), /on its way/);
 await page.waitForSelector(".banner", { state: "detached", timeout: 30_000 });
 assert.match(await page.textContent(".note"), /Ship with the next pallet/);
 await shot("edited");
+
+// A purchase order to a vendor: expense lines, no tax column, no customer PO.
+await page.goto(`${base}/#/r/${realm}/new/PurchaseOrder`);
+await page.waitForSelector(".editor");
+// Pickers fill asynchronously; choose only once the lists are there.
+await page.waitForSelector("#bb-customers option", { state: "attached" });
+await page.waitForSelector("#bb-items option", { state: "attached" });
+assert.equal(await page.locator("text=Customer PO").count(), 0);
+const vendor = await page.$eval("#bb-customers option", (o) => o.value);
+await page.fill('input[list="bb-customers"]', vendor);
+await page.fill('[aria-label="Line 1 product"]', firstItem);
+await page.press('[aria-label="Line 1 product"]', "Tab");
+await page.fill('[aria-label="Line 1 quantity"]', "40");
+await page.fill('[aria-label="Line 1 rate"]', "18.4375");
+assert.equal((await page.textContent(".edit-lines tbody tr td:nth-child(6)")).trim(), "737.50");
+await page.keyboard.press("Control+s");
+await page.waitForSelector(".banner");
+await page.waitForSelector(".banner", { state: "detached", timeout: 30_000 });
+assert.match(await page.textContent(".facts"), /737\.50/);
 
 await page.goto(`${base}/#/r/${realm}/writes`);
 await page.waitForSelector("text=Nothing waiting");
