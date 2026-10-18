@@ -302,7 +302,97 @@ pub fn seed(store: &Store, size: DemoSize, seed: u64, now: DateTime<Utc>) -> Res
     for chunk in book.chunks(500) {
         store.apply_batch(&realm, chunk, None, now)?;
     }
+    seed_manufacturing(store, &realm, now)?;
     Ok(book.len())
+}
+
+/// Net board-feet in one finished unit of each foam product; the rest are
+/// bought in or assembled, and cost by parts and labour only.
+const FOAM_NET_BF: &[(&str, &str)] = &[
+    ("Rescue tube", "2.1"),
+    ("Kickboard", "0.9"),
+    ("Dock bumper", "3.2"),
+    ("Pool noodle", "0.6"),
+    ("Swim barbell", "1.1"),
+    ("Lane line float", "0.5"),
+    ("Anti-fatigue mat", "5"),
+];
+
+/// Materials by colour, three receipts with freight, a build sheet for every
+/// product, and a few runs — one of them over its sheet.
+fn seed_manufacturing(store: &Store, realm: &RealmId, now: DateTime<Utc>) -> Result<(), StoreError> {
+    use std::str::FromStr;
+
+    use ledger_core::Money;
+    use rust_decimal::Decimal;
+
+    use crate::mfg::{self, ActualMaterial, Component, ReceiptLine};
+    use crate::store::mfg_store::Material;
+
+    let d = |raw: &str| Decimal::from_str(raw).expect("constant decimal");
+    for color in COLORS {
+        store.save_material(realm, &Material {
+            material_id: format!("xlpe-2-{color}"),
+            name: format!("XLPE 2 in {color}"),
+            thickness_in: d("2"),
+            width_in: d("48"),
+            length_in: d("96"),
+            color: Some(color.to_string()),
+        }, now)?;
+    }
+    // Three deliveries: prices creep up, freight varies, colours mix.
+    let deliveries = [("2026-06-10", "86.40", "412.00"), ("2026-08-14", "89.60", "455.50"), ("2026-10-02", "92.80", "398.25")];
+    for (n, (on, price, freight)) in deliveries.iter().enumerate() {
+        let lines: Vec<ReceiptLine> = COLORS
+            .iter()
+            .enumerate()
+            .map(|(i, color)| ReceiptLine {
+                material_id: format!("xlpe-2-{color}"),
+                sheets: Decimal::from(8 + ((i + n) % 4) as i64 * 4),
+                bf_per_sheet: d("64"),
+                price_per_sheet: d(price) + Decimal::from((i % 3) as i64),
+                surcharge_per_sheet: d("2.75"),
+            })
+            .collect();
+        let freight = Money::from_minor((d(freight) * Decimal::from(100)).try_into().expect("cents"));
+        let landed = mfg::landed_cost(&lines, freight).expect("valid constant receipt");
+        store.record_receipt(realm, &format!("demo-rcpt-{n}"), on, None, Some(&format!("PO-{}", 4400 + n)), freight, &lines, &landed, now)?;
+    }
+
+    let prices = store.material_prices(realm)?;
+    let mut runs = 0;
+    for item in store.items(realm)? {
+        let product = FOAM_NET_BF.iter().find(|(p, _)| item.name.starts_with(p));
+        let color = COLORS.iter().find(|c| item.name.contains(*c)).copied().unwrap_or("blue");
+        let mut components = Vec::new();
+        if let Some((_, net)) = product {
+            components.push(Component::Material { material_id: format!("xlpe-2-{color}"), net_bf: d(net), yield_pct: d("78") });
+            components.push(Component::Labour { name: "CNC cut".into(), minutes: d("4"), rate_per_hour: d("45") });
+        } else {
+            components.push(Component::Part { name: "Bought-in components".into(), item_id: None, qty: d("1"), unit_cost: d("12.50") });
+        }
+        components.push(Component::Labour { name: "Finish and pack".into(), minutes: d("6"), rate_per_hour: d("28") });
+        store.save_build_sheet(realm, &item.qbo_id, &components, now)?;
+
+        if product.is_some() && runs < 6 {
+            // Every third run uses 9% more foam than the sheet allows.
+            let quantity = Decimal::from(50 + runs * 25);
+            let standard = mfg::build_variance(&components, &prices, quantity, &[]).expect("valid sheet");
+            let actual: Vec<ActualMaterial> = standard
+                .lines
+                .iter()
+                .map(|l| ActualMaterial {
+                    material_id: l.material_id.clone(),
+                    board_feet: mfg::rate(l.standard_bf * if runs % 3 == 2 { d("1.09") } else { d("0.99") }),
+                })
+                .collect();
+            let variance = mfg::build_variance(&components, &prices, quantity, &actual).expect("valid run");
+            let on = format!("2026-10-{:02}", 3 + runs * 2);
+            store.record_build(realm, &format!("demo-build-{runs}"), &item.qbo_id, &on, &components, &actual, &variance, None, now)?;
+            runs += 1;
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -337,6 +427,13 @@ mod tests {
         assert_eq!(store.list_documents(&realm, DocumentType::Invoice, 1_000).unwrap().len(), 150);
         assert!(store.count_projected(&realm, ProjectedTable::DocumentLinks).unwrap() > 0);
         assert_eq!(store.orphaned_lines(&realm).unwrap(), 0);
+
+        // Every product is costed, and the seeded runs include an overrun.
+        let prices = store.material_prices(&realm).unwrap();
+        for (_, components, _) in store.build_sheets(&realm).unwrap() {
+            crate::mfg::unit_cost(&components, &prices).unwrap();
+        }
+        assert!(store.builds(&realm, None).unwrap().iter().any(|b| b.flagged));
     }
 
     #[test]

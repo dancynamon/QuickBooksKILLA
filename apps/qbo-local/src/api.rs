@@ -369,7 +369,9 @@ pub const COMMANDS: &[&str] = &[
     "itemDocuments",
 ];
 
+mod mfg_commands;
 mod write_commands;
+pub use mfg_commands::MFG_COMMANDS;
 pub use write_commands::WRITE_COMMANDS;
 
 pub fn dispatch(store: &Store, command: &str, args: Value) -> Result<Value, ApiError> {
@@ -379,6 +381,9 @@ pub fn dispatch(store: &Store, command: &str, args: Value) -> Result<Value, ApiE
 /// [`dispatch`] at a given time, so write commands are testable with a fixed clock.
 pub fn dispatch_at(store: &Store, command: &str, args: Value, now: chrono::DateTime<chrono::Utc>) -> Result<Value, ApiError> {
     if let Some(result) = write_commands::dispatch(store, command, args.clone(), now) {
+        return result;
+    }
+    if let Some(result) = mfg_commands::dispatch(store, command, args.clone(), now) {
         return result;
     }
     match command {

@@ -9,6 +9,7 @@
 //! - [`api`]      — the UI's read-only command surface (M1)
 //! - [`demo`]     — §11: a synthetic book for the UI and benchmarks
 //! - [`compose`]  — drafts typed in the UI to QBO payloads
+//! - [`mfg`]      — manufacturing costing: landed cost, build sheets, builds
 //! - [`domain`]   — §2: realm scoping, entity types
 //! - [`store`]    — §3: replica schema and migrations
 //! - [`project`]  — §3.2: raw payloads to the parsed projection
@@ -32,6 +33,7 @@ pub mod client;
 pub mod compose;
 pub mod demo;
 pub mod domain;
+pub mod mfg;
 pub mod driver;
 pub mod http;
 pub mod keychain;

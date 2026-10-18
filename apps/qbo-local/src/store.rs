@@ -13,6 +13,7 @@ use thiserror::Error;
 use ledger_core::Money;
 
 pub mod lineage;
+pub mod mfg_store;
 pub mod outbox_store;
 pub mod reports;
 pub mod search;
@@ -372,6 +373,87 @@ END;
 -- production, which is the default.
 ALTER TABLE realms ADD COLUMN environment TEXT NOT NULL DEFAULT 'production'
     CHECK (environment IN ('production', 'sandbox'));
+"#,
+    },
+    Migration {
+        version: 4,
+        name: "manufacturing: materials, receipts, build sheets, builds",
+        sql: r#"
+-- The replica's own data: QuickBooks has no bill of materials at any tier, so
+-- nothing here is mirrored and nothing here is ever sent to QuickBooks.
+-- Decimals are text, as everywhere else in this file. Nothing is deleted: a
+-- wrong receipt is corrected by a later one, and history keeps both.
+CREATE TABLE materials (
+    realm_id      TEXT NOT NULL REFERENCES realms(realm_id),
+    material_id   TEXT NOT NULL,
+    name          TEXT NOT NULL,
+    thickness_in  TEXT NOT NULL,
+    width_in      TEXT NOT NULL,
+    length_in     TEXT NOT NULL,
+    color         TEXT,
+    created_at    TEXT NOT NULL,
+    PRIMARY KEY (realm_id, material_id)
+) STRICT;
+
+CREATE TABLE material_receipts (
+    realm_id       TEXT NOT NULL REFERENCES realms(realm_id),
+    receipt_id     TEXT NOT NULL,
+    received_on    TEXT NOT NULL,
+    vendor_id      TEXT,
+    reference      TEXT,
+    freight_minor  INTEGER NOT NULL,
+    created_at     TEXT NOT NULL,
+    PRIMARY KEY (realm_id, receipt_id)
+) STRICT;
+
+CREATE TABLE material_receipt_lines (
+    realm_id             TEXT NOT NULL,
+    receipt_id           TEXT NOT NULL,
+    line_no              INTEGER NOT NULL,
+    material_id          TEXT NOT NULL,
+    sheets               TEXT NOT NULL,
+    bf_per_sheet         TEXT NOT NULL,
+    price_per_sheet      TEXT NOT NULL,
+    surcharge_per_sheet  TEXT NOT NULL,
+    goods_minor          INTEGER NOT NULL,
+    freight_minor        INTEGER NOT NULL,
+    landed_per_bf        TEXT NOT NULL,
+    PRIMARY KEY (realm_id, receipt_id, line_no),
+    FOREIGN KEY (realm_id, receipt_id) REFERENCES material_receipts(realm_id, receipt_id),
+    FOREIGN KEY (realm_id, material_id) REFERENCES materials(realm_id, material_id)
+) STRICT;
+
+CREATE INDEX idx_receipt_lines_material ON material_receipt_lines(realm_id, material_id);
+
+-- One build sheet per finished product, keyed by its QuickBooks item.
+CREATE TABLE build_sheets (
+    realm_id         TEXT NOT NULL REFERENCES realms(realm_id),
+    item_id          TEXT NOT NULL,
+    components_json  TEXT NOT NULL,
+    updated_at       TEXT NOT NULL,
+    PRIMARY KEY (realm_id, item_id)
+) STRICT;
+
+-- A production run, with the build sheet as it stood that day: a later edit
+-- to the sheet must not rewrite what a past run was measured against.
+CREATE TABLE builds (
+    realm_id          TEXT NOT NULL REFERENCES realms(realm_id),
+    build_id          TEXT NOT NULL,
+    item_id           TEXT NOT NULL,
+    built_on          TEXT NOT NULL,
+    quantity          TEXT NOT NULL,
+    components_json   TEXT NOT NULL,
+    actual_json       TEXT NOT NULL,
+    standard_minor    INTEGER NOT NULL,
+    actual_minor      INTEGER NOT NULL,
+    variance_minor    INTEGER NOT NULL,
+    flagged           INTEGER NOT NULL,
+    note              TEXT,
+    created_at        TEXT NOT NULL,
+    PRIMARY KEY (realm_id, build_id)
+) STRICT;
+
+CREATE INDEX idx_builds_item ON builds(realm_id, item_id, built_on);
 "#,
     },
 ];
