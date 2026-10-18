@@ -60,6 +60,19 @@ await page.waitForSelector(".grid tbody tr[data-index]");
 await page.click(".grid tbody tr[data-index] td:nth-child(3) a");
 await page.waitForURL(/\/contact\/Vendor\//);
 
+// Reports: aging buckets add up to the total.
+await page.goto(`${base}/#/r/${realm}/report/ar`);
+await page.waitForSelector(".grid tfoot td");
+const foot = await page.$$eval(".grid tfoot td.num", (cells) => cells.map((c) => Math.round(Number(c.textContent.replace(/,/g, "")) * 100)));
+assert.equal(foot.slice(0, 5).reduce((a, b) => a + b, 0), foot[5], "A/R buckets sum to total");
+
+// Items: a product page lists where it was used.
+await page.goto(`${base}/#/r/${realm}/items`);
+await page.waitForSelector(".grid tbody tr a");
+await page.click(".grid tbody tr:first-child a");
+await page.waitForSelector(".facts");
+assert.ok((await page.locator(".grid tbody tr").count()) > 0);
+
 // Phone width: no horizontal page scroll.
 await page.setViewportSize({ width: 390, height: 800 });
 assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true);

@@ -20,6 +20,7 @@ use thiserror::Error;
 
 use crate::domain::{ContactType, DocumentType, RealmId};
 use crate::store::search::{Hit, MatchReason};
+use crate::store::reports::AgingSide;
 use crate::store::{DocumentRow, LineRow, Store, StoreError};
 
 #[derive(Debug, Error)]
@@ -282,6 +283,59 @@ fn to_json(value: impl Serialize) -> Result<Value, ApiError> {
     serde_json::to_value(value).map_err(|e| ApiError::BadArguments(e.to_string()))
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AgingArgs {
+    realm: String,
+    side: String,
+    /// `YYYY-MM-DD`; today when omitted.
+    as_of: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RangeArgs {
+    realm: String,
+    from: String,
+    to: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ItemArgs {
+    realm: String,
+    item_id: String,
+}
+
+#[derive(Serialize, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgingRowDto {
+    pub contact_id: String,
+    pub contact_name: Option<String>,
+    pub current_minor: i64,
+    pub days1to30_minor: i64,
+    pub days31to60_minor: i64,
+    pub days61to90_minor: i64,
+    pub over90_minor: i64,
+    pub total_minor: i64,
+    pub documents: i64,
+}
+
+#[derive(Serialize, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgingDto {
+    pub as_of: String,
+    pub rows: Vec<AgingRowDto>,
+}
+
+/// A date argument must be `YYYY-MM-DD`: it is compared as text in SQL, and
+/// anything else would compare wrongly rather than fail.
+fn date_arg(raw: &str) -> Result<String, ApiError> {
+    chrono::NaiveDate::parse_from_str(raw, "%Y-%m-%d")
+        .map(|d| d.to_string())
+        .map_err(|_| ApiError::BadArguments(format!("not a YYYY-MM-DD date: {raw:?}")))
+}
+
 // ---------------------------------------------------------------------------
 // Dispatch
 // ---------------------------------------------------------------------------
@@ -296,6 +350,10 @@ pub const COMMANDS: &[&str] = &[
     "document",
     "contactDocuments",
     "classes",
+    "aging",
+    "salesByCustomer",
+    "items",
+    "itemDocuments",
 ];
 
 pub fn dispatch(store: &Store, command: &str, args: Value) -> Result<Value, ApiError> {
@@ -422,6 +480,69 @@ pub fn dispatch(store: &Store, command: &str, args: Value) -> Result<Value, ApiE
                 .collect();
             Ok(Value::Object(map))
         }
+        "aging" => {
+            let args: AgingArgs = parse(args)?;
+            let side = match args.side.as_str() {
+                "receivable" => AgingSide::Receivable,
+                "payable" => AgingSide::Payable,
+                other => return Err(ApiError::BadArguments(format!("side must be receivable or payable, not {other:?}"))),
+            };
+            let as_of = match args.as_of {
+                Some(raw) => date_arg(&raw)?,
+                None => chrono::Local::now().date_naive().to_string(),
+            };
+            let rows = store.aging(&realm(&args.realm)?, side, &as_of)?;
+            to_json(AgingDto {
+                as_of,
+                rows: rows
+                    .into_iter()
+                    .map(|r| AgingRowDto {
+                        contact_id: r.contact_id,
+                        contact_name: r.contact_name,
+                        current_minor: r.current.minor(),
+                        days1to30_minor: r.days_1_30.minor(),
+                        days31to60_minor: r.days_31_60.minor(),
+                        days61to90_minor: r.days_61_90.minor(),
+                        over90_minor: r.days_over_90.minor(),
+                        total_minor: r.total.minor(),
+                        documents: r.documents,
+                    })
+                    .collect(),
+            })
+        }
+        "salesByCustomer" => {
+            let args: RangeArgs = parse(args)?;
+            let rows = store.sales_by_customer(&realm(&args.realm)?, &date_arg(&args.from)?, &date_arg(&args.to)?)?;
+            to_json(
+                rows.into_iter()
+                    .map(|r| serde_json::json!({
+                        "contactId": r.contact_id,
+                        "contactName": r.contact_name,
+                        "netSalesMinor": r.net_sales.minor(),
+                        "documents": r.documents,
+                    }))
+                    .collect::<Vec<_>>(),
+            )
+        }
+        "items" => {
+            let args: RealmArgs = parse(args)?;
+            to_json(
+                store
+                    .items(&realm(&args.realm)?)?
+                    .into_iter()
+                    .map(|i| serde_json::json!({
+                        "qboId": i.qbo_id, "name": i.name, "sku": i.sku, "itemType": i.item_type,
+                        "unitPrice": i.unit_price, "purchaseCost": i.purchase_cost,
+                        "qtyOnHand": i.qty_on_hand, "active": i.is_active, "usedOn": i.used_on,
+                    }))
+                    .collect::<Vec<_>>(),
+            )
+        }
+        "itemDocuments" => {
+            let args: ItemArgs = parse(args)?;
+            let rows = store.documents_for_item(&realm(&args.realm)?, &args.item_id, MAX_ROWS)?;
+            to_json(rows.into_iter().map(DocumentDto::from).collect::<Vec<_>>())
+        }
         other => Err(ApiError::UnknownCommand(other.to_string())),
     }
 }
@@ -496,6 +617,38 @@ mod tests {
     }
 
     #[test]
+    fn aging_buckets_sum_to_the_total() {
+        let value = dispatch(&book(), "aging", json!({ "realm": DEMO_REALM, "side": "receivable", "asOf": "2026-10-01" })).unwrap();
+        assert_eq!(value["asOf"], "2026-10-01");
+        let rows = value["rows"].as_array().unwrap();
+        assert!(!rows.is_empty(), "the demo book has open invoices");
+        for row in rows {
+            let parts: i64 = ["currentMinor", "days1to30Minor", "days31to60Minor", "days61to90Minor", "over90Minor"]
+                .iter()
+                .map(|k| row[*k].as_i64().unwrap())
+                .sum();
+            assert_eq!(parts, row["totalMinor"].as_i64().unwrap());
+        }
+        assert_eq!(
+            dispatch(&book(), "aging", json!({ "realm": DEMO_REALM, "side": "sideways" })).unwrap_err().status(),
+            400
+        );
+        assert_eq!(
+            dispatch(&book(), "aging", json!({ "realm": DEMO_REALM, "side": "payable", "asOf": "10/01/2026" })).unwrap_err().status(),
+            400
+        );
+    }
+
+    #[test]
+    fn items_and_their_documents_are_listed() {
+        let store = book();
+        let items = dispatch(&store, "items", json!({ "realm": DEMO_REALM })).unwrap();
+        let used = items.as_array().unwrap().iter().find(|i| i["usedOn"].as_i64().unwrap() > 0).unwrap();
+        let docs = dispatch(&store, "itemDocuments", json!({ "realm": DEMO_REALM, "itemId": used["qboId"] })).unwrap();
+        assert_eq!(docs.as_array().unwrap().len() as i64, used["usedOn"].as_i64().unwrap());
+    }
+
+    #[test]
     fn errors_are_typed_for_the_transport() {
         let store = book();
         let missing = dispatch(&store, "document", json!({ "realm": DEMO_REALM, "qboId": "nope" })).unwrap_err();
@@ -509,7 +662,8 @@ mod tests {
     fn every_listed_command_dispatches() {
         let store = book();
         let args = json!({ "realm": DEMO_REALM, "query": "harbor", "docType": "Bill",
-                           "qboId": "1001", "contactType": "Customer", "contactId": "1005" });
+                           "qboId": "1001", "contactType": "Customer", "contactId": "1005",
+                           "side": "payable", "from": "2026-01-01", "to": "2026-12-31", "itemId": "1030" });
         for command in COMMANDS {
             match dispatch(&store, command, args.clone()) {
                 Ok(_) | Err(ApiError::NotFound) => {}

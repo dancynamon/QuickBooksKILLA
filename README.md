@@ -31,7 +31,7 @@ than engineering judgement.
 ## Build
 
 ```sh
-cargo test          # 247 tests, all offline
+cargo test          # 253 tests, all offline
 cargo clippy --all-targets
 cargo run --bin qbo-local
 
@@ -82,6 +82,9 @@ Built and tested:
   view, `⌘K` palette with match reasons and local timing, sync state in the
   chrome, light/dark, text scaling. Served by `qbo-local serve` or the Tauri
   shell in `apps/qbo-local-desktop`; both call one `api::dispatch`
+- Read-only reports and lists: A/R and A/P aging (as-of date, five buckets),
+  sales by customer (line amounts before tax, net of credits), products and
+  services with price, cost, margin, on-hand and where-used
 - Synthetic book generator (`demo`) for UI work and §11 measurements
 - §8 safety nets for M2: `AuditedClient` appends every QBO write (request,
   `RequestId`, result) to an fsynced JSONL file; `snapshot` writes a dated

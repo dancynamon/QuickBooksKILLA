@@ -87,6 +87,42 @@ export interface Status {
   writeEnabled: boolean;
 }
 
+export interface AgingRow {
+  contactId: string;
+  contactName: string | null;
+  currentMinor: number;
+  days1to30Minor: number;
+  days31to60Minor: number;
+  days61to90Minor: number;
+  over90Minor: number;
+  totalMinor: number;
+  documents: number;
+}
+
+export interface Aging {
+  asOf: string;
+  rows: AgingRow[];
+}
+
+export interface SalesRow {
+  contactId: string;
+  contactName: string | null;
+  netSalesMinor: number;
+  documents: number;
+}
+
+export interface Item {
+  qboId: string;
+  name: string;
+  sku: string | null;
+  itemType: string | null;
+  unitPrice: string | null;
+  purchaseCost: string | null;
+  qtyOnHand: string | null;
+  active: boolean;
+  usedOn: number;
+}
+
 declare global {
   interface Window {
     __TAURI__?: { core: { invoke: (cmd: string, args: unknown) => Promise<unknown> } };
@@ -120,6 +156,10 @@ export const api = {
   realms: () => call<Realm[]>("realms"),
   status: (realm: string) => call<Status>("status", { realm }),
   search: (realm: string, query: string, limit = 25) => call<SearchResult>("search", { realm, query, limit }),
+  aging: (realm: string, side: "receivable" | "payable", asOf?: string) => call<Aging>("aging", { realm, side, asOf }),
+  salesByCustomer: (realm: string, from: string, to: string) => call<SalesRow[]>("salesByCustomer", { realm, from, to }),
+  items: (realm: string) => call<Item[]>("items", { realm }),
+  itemDocuments: (realm: string, itemId: string) => call<Document[]>("itemDocuments", { realm, itemId }),
   classes: (realm: string) => call<Record<string, string>>("classes", { realm }),
   documents: (realm: string, docType: DocType, limit = 50_000) => call<Document[]>("documents", { realm, docType, limit }),
   document: (realm: string, qboId: string) => call<DocumentDetail>("document", { realm, qboId }),
