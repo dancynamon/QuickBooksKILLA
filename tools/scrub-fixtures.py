@@ -162,7 +162,9 @@ FIXED_REALM_ID = "1234567890123456"
 SCRUBBED_MARK = "[scrubbed]"
 DENY_NAMES_FILE = "deny-names.txt"
 
-TEXT_FIELD_KEYS = ("PrivateNote", "Description")  # CustomerMemo.value handled separately
+# CustomerMemo.value handled separately. PurchaseDesc is an item's text on
+# purchase documents and often names the vendor it is bought from.
+TEXT_FIELD_KEYS = ("PrivateNote", "Description", "PurchaseDesc")
 
 # Keys whose string values are identifiers or timestamps, never free text.
 STRUCTURAL_KEYS = frozenset(
@@ -189,6 +191,21 @@ STRUCTURAL_KEYS = frozenset(
     )
 )
 
+# An enum-shaped value: one identifier token under a key that names a type
+# ("TaxCodeConfigType": "…", "EntityRef.type": "Vendor"). It cannot carry a
+# contact's name — a one-word contact named like the enum value is a
+# coincidence, not a leak.
+ENUM_VALUE_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
+
+
+def is_structural(key: str, value: str) -> bool:
+    """A string that is an identifier, timestamp, file name or enum, never
+    free text: the name rules neither rewrite it nor flag it."""
+    if key in STRUCTURAL_KEYS:
+        return True
+    return key.lower().endswith(("type", "status")) and bool(ENUM_VALUE_RE.match(value))
+
+
 # A realm id is a long run of digits. QBO's are 16 digits; keep the floor
 # comfortably below that so an id from a differently-sized company still gets
 # caught in a path segment.
@@ -212,6 +229,10 @@ LAST_WORDS = [
     "Landing", "Springs", "Falls", "Meadows", "Junction", "Yard", "Works",
     "Supply", "Traders", "Marine", "Outfitters", "Studio", "Fabrication",
     "Depot", "Foundry", "Freight", "Holdings",
+]
+CITY_WORDS = [
+    "Fairhaven", "Brookmere", "Eastvale", "Northgate", "Westbury", "Lakemont",
+    "Riverton", "Ashford", "Kingsbridge", "Millbrook", "Oakdale", "Stonefield",
 ]
 STREET_WORDS = [
     "Ave", "Blvd", "Way", "Lane", "Drive", "Court", "Place", "Trail",
@@ -355,12 +376,16 @@ def _textual(name: str) -> bool:
 
 
 class NameMatcher:
-    """Finds original names inside text. Names of three characters or fewer
-    (stripped) match only as whole words; longer names match anywhere.
-    Leftmost-longest, non-overlapping. Indexed by first character so a whole
-    book's names (~11k) stay cheap against every string of a slice."""
+    """Finds original names inside text. Names of up to seven characters
+    (stripped) match only on word boundaries — a contact named "Bill" must not
+    match "BillPayment" or "Billing" (first real run, 17 Oct 2026); longer,
+    distinctive names still match anywhere, so a real name glued to other
+    text ("…Corp" without a space) is still caught. A boundary is the edge of
+    the text or a non-alphanumeric character. Leftmost-longest,
+    non-overlapping. Indexed by first character so a whole book's names
+    (~19k) stay cheap against every string of a slice."""
 
-    WHOLE_WORD_MAX = 3
+    WHOLE_WORD_MAX = 7
 
     def __init__(self, names) -> None:
         self._by_first: dict[str, list[str]] = {}
@@ -409,6 +434,10 @@ def fake_street(original: str, key: str = "") -> str:
     number = 100 + (digest % 900)
     word = STREET_WORDS[digest % len(STREET_WORDS)]
     return f"{number} {word}"
+
+
+def fake_city(original: str, key: str = "") -> str:
+    return CITY_WORDS[_stable_int("city:" + original, key) % len(CITY_WORDS)]
 
 
 def fake_email(original: str, key: str = "") -> str:
@@ -1219,7 +1248,7 @@ class Scrubber:
         return text
 
     def scrub_string(self, key: str, text: str) -> str:
-        if key in STRUCTURAL_KEYS or not text:
+        if not text or is_structural(key, text):
             return text
         replaced = self.replace_names(text)
         return SCRUBBED_MARK if self.carries_contact_or_amount(replaced) else replaced
@@ -1273,9 +1302,17 @@ class Scrubber:
         out = {}
         for key, value in addr.items():
             if key in ADDRESS_LINE_KEYS and isinstance(value, str) and value:
-                replaced = self.replace_names(value)
-                out[key] = replaced if replaced != value else fake_street(value, self.key)
-            elif key in (CITY_KEY, STATE_KEY):
+                # A line that is exactly a contact's name becomes that
+                # contact's fake (so Line1 still reads like a recipient);
+                # every other line is a fake street. Never a partial edit:
+                # a street with one word swapped is still that street.
+                if value in self.mapper.map:
+                    out[key] = self.mapper.fake_for(value)
+                else:
+                    out[key] = fake_street(value, self.key)
+            elif key == CITY_KEY and isinstance(value, str) and value:
+                out[key] = fake_city(value, self.key)
+            elif key == STATE_KEY:
                 out[key] = value
             elif key == POSTAL_KEY:
                 out[key] = FIXED_POSTAL_CODE
@@ -1304,15 +1341,20 @@ class LeakDetector:
         self.fakes = NameMatcher(mapper.fakes())
         self.check_amounts = check_amounts
 
-    def _mask_fakes(self, text: str) -> str:
-        # A fake can contain an original's word ("Cove" inside "Harbor Cove");
-        # that is not a leak. Fakes never equal an original (NameMapper).
-        for start, end, _ in reversed(self.fakes.find(text)):
-            text = text[:start] + "\x00" * (end - start) + text[end:]
-        return text
+    def real_names_in(self, text: str) -> list:
+        """Original names in `text`, ignoring any that sit inside a fake
+        ("Cove" inside "Harbor Cove"; fakes never equal an original). Matched
+        on the text as it is: blanking the fakes out first would turn the
+        letters next to one into a false word boundary."""
+        fakes = self.fakes.find(text)
+        return [
+            hit
+            for hit in self.names.find(text)
+            if not any(start < hit[1] and hit[0] < end for start, end, _ in fakes)
+        ]
 
-    def string_leak(self, text: str):
-        if self.names.contains(self._mask_fakes(text)):
+    def string_leak(self, text: str, key: str = ""):
+        if not is_structural(key, text) and self.real_names_in(text):
             return "name"
         for email in EMAIL_RE.findall(text):
             if not email.lower().endswith("@example.com"):
@@ -1348,7 +1390,7 @@ class LeakDetector:
                 orig = original[i] if isinstance(original, list) and i < len(original) else None
                 self._walk(relpath, item, orig, f"{path}[{i}]", key, leaks)
         elif isinstance(node, str):
-            kind = self.string_leak(node)
+            kind = self.string_leak(node, key)
             if kind:
                 leaks.append(Leak(relpath, path, kind, node))
         elif self.check_amounts and key in MONEY_KEYS:
