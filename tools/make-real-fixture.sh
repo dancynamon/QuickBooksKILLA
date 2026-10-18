@@ -10,7 +10,8 @@
 # Any flag is passed through to `qbo-local slice` (see `qbo-local --help`):
 #   --customers N --vendors N --customer ID --vendor ID --since YYYY-MM-DD
 #   --max-docs N --max-records N --pick-seed S
-# Environment: DB (default .local/replica.db), REALM (default: the first
+# Environment: DB (default .local/replica.db), SEED (default
+#   .local/fixtures/scrub-seed), REALM (default: the first
 # [[realms]] id in .local/config.toml).
 #
 # Steps, each logged to .local/fixtures/slice-<stamp>/:
@@ -33,7 +34,7 @@ fi
 
 STAMP=$(date +%Y%m%d-%H%M%S)
 WORK=.local/fixtures/slice-$STAMP
-SEED=.local/fixtures/scrub-seed
+SEED=${SEED:-.local/fixtures/scrub-seed}
 mkdir -p .local/fixtures "$WORK"
 
 if [ ! -f "$SEED" ]; then

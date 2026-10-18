@@ -578,5 +578,81 @@ class NameMatchingTests(unittest.TestCase):
             self.assertNotIn("Kestrelmoor", text)
 
 
+class FirstRealRunRegressionTests(unittest.TestCase):
+    """The first run against the real replica (17 Oct 2026) failed its own
+    leak check on 31 values. Each shape is rebuilt here from invented data."""
+
+    def scrub(self, entities, deny=(), extra=None):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = pathlib.Path(tmp.name)
+        write_book(root / "raw", entities)
+        if deny:
+            (root / "raw" / sf.DENY_NAMES_FILE).write_text("\n".join(deny) + "\n")
+        if extra:
+            extra(root / "raw")
+        sf.run_scrub(root / "raw", root / "out", seed="regression-seed")
+        return read_book(root / "out"), root / "out"
+
+    def test_city_and_every_address_line_are_faked(self):
+        vendor = {
+            "Id": "7", "DisplayName": "Tidewrack Coatings", "Balance": 0,
+            "BillAddr": {"Line1": "Tidewrack Coatings Attn Payables", "Line2": "12 Tidewrack Way",
+                         "City": "Tidewrack", "CountrySubDivisionCode": "ME", "PostalCode": "04101"},
+            "ShipAddr": {"Line1": "Tidewrack Coatings", "City": "Gullhaven"},
+        }
+        customer = {"Id": "8", "DisplayName": "Gullhaven", "Balance": 0}
+        out, _ = self.scrub({("Vendor", "7"): vendor, ("Customer", "8"): customer})
+        addr = out[("Vendor", "7")]["BillAddr"]
+        for key in ("Line1", "Line2", "City"):
+            self.assertNotIn("Tidewrack", addr[key], key)
+        self.assertRegex(addr["Line1"], r"^\d+ \w+$", "a line that only contains a name is a fake street")
+        self.assertIn(addr["City"], sf.CITY_WORDS)
+        self.assertEqual(addr["CountrySubDivisionCode"], "ME")
+        ship = out[("Vendor", "7")]["ShipAddr"]
+        self.assertEqual(ship["Line1"], out[("Vendor", "7")]["DisplayName"], "an exact name line gets its fake")
+        self.assertNotEqual(ship["City"], "Gullhaven")
+
+    def test_purchase_description_naming_a_vendor_is_redacted(self):
+        item = {"Id": "1", "Name": "Hull Primer", "PurchaseDesc": "Order from Tidewrack Coatings, 5 gal",
+                "Description": "Two-part hull primer"}
+        out, _ = self.scrub({("Item", "1"): item}, deny=["Tidewrack Coatings"])
+        self.assertEqual(out[("Item", "1")]["PurchaseDesc"], sf.SCRUBBED_MARK)
+        self.assertEqual(out[("Item", "1")]["Description"], "Two-part hull primer")
+
+    def test_a_contact_named_like_an_entity_type_or_enum_is_not_a_leak(self):
+        entities = {
+            ("Customer", "1"): {"Id": "1", "DisplayName": "Bill", "Balance": 0},
+            ("Bill", "2"): {"Id": "2", "TxnDate": "2026-01-01", "Line": [], "TotalAmt": 0, "Balance": 0},
+            ("TaxCode", "3"): {"Id": "3", "Name": "Local", "TaxCodeConfigType": "Bill"},
+            ("Item", "4"): {"Id": "4", "Name": "Billing adjustment", "Description": "Ask Bill before shipping"},
+        }
+        out, root = self.scrub(entities, deny=["Bill", "Deposit", "Payment"])
+        manifest = json.loads((root / "manifest.json").read_text())
+        self.assertIn("Bill", [entry["entity_type"] for entry in manifest])
+        self.assertTrue((root / "Bill" / "query-none-none-0.json").exists())
+        self.assertEqual(out[("TaxCode", "3")]["TaxCodeConfigType"], "Bill")
+        self.assertEqual(out[("Item", "4")]["Name"], "Billing adjustment", "no match inside a word")
+        self.assertEqual(out[("Item", "4")]["Description"], sf.SCRUBBED_MARK, "the person is still caught")
+
+    def test_free_text_with_a_short_name_is_still_caught_by_the_backstop(self):
+        detector = sf.LeakDetector(sf.Originals(names={"Bill", "Kestrelmoor Lagoon"}), sf.NameMapper(), True)
+        self.assertEqual(detector.string_leak("call Bill on Monday", "Description"), "name")
+        self.assertEqual(detector.string_leak("Bill", "DisplayName"), "name")
+        self.assertIsNone(detector.string_leak("Bill", "entity_type"))
+        self.assertIsNone(detector.string_leak("BillPayment", "Note"))
+        self.assertEqual(detector.string_leak("re:Kestrelmoor LagoonLLC", "Note"), "name", "long names: substring")
+        self.assertEqual(detector.string_leak("Bill", "TaxCodeConfigType"), None)
+        self.assertEqual(detector.string_leak("Bill Smith", "TaxCodeConfigType"), "name", "only one-token enums")
+
+    def test_letters_next_to_a_fake_are_not_a_false_word_boundary(self):
+        mapper = sf.NameMapper()
+        fake = mapper.fake_for("Kestrelmoor Lagoon Supply")
+        detector = sf.LeakDetector(sf.Originals(names={"a", "ix"}), mapper, True)
+        self.assertIsNone(detector.string_leak(fake + "a", "Note"))
+        self.assertIsNone(detector.string_leak("ix" + fake, "Note"))
+        self.assertEqual(detector.string_leak(fake + " a", "Note"), "name")
+
+
 if __name__ == "__main__":
     unittest.main()

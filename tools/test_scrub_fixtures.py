@@ -266,10 +266,11 @@ class FieldRuleTests(unittest.TestCase):
     def test_phone_matches_the_555_01xx_pattern(self):
         self.assertRegex(self.customer["PrimaryPhone"]["FreeFormNumber"], r"^555-01\d{2}$")
 
-    def test_postal_code_is_fixed_city_and_state_survive(self):
+    def test_postal_code_is_fixed_city_is_faked_and_state_survives(self):
         addr = self.customer["BillAddr"]
         self.assertEqual(addr["PostalCode"], "07000")
-        self.assertEqual(addr["City"], "Metropolis")
+        self.assertNotEqual(addr["City"], "Metropolis")
+        self.assertIn(addr["City"], scrub_fixtures.CITY_WORDS)
         self.assertEqual(addr["CountrySubDivisionCode"], "NY")
 
     def test_a_street_line_with_no_name_in_it_becomes_a_fake_street(self):

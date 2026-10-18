@@ -958,6 +958,24 @@ Whole-word matching keeps them caught where they mean something.
 Not run against the live replica: `tools/make-real-fixture.sh` is Dan's step,
 and its output is read file by file before anything is committed.
 
+**First real run, 17 Oct 2026** (against a read-only copy of the replica):
+the leak check refused it, 31 values, nothing written. Two causes, both
+fixed with invented-data tests. Addresses: City was kept as recorded, and
+address lines and an item's `PurchaseDesc` had names swapped inside them;
+now City is a seeded fake, an address line is the contact's fake when it is
+exactly a name and a fake street otherwise, and `PurchaseDesc` is redacted
+like `Description` when it names anyone. Matching: names of up to seven
+characters now match on word boundaries only (a contact named like an
+entity type no longer matches inside `BillPayment`), longer names still as
+substrings; identifiers, file names, entity types and one-token enum values
+under a `…Type`/`…Status` key are neither rewritten nor flagged; and the
+detector skips hits inside a fake instead of blanking fakes out, which had
+made the letters beside one look like a word boundary. Re-run: 168 records
+sliced, leak check clean, every invariant kept, replay 168 mirrored and 0
+quarantined; 0 realm id hits, 0 emails outside example.com, 0 of 230 money
+fields of 1.00 or more unchanged. The output stays in `.local/` for Dan's
+review.
+
 ## D32 — Practice parallel run, Q3 2026: what it found
 
 17 Oct 2026, Claude Code session on Dan's Mac, read-only against the live
