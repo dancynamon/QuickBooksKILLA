@@ -43,7 +43,7 @@ backend in §2.1. Never in the repo, never in a dotfile Dropbox syncs.
 
 ## 1. Where the work stands
 
-`cargo test` — 293 tests, all offline, all green. `cargo clippy --all-targets` —
+`cargo test` — 300 tests, all offline, all green. `cargo clippy --all-targets` —
 clean.
 
 Built and tested:

@@ -456,6 +456,31 @@ CREATE TABLE builds (
 CREATE INDEX idx_builds_item ON builds(realm_id, item_id, built_on);
 "#,
     },
+    Migration {
+        version: 5,
+        name: "material stock: counts and reorder points",
+        sql: r#"
+-- A physical count of one material: the shelf held exactly this much at the
+-- end of the day it is dated. Stock on hand and moving-average cost are
+-- replayed from deliveries, builds and counts, never stored.
+CREATE TABLE material_counts (
+    realm_id     TEXT NOT NULL REFERENCES realms(realm_id),
+    count_id     TEXT NOT NULL,
+    material_id  TEXT NOT NULL,
+    counted_on   TEXT NOT NULL,
+    board_feet   TEXT NOT NULL,
+    note         TEXT,
+    created_at   TEXT NOT NULL,
+    PRIMARY KEY (realm_id, count_id),
+    FOREIGN KEY (realm_id, material_id) REFERENCES materials(realm_id, material_id)
+) STRICT;
+
+CREATE INDEX idx_counts_material ON material_counts(realm_id, material_id, counted_on);
+
+-- Below this many board-feet on hand, the material shows as low.
+ALTER TABLE materials ADD COLUMN reorder_bf TEXT;
+"#,
+    },
 ];
 
 pub fn latest_version() -> i64 {

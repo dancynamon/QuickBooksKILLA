@@ -129,8 +129,25 @@ const row = page.locator(".grid tbody tr", { hasText: material }).first();
 await page.waitForFunction((m) => [...document.querySelectorAll(".grid tbody tr")].some((r) => r.textContent.includes(m) && r.textContent.includes("1.9750")), material);
 assert.match(await row.textContent(), /1\.9750/);
 
+// Stock: a reorder point and a count in sheets. 10 sheets were received;
+// counting 9 leaves 288 bf, under a 300 bf reorder point, and the missing
+// sheet is priced at the average.
+await page.click(`[aria-label="Set reorder point for ${material}"]`);
+await page.fill(`[aria-label="Reorder point for ${material}"]`, "300");
+await page.press(`[aria-label="Reorder point for ${material}"]`, "Enter");
+await page.locator(".grid tbody tr", { hasText: material }).first().locator("text=Count").click();
+await page.fill('[aria-label="Counted amount"]', "9");
+await page.click('button.primary:has-text("Record count")');
+await page.waitForFunction((m) => [...document.querySelectorAll(".grid tbody tr")].some((r) => r.textContent.includes(m) && r.textContent.includes("Low") && r.textContent.includes("288")), material);
+await page.locator(".grid tbody tr", { hasText: material }).first().locator("text=History").click();
+await page.waitForSelector("text=History ·");
+assert.match(await page.textContent("main"), /Count/);
+
 await page.goto(`${base}/#/r/${realm}/sheets`);
 await page.waitForSelector(".grid tbody tr a");
+await page.selectOption('[aria-label="Material cost basis"]', "average");
+await page.waitForTimeout(300);
+await page.selectOption('[aria-label="Material cost basis"]', "latest");
 await page.click(".grid tbody tr a >> nth=0");
 await page.waitForSelector(".components");
 await page.click("text=Add material");

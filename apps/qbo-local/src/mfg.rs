@@ -388,6 +388,29 @@ pub struct BuildVariance {
 
 pub const OVERRUN_FLAG_PCT: i64 = 5;
 
+/// Board-feet of each material a run took off the shelf: what was reported,
+/// or the sheet's gross board-feet where nothing was.
+pub fn material_use(components: &[Component], quantity: Decimal, actual: &[ActualMaterial]) -> Result<Vec<(String, Decimal)>, CostError> {
+    let mut out: Vec<(String, Decimal)> = Vec::new();
+    for component in components {
+        if let Component::Material { material_id, net_bf, yield_pct } = component {
+            let reported: Vec<_> = actual.iter().filter(|a| &a.material_id == material_id).collect();
+            let used = if reported.is_empty() {
+                *net_bf / check_yield(*yield_pct)? * quantity
+            } else {
+                reported.iter().map(|a| a.board_feet).sum()
+            };
+            match out.iter_mut().find(|(m, _)| m == material_id) {
+                // The same material twice on a sheet: a reported figure covers both.
+                Some((_, total)) if reported.is_empty() => *total += used,
+                Some(_) => {}
+                None => out.push((material_id.clone(), used)),
+            }
+        }
+    }
+    Ok(out)
+}
+
 /// Price a run against its build sheet. Materials the run did not report are
 /// taken as used at standard; parts and labour are taken at standard.
 pub fn build_variance(
@@ -433,6 +456,143 @@ pub fn build_variance(
         variance,
         lines,
         flagged,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Stock on hand and moving-average cost
+// ---------------------------------------------------------------------------
+
+/// Something that changed how much of a material is on the shelf.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum StockEvent {
+    /// A delivery: board-feet in, at its landed cost.
+    Received { date: String, reference: String, board_feet: Decimal, landed: Money },
+    /// A production run used this much.
+    Consumed { date: String, reference: String, board_feet: Decimal },
+    /// A physical count: the shelf holds exactly this much.
+    Counted { date: String, reference: String, board_feet: Decimal },
+}
+
+impl StockEvent {
+    fn date(&self) -> &str {
+        match self {
+            StockEvent::Received { date, .. } | StockEvent::Consumed { date, .. } | StockEvent::Counted { date, .. } => date,
+        }
+    }
+
+    /// Same-day order: deliveries land before the day's cutting, and a count
+    /// is taken at the end of the day it is dated.
+    fn rank(&self) -> u8 {
+        match self {
+            StockEvent::Received { .. } => 0,
+            StockEvent::Consumed { .. } => 1,
+            StockEvent::Counted { .. } => 2,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StockMove {
+    pub date: String,
+    pub kind: &'static str,
+    pub reference: String,
+    /// Board-feet in (positive) or out (negative).
+    pub change_bf: Decimal,
+    pub on_hand_bf: Decimal,
+    pub average_per_bf: Decimal,
+    /// What the move did to the value on the shelf, to the cent.
+    pub value_change: Money,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StockState {
+    pub on_hand_bf: Decimal,
+    /// Perpetual weighted average: each delivery blends in at its landed
+    /// cost; each use and each count difference leaves at the average.
+    pub average_per_bf: Option<Decimal>,
+    pub value: Money,
+    /// Board-feet a count found missing (positive) or extra (negative), in total.
+    pub shrinkage_bf: Decimal,
+    pub shrinkage_value: Money,
+    /// Set when cutting ran the shelf below zero: a delivery or a count is
+    /// missing, and the average is not to be trusted until it is entered.
+    pub went_negative: bool,
+    pub moves: Vec<StockMove>,
+}
+
+/// Replay a material's history in date order into on-hand, average cost and
+/// value. Value is carried exactly and rounded only when reported, so a long
+/// history does not accumulate rounding.
+pub fn stock(mut events: Vec<StockEvent>) -> Result<StockState, CostError> {
+    events.sort_by(|a, b| a.date().cmp(b.date()).then(a.rank().cmp(&b.rank())));
+    let mut on_hand = Decimal::ZERO;
+    let mut value = Decimal::ZERO;
+    let mut average: Option<Decimal> = None;
+    let (mut shrink_bf, mut shrink_value) = (Decimal::ZERO, Decimal::ZERO);
+    let mut went_negative = false;
+    let mut moves = Vec::new();
+    for event in events {
+        let before = value;
+        let (kind, reference, change) = match &event {
+            StockEvent::Received { reference, board_feet, landed, .. } => {
+                if *board_feet <= Decimal::ZERO {
+                    return Err(invalid("a delivery brings in more than zero board-feet"));
+                }
+                // Negative stock is a gap in the record; a delivery fills it
+                // at its own price rather than averaging against a hole.
+                let landed = to_decimal(*landed);
+                if on_hand <= Decimal::ZERO {
+                    value = landed + on_hand * (landed / *board_feet);
+                } else {
+                    value += landed;
+                }
+                on_hand += *board_feet;
+                average = Some(if on_hand > Decimal::ZERO { value / on_hand } else { landed / *board_feet });
+                ("received", reference.clone(), *board_feet)
+            }
+            StockEvent::Consumed { reference, board_feet, .. } => {
+                let avg = average.unwrap_or(Decimal::ZERO);
+                on_hand -= *board_feet;
+                value -= *board_feet * avg;
+                if on_hand < Decimal::ZERO {
+                    went_negative = true;
+                }
+                ("used", reference.clone(), -*board_feet)
+            }
+            StockEvent::Counted { reference, board_feet, .. } => {
+                if *board_feet < Decimal::ZERO {
+                    return Err(invalid("a count cannot be negative"));
+                }
+                let avg = average.unwrap_or(Decimal::ZERO);
+                let difference = *board_feet - on_hand;
+                shrink_bf -= difference;
+                shrink_value -= difference * avg;
+                on_hand = *board_feet;
+                value = on_hand * avg;
+                ("counted", reference.clone(), difference)
+            }
+        };
+        moves.push(StockMove {
+            date: event.date().to_string(),
+            kind,
+            reference,
+            change_bf: rate(change),
+            on_hand_bf: rate(on_hand),
+            average_per_bf: rate(average.unwrap_or(Decimal::ZERO)),
+            value_change: money(value - before)?,
+        });
+    }
+    Ok(StockState {
+        on_hand_bf: rate(on_hand),
+        average_per_bf: average.map(rate),
+        value: money(value)?,
+        shrinkage_bf: rate(shrink_bf),
+        shrinkage_value: money(shrink_value)?,
+        went_negative,
+        moves,
     })
 }
 
@@ -532,6 +692,64 @@ mod tests {
     fn impossible_yields_are_skipped_in_the_grid() {
         let grid = sensitivity(&tube(), &prices(), None, &[dec!(0)], &[dec!(25), dec!(0)]).unwrap();
         assert_eq!(grid.len(), 1, "78 + 25 is over 100");
+    }
+
+    fn received(date: &str, bf: Decimal, landed_cents: i64) -> StockEvent {
+        StockEvent::Received { date: date.into(), reference: "PO".into(), board_feet: bf, landed: Money::from_minor(landed_cents) }
+    }
+
+    #[test]
+    fn deliveries_blend_into_a_moving_average() {
+        let state = stock(vec![
+            received("2026-09-01", dec!(640), 96_000), // 1.50
+            StockEvent::Consumed { date: "2026-09-10".into(), reference: "run".into(), board_feet: dec!(320) },
+            received("2026-10-01", dec!(640), 128_000), // 2.00
+        ])
+        .unwrap();
+        // 320 left at 1.50 plus 640 at 2.00 = 960 bf worth 1,760.
+        assert_eq!(state.on_hand_bf, dec!(960));
+        assert_eq!(state.value, Money::from_minor(176_000));
+        assert_eq!(state.average_per_bf, Some(dec!(1.8333)));
+        assert_eq!(state.moves[1].value_change, Money::from_minor(-48_000), "used at the average then, 1.50");
+        assert!(!state.went_negative);
+    }
+
+    #[test]
+    fn events_replay_in_date_order_whatever_order_they_arrive() {
+        let a = stock(vec![
+            StockEvent::Consumed { date: "2026-09-10".into(), reference: "run".into(), board_feet: dec!(100) },
+            received("2026-09-01", dec!(640), 96_000),
+        ])
+        .unwrap();
+        assert_eq!(a.on_hand_bf, dec!(540));
+        assert!(!a.went_negative);
+    }
+
+    #[test]
+    fn a_count_sets_the_shelf_and_prices_the_shrinkage() {
+        let state = stock(vec![
+            received("2026-09-01", dec!(640), 96_000),
+            StockEvent::Counted { date: "2026-09-30".into(), reference: "month end".into(), board_feet: dec!(600) },
+        ])
+        .unwrap();
+        assert_eq!(state.on_hand_bf, dec!(600));
+        assert_eq!(state.shrinkage_bf, dec!(40));
+        assert_eq!(state.shrinkage_value, Money::from_minor(6_000));
+        assert_eq!(state.value, Money::from_minor(90_000));
+    }
+
+    #[test]
+    fn cutting_past_zero_is_flagged_and_the_next_delivery_fills_the_gap_at_its_price() {
+        let state = stock(vec![
+            received("2026-09-01", dec!(100), 15_000),
+            StockEvent::Consumed { date: "2026-09-02".into(), reference: "run".into(), board_feet: dec!(150) },
+            received("2026-09-03", dec!(200), 40_000), // 2.00
+        ])
+        .unwrap();
+        assert!(state.went_negative);
+        assert_eq!(state.on_hand_bf, dec!(150));
+        assert_eq!(state.average_per_bf, Some(dec!(2)));
+        assert_eq!(state.value, Money::from_minor(30_000));
     }
 
     #[test]

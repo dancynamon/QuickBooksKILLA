@@ -14,7 +14,7 @@ use serde::Serialize;
 
 use super::{Store, StoreError};
 use crate::domain::RealmId;
-use crate::mfg::{ActualMaterial, BuildVariance, Component, LandedLine, MaterialPrices, ReceiptLine};
+use crate::mfg::{ActualMaterial, BuildVariance, Component, LandedLine, MaterialPrices, ReceiptLine, StockEvent};
 
 fn dec(raw: &str) -> Result<Decimal, StoreError> {
     Decimal::from_str(raw).map_err(|_| StoreError::Corrupt(format!("not a decimal: {raw:?}")))
@@ -98,6 +98,98 @@ impl MaterialPrices for Prices {
 }
 
 impl Store {
+    pub fn set_reorder_point(&self, realm: &RealmId, material_id: &str, board_feet: Option<Decimal>) -> Result<(), StoreError> {
+        let changed = self.connection.execute(
+            "UPDATE materials SET reorder_bf = ?3 WHERE realm_id = ?1 AND material_id = ?2",
+            params![realm.as_str(), material_id, board_feet.map(|b| b.to_string())],
+        )?;
+        if changed == 0 {
+            return Err(StoreError::Corrupt(format!("no material {material_id}")));
+        }
+        Ok(())
+    }
+
+    pub fn reorder_point(&self, realm: &RealmId, material_id: &str) -> Result<Option<Decimal>, StoreError> {
+        let raw: Option<Option<String>> = self
+            .connection
+            .query_row(
+                "SELECT reorder_bf FROM materials WHERE realm_id = ?1 AND material_id = ?2",
+                params![realm.as_str(), material_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        raw.flatten().as_deref().map(dec).transpose()
+    }
+
+    pub fn record_count(
+        &self,
+        realm: &RealmId,
+        count_id: &str,
+        material_id: &str,
+        counted_on: &str,
+        board_feet: Decimal,
+        note: Option<&str>,
+        now: DateTime<Utc>,
+    ) -> Result<(), StoreError> {
+        self.connection.execute(
+            "INSERT INTO material_counts (realm_id, count_id, material_id, counted_on, board_feet, note, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![realm.as_str(), count_id, material_id, counted_on, board_feet.to_string(), note, now.to_rfc3339()],
+        )?;
+        Ok(())
+    }
+
+    /// Every event that moved this material's stock, unordered: deliveries,
+    /// builds (reported board-feet, or the sheet's where none was), counts.
+    pub fn stock_events(&self, realm: &RealmId, material_id: &str) -> Result<Vec<StockEvent>, StoreError> {
+        let mut events = Vec::new();
+        for receipt in self.receipts(realm, Some(material_id))? {
+            for line in receipt.lines.iter().filter(|l| l.material_id == material_id) {
+                events.push(StockEvent::Received {
+                    date: receipt.received_on.clone(),
+                    reference: receipt.reference.clone().unwrap_or_else(|| "delivery".into()),
+                    board_feet: line.sheets * line.bf_per_sheet,
+                    landed: Money::from_minor(line.goods_minor + line.freight_minor),
+                });
+            }
+        }
+        let mut statement = self.connection.prepare(
+            "SELECT b.built_on, b.quantity, b.components_json, b.actual_json, b.item_id, i.name
+             FROM builds b LEFT JOIN items i ON i.realm_id = b.realm_id AND i.qbo_id = b.item_id
+             WHERE b.realm_id = ?1 AND b.components_json LIKE ?2",
+        )?;
+        let pattern = format!("%{material_id}%");
+        let rows = statement.query_map(params![realm.as_str(), pattern], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?, row.get::<_, Option<String>>(5)?))
+        })?;
+        for row in rows {
+            let (date, quantity, components, actual, item_id, name) = row?;
+            let components: Vec<Component> = serde_json::from_str(&components)?;
+            let actual: Vec<ActualMaterial> = serde_json::from_str(&actual)?;
+            let used = crate::mfg::material_use(&components, dec(&quantity)?, &actual)
+                .map_err(|e| StoreError::Corrupt(e.to_string()))?;
+            for (_, board_feet) in used.into_iter().filter(|(m, _)| m == material_id) {
+                events.push(StockEvent::Consumed {
+                    date: date.clone(),
+                    reference: format!("{} × {}", quantity, name.clone().unwrap_or_else(|| item_id.clone())),
+                    board_feet,
+                });
+            }
+        }
+        let mut statement = self.connection.prepare(
+            "SELECT counted_on, board_feet, note FROM material_counts WHERE realm_id = ?1 AND material_id = ?2",
+        )?;
+        let rows = statement.query_map(params![realm.as_str(), material_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, Option<String>>(2)?))
+        })?;
+        for row in rows {
+            let (date, board_feet, note) = row?;
+            events.push(StockEvent::Counted { date, reference: note.unwrap_or_else(|| "count".into()), board_feet: dec(&board_feet)? });
+        }
+        Ok(events)
+    }
+
     pub fn save_material(&self, realm: &RealmId, material: &Material, now: DateTime<Utc>) -> Result<(), StoreError> {
         self.connection.execute(
             "INSERT INTO materials (realm_id, material_id, name, thickness_in, width_in, length_in, color, created_at)
@@ -366,6 +458,26 @@ mod tests {
         assert_eq!(row.receipts, 2);
         assert_eq!(store.receipts(&realm(), Some("xlpe-2-blue")).unwrap()[0].receipt_id, "r2");
         assert_eq!(store.material_prices(&realm()).unwrap().name("xlpe-2-blue"), "XLPE 2 in blue");
+    }
+
+    #[test]
+    fn stock_replays_deliveries_builds_and_counts() {
+        let store = store();
+        receive(&store, "r1", "2026-09-01", dec!(96));
+        let components = vec![Component::Material { material_id: "xlpe-2-blue".into(), net_bf: dec!(2), yield_pct: dec!(80) }];
+        let prices = store.material_prices(&realm()).unwrap();
+        let variance = crate::mfg::build_variance(&components, &prices, dec!(100), &[]).unwrap();
+        store.record_build(&realm(), "b1", "item-1", "2026-09-05", &components, &[], &variance, None, now()).unwrap();
+        store.record_count(&realm(), "c1", "xlpe-2-blue", "2026-09-30", dec!(380), Some("month end"), now()).unwrap();
+
+        let state = crate::mfg::stock(store.stock_events(&realm(), "xlpe-2-blue").unwrap()).unwrap();
+        // 640 in, 250 used (2 / 0.8 × 100), 390 expected, 380 counted.
+        assert_eq!(state.moves.len(), 3);
+        assert_eq!(state.moves[1].change_bf, dec!(-250));
+        assert_eq!(state.on_hand_bf, dec!(380));
+        assert_eq!(state.shrinkage_bf, dec!(10));
+        store.set_reorder_point(&realm(), "xlpe-2-blue", Some(dec!(400))).unwrap();
+        assert_eq!(store.reorder_point(&realm(), "xlpe-2-blue").unwrap(), Some(dec!(400)));
     }
 
     #[test]

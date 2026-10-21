@@ -296,3 +296,18 @@ than an optimisation, which fixes the one-transaction-per-entity cost flagged in
 - **No posting.** Builds are costed, not journalled. Moving inventory value between raw
   material and finished goods is ledger work (Phase 3) and the posting rules there need
   your CPA's review first.
+
+### D15 addendum — stock on hand (21 Oct 2026)
+
+- **Stock is replayed, never stored.** On-hand board-feet, the moving average and shelf
+  value are computed from deliveries, builds and counts in date order each time they are
+  read. A corrected record changes the history it belongs to; there is no running
+  balance to drift.
+- **Same-day order:** deliveries, then the day's cutting, then a count taken at the end of
+  the day.
+- **A count sets the shelf;** the difference is shrinkage, priced at the average.
+- **Cutting past zero is flagged, not hidden.** A delivery or count is missing; the next
+  delivery fills the gap at its own price rather than averaging against a hole.
+- **Build sheets cost on the latest delivery by default** (how a quote is priced), with the
+  shelf average a per-viewer choice. When nothing is on the shelf the average means
+  nothing, so the latest stands in.

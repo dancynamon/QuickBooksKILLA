@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Aging, api, ApiError, BuildRow, Component, ContactType, Customer, DocType, Document, DocumentDetail, Draft, DraftLine, Hit, Item, MaterialRow, ReceiptRow, Realm, SalesRow, SearchResult, SheetDetail, SheetSummary, Status, Write } from "./api";
+import { Aging, api, ApiError, BuildRow, Component, ContactType, CostBasis, StockMove, StockRow, Customer, DocType, Document, DocumentDetail, Draft, DraftLine, Hit, Item, MaterialRow, ReceiptRow, Realm, SalesRow, SearchResult, SheetDetail, SheetSummary, Status, Write } from "./api";
 import { createContext, useContext } from "react";
 import { ago, DOC_LABELS, DOC_PLURALS, formatDate, formatDecimal, formatMoney, formatPerBf, formatQty, formatRate, lineAmountMinor } from "./format";
 
@@ -1656,6 +1656,9 @@ function WriteLink({ realm, write }: { realm: string; write: Write }) {
 
 function MaterialsView({ realm }: { realm: string }) {
   const [rows, setRows] = useState<MaterialRow[] | null>(null);
+  const [stock, setStock] = useState<Map<string, StockRow>>(new Map());
+  const [counting, setCounting] = useState<{ materialId: string; on: string; amount: string; sheets: boolean; note: string } | null>(null);
+  const [ledger, setLedger] = useState<{ materialId: string; moves: StockMove[] } | null>(null);
   const [receipts, setReceipts] = useState<ReceiptRow[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [tick, setTick] = useState(0);
@@ -1664,8 +1667,48 @@ function MaterialsView({ realm }: { realm: string }) {
 
   useEffect(() => {
     api.materials(realm).then(setRows, (e: ApiError) => setError(e.message));
+    api.stock(realm).then((all) => setStock(new Map(all.map((s) => [s.materialId, s]))), () => setStock(new Map()));
     api.receipts(realm).then(setReceipts, () => setReceipts([]));
   }, [realm, tick]);
+
+  const saveCount = async () => {
+    if (!counting) return;
+    setError(null);
+    try {
+      await api.recordCount(realm, counting.materialId, counting.on, counting.amount, counting.sheets, counting.note);
+      setCounting(null);
+      setTick((t) => t + 1);
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  };
+
+  const [reorderEdit, setReorderEdit] = useState<{ materialId: string; value: string } | null>(null);
+  const editReorder = (materialId: string, current: string | null) => setReorderEdit({ materialId, value: current ?? "" });
+  const saveReorder = async () => {
+    if (!reorderEdit) return;
+    setError(null);
+    try {
+      await api.setReorderPoint(realm, reorderEdit.materialId, reorderEdit.value.trim() || null);
+      setReorderEdit(null);
+      setTick((t) => t + 1);
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  };
+
+  const showLedger = async (materialId: string) => {
+    if (ledger?.materialId === materialId) return setLedger(null);
+    try {
+      const l = await api.stockLedger(realm, materialId);
+      setLedger({ materialId, moves: l.moves });
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  };
+
+  const lowCount = [...stock.values()].filter((s) => s.low).length;
+  const shelfValue = [...stock.values()].reduce((sum, s) => sum + s.value, 0);
 
   const names = new Map((rows ?? []).map((m) => [m.materialId, m.name]));
 
@@ -1769,26 +1812,111 @@ function MaterialsView({ realm }: { realm: string }) {
               <tr>
                 <th>Material</th>
                 <th>Sheet</th>
-                <th className="r">bf / sheet</th>
-                <th className="r">Landed $ / bf</th>
+                <th className="r">On hand</th>
+                <th className="r">Reorder at</th>
+                <th className="r">Latest $ / bf</th>
+                <th className="r">Average $ / bf</th>
+                <th className="r">Shelf value</th>
                 <th>Last delivery</th>
-                <th className="r">Deliveries</th>
+                <th />
               </tr>
             </thead>
             <tbody>
-              {rows.map((m) => (
-                <tr key={m.materialId}>
-                  <td className="ellipsis">{m.name}</td>
-                  <td className="num muted">{formatQty(m.thicknessIn)} × {formatQty(m.widthIn)} × {formatQty(m.lengthIn)} in</td>
-                  <td className="num r">{formatQty(m.bfPerSheet)}</td>
-                  <td className="num r">{m.landedPerBf ? formatPerBf(m.landedPerBf) : <span className="muted">no delivery yet</span>}</td>
-                  <td className="num muted">{formatDate(m.lastReceived)}</td>
-                  <td className="num r muted">{m.receipts}</td>
-                </tr>
-              ))}
+              {rows.map((m) => {
+                const st = stock.get(m.materialId);
+                return (
+                  <tr key={m.materialId} className={ledger?.materialId === m.materialId ? "cursor" : ""}>
+                    <td className="ellipsis">
+                      {m.name}
+                      {st?.low && <span className="badge crit" title="On hand is below the reorder point">Low</span>}
+                      {st?.wentNegative && <span className="badge warn" title="Cutting ran the shelf below zero: a delivery or count is missing">Check</span>}
+                    </td>
+                    <td className="num muted">{formatQty(m.thicknessIn)} × {formatQty(m.widthIn)} × {formatQty(m.lengthIn)} in · {formatQty(m.bfPerSheet)} bf</td>
+                    <td className="num r">{st ? <>{formatQty(st.sheetsOnHand, 1)} sh<div className="muted small">{formatQty(st.onHandBf, 1)} bf</div></> : ""}</td>
+                    <td className="num r">
+                      {reorderEdit?.materialId === m.materialId ? (
+                        <span className="unit">
+                          <input className="num r narrow-input" autoFocus value={reorderEdit.value} onChange={(e) => setReorderEdit({ ...reorderEdit, value: e.target.value })}
+                            onKeyDown={(e) => { if (e.key === "Enter") void saveReorder(); if (e.key === "Escape") setReorderEdit(null); }} aria-label={`Reorder point for ${m.name}`} />
+                          bf
+                        </span>
+                      ) : (
+                        <button className="link" onClick={() => editReorder(m.materialId, st?.reorderBf ?? null)} aria-label={`Set reorder point for ${m.name}`}>
+                          {st?.reorderBf ? `${formatQty(st.reorderBf)} bf` : "Set"}
+                        </button>
+                      )}
+                    </td>
+                    <td className="num r">{m.landedPerBf ? formatPerBf(m.landedPerBf) : <span className="muted">no delivery yet</span>}</td>
+                    <td className="num r">{st?.averagePerBf ? formatPerBf(st.averagePerBf) : ""}</td>
+                    <td className="num r">{st ? formatMoney(st.value) : ""}</td>
+                    <td className="num muted">{formatDate(m.lastReceived)}</td>
+                    <td className="actions">
+                      <button className="button" onClick={() => setCounting({ materialId: m.materialId, on: todayIso(), amount: "", sheets: true, note: "" })}>Count</button>
+                      <button className="button" onClick={() => void showLedger(m.materialId)}>{ledger?.materialId === m.materialId ? "Hide" : "History"}</button>
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
+            <tfoot>
+              <tr>
+                <td colSpan={6}>{rows.length} materials{lowCount > 0 ? ` · ${lowCount} low` : ""}</td>
+                <td className="num r">{formatMoney(shelfValue)}</td>
+                <td colSpan={2} />
+              </tr>
+            </tfoot>
           </table>
         </div>
+      )}
+
+      {counting && (
+        <div className="inline-form">
+          <strong>Count {names.get(counting.materialId)}</strong>
+          <input type="date" value={counting.on} onChange={(e) => setCounting({ ...counting, on: e.target.value })} aria-label="Counted on" />
+          <input className="num" value={counting.amount} onChange={(e) => setCounting({ ...counting, amount: e.target.value })} placeholder="On the rack" aria-label="Counted amount" autoFocus />
+          <select value={counting.sheets ? "sheets" : "bf"} onChange={(e) => setCounting({ ...counting, sheets: e.target.value === "sheets" })} aria-label="Count unit">
+            <option value="sheets">sheets</option>
+            <option value="bf">board-feet</option>
+          </select>
+          <input value={counting.note} onChange={(e) => setCounting({ ...counting, note: e.target.value })} placeholder="Note, e.g. month end" aria-label="Count note" />
+          <button className="button primary" onClick={() => void saveCount()}>Record count</button>
+          <button className="button" onClick={() => setCounting(null)}>Cancel</button>
+          <span className="muted">Sets the shelf to what you counted; the difference is priced at the average.</span>
+        </div>
+      )}
+
+      {ledger && (
+        <>
+          <h2>History · {names.get(ledger.materialId)}</h2>
+          <div className="grid-wrap">
+            <table className="grid">
+              <thead>
+                <tr>
+                  <th>Date</th>
+                  <th>What</th>
+                  <th>Reference</th>
+                  <th className="r">Change, bf</th>
+                  <th className="r">On hand, bf</th>
+                  <th className="r">Average $ / bf</th>
+                  <th className="r">Value change</th>
+                </tr>
+              </thead>
+              <tbody>
+                {[...ledger.moves].reverse().map((mv, i) => (
+                  <tr key={i}>
+                    <td className="num">{formatDate(mv.date)}</td>
+                    <td>{mv.kind === "received" ? "Delivery" : mv.kind === "used" ? "Build" : "Count"}</td>
+                    <td className="ellipsis">{mv.reference}</td>
+                    <td className={Number(mv.changeBf) < 0 ? "num r crit-text" : "num r"}>{Number(mv.changeBf) > 0 ? "+" : ""}{formatQty(mv.changeBf, 1)}</td>
+                    <td className="num r">{formatQty(mv.onHandBf, 1)}</td>
+                    <td className="num r">{formatPerBf(mv.averagePerBf)}</td>
+                    <td className="num r">{formatMoney(mv.valueChange)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </>
       )}
 
       {receipts.length > 0 && (
@@ -1853,9 +1981,10 @@ function SheetsView({ realm, go }: { realm: string; go: (r: Route) => void }) {
   const [rows, setRows] = useState<SheetSummary[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [filter, setFilter] = useState("");
+  const [basis, setBasis] = useCostBasis();
   useEffect(() => {
-    api.buildSheets(realm).then(setRows, (e: ApiError) => setError(e.message));
-  }, [realm]);
+    api.buildSheets(realm, basis).then(setRows, (e: ApiError) => setError(e.message));
+  }, [realm, basis]);
   const needle = filter.trim().toLowerCase();
   const shown = (rows ?? []).filter((r) => !needle || [r.name, r.sku].some((v) => v?.toLowerCase().includes(needle)));
 
@@ -1864,6 +1993,7 @@ function SheetsView({ realm, go }: { realm: string; go: (r: Route) => void }) {
       <div className="toolbar">
         <h1>Build sheets</h1>
         <input className="filter" placeholder="Filter by product or SKU" value={filter} onChange={(e) => setFilter(e.target.value)} aria-label="Filter" />
+        <BasisToggle basis={basis} setBasis={setBasis} />
         <span className="spacer" />
         <span className="muted">Unit cost from landed material, parts and labour · margin against the QuickBooks price</span>
       </div>
@@ -1919,9 +2049,10 @@ function SheetView({ realm, itemId }: { realm: string; itemId: string }) {
   const [error, setError] = useState<string | null>(null);
   const [tick, setTick] = useState(0);
   const [run, setRun] = useState<{ on: string; qty: string; actual: Record<string, string>; note: string } | null>(null);
+  const [basis, setBasis] = useCostBasis();
 
   useEffect(() => {
-    api.buildSheet(realm, itemId).then(
+    api.buildSheet(realm, itemId, basis).then(
       (d) => {
         setDetail(d);
         setComponents(d.components);
@@ -1930,7 +2061,7 @@ function SheetView({ realm, itemId }: { realm: string; itemId: string }) {
       (e: ApiError) => setError(e.message),
     );
     api.materials(realm).then(setMaterials, () => setMaterials([]));
-  }, [realm, itemId, tick]);
+  }, [realm, itemId, tick, basis]);
 
   if (error && !detail) return <div className="error pad">{error}</div>;
   if (!detail) return <div className="muted pad">Loading…</div>;
@@ -1985,6 +2116,7 @@ function SheetView({ realm, itemId }: { realm: string; itemId: string }) {
         <h1>{detail.item.name}</h1>
         {detail.item.sku && <span className="badge">{detail.item.sku}</span>}
         <span className="spacer" />
+        <BasisToggle basis={basis} setBasis={setBasis} />
         <a className="button" href={href(realm, { view: "item", itemId })}>Where used</a>
         <button className="button primary" onClick={() => void save()} disabled={!dirty}>{dirty ? "Save build sheet" : "Saved"}</button>
       </div>
@@ -2205,5 +2337,29 @@ function BuildsView({ realm }: { realm: string }) {
         />
       )}
     </section>
+  );
+}
+
+// Which material cost build sheets use; remembered per viewer.
+function useCostBasis(): [CostBasis, (b: CostBasis) => void] {
+  const [basis, set] = useState<CostBasis>(() => (stored("bb.basis", "latest") === "average" ? "average" : "latest"));
+  return [
+    basis,
+    (b: CostBasis) => {
+      store("bb.basis", b);
+      set(b);
+    },
+  ];
+}
+
+function BasisToggle({ basis, setBasis }: { basis: CostBasis; setBasis: (b: CostBasis) => void }) {
+  return (
+    <label className="check" title="Latest: the most recent delivery's landed cost, as a quote is priced. Average: the moving average of what is on the shelf.">
+      Material cost
+      <select value={basis} onChange={(e) => setBasis(e.target.value as CostBasis)} aria-label="Material cost basis">
+        <option value="latest">latest delivery</option>
+        <option value="average">shelf average</option>
+      </select>
+    </label>
   );
 }

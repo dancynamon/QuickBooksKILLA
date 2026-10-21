@@ -29,6 +29,10 @@ pub const MFG_COMMANDS: &[&str] = &[
     "saveBuildSheet",
     "builds",
     "recordBuild",
+    "stock",
+    "stockLedger",
+    "recordCount",
+    "setReorderPoint",
 ];
 
 impl From<CostError> for ApiError {
@@ -54,6 +58,10 @@ pub(super) fn dispatch(store: &Store, command: &str, args: Value, now: DateTime<
         "saveBuildSheet" => save_build_sheet(store, args, now),
         "builds" => builds(store, args),
         "recordBuild" => record_build(store, args, now),
+        "stock" => stock(store, args),
+        "stockLedger" => stock_ledger(store, args),
+        "recordCount" => record_count(store, args, now),
+        "setReorderPoint" => set_reorder_point(store, args),
         _ => return None,
     };
     Some(result)
@@ -63,6 +71,34 @@ pub(super) fn dispatch(store: &Store, command: &str, args: Value, now: DateTime<
 #[serde(rename_all = "camelCase")]
 struct RealmArgs {
     realm: String,
+    /// Which cost a build sheet uses: the latest delivery's landed $/bf
+    /// (the default, and how a quote is priced), or the moving average of
+    /// what is on the shelf.
+    #[serde(default)]
+    basis: Option<String>,
+}
+
+/// Prices for costing on the chosen basis.
+fn prices_for(store: &Store, realm: &RealmId, basis: Option<&str>) -> Result<crate::store::mfg_store::Prices, ApiError> {
+    let mut prices = store.material_prices(realm)?;
+    match basis.unwrap_or("latest") {
+        "latest" => {}
+        "average" => {
+            for row in store.materials(realm)? {
+                let state = mfg::stock(store.stock_events(realm, &row.material.material_id)?)?;
+                match state.average_per_bf {
+                    Some(avg) if state.on_hand_bf > Decimal::ZERO => {
+                        prices.per_bf.insert(row.material.material_id, avg);
+                    }
+                    // Nothing on the shelf: the average means nothing, so the
+                    // latest delivery stands in rather than a zero.
+                    _ => {}
+                }
+            }
+        }
+        other => return Err(ApiError::BadArguments(format!("basis must be latest or average, not {other:?}"))),
+    }
+    Ok(prices)
 }
 
 fn items_by_id(store: &Store, realm: &RealmId) -> Result<HashMap<String, ItemRow>, ApiError> {
@@ -190,7 +226,7 @@ fn build_sheets(store: &Store, args: Value) -> Result<Value, ApiError> {
     let args: RealmArgs = parse(args)?;
     let realm = realm(&args.realm)?;
     let items = items_by_id(store, &realm)?;
-    let prices = store.material_prices(&realm)?;
+    let prices = prices_for(store, &realm, args.basis.as_deref())?;
     let mut out = Vec::new();
     for (item_id, components, updated) in store.build_sheets(&realm)? {
         let item = items.get(&item_id);
@@ -222,6 +258,8 @@ fn build_sheets(store: &Store, args: Value) -> Result<Value, ApiError> {
 struct SheetArgs {
     realm: String,
     item_id: String,
+    #[serde(default)]
+    basis: Option<String>,
 }
 
 const PRICE_MOVES: [i64; 5] = [-10, -5, 0, 5, 10];
@@ -233,7 +271,7 @@ fn build_sheet(store: &Store, args: Value) -> Result<Value, ApiError> {
     let items = items_by_id(store, &realm)?;
     let item = items.get(&args.item_id).ok_or(ApiError::NotFound)?;
     let components = store.build_sheet(&realm, &args.item_id)?.unwrap_or_default();
-    let prices = store.material_prices(&realm)?;
+    let prices = prices_for(store, &realm, args.basis.as_deref())?;
     let price = price_of(Some(item));
     let (cost, problem, grid) = if components.is_empty() {
         (None, None, vec![])
@@ -366,6 +404,104 @@ fn record_build(store: &Store, args: Value, now: DateTime<Utc>) -> Result<Value,
     to_json(json!({ "buildId": build_id, "variance": variance }))
 }
 
+fn stock(store: &Store, args: Value) -> Result<Value, ApiError> {
+    let args: RealmArgs = parse(args)?;
+    let realm = realm(&args.realm)?;
+    let mut out = Vec::new();
+    for row in store.materials(&realm)? {
+        let id = row.material.material_id.clone();
+        let state = mfg::stock(store.stock_events(&realm, &id)?)?;
+        let reorder = store.reorder_point(&realm, &id)?;
+        out.push(json!({
+            "materialId": id,
+            "name": row.material.name,
+            "onHandBf": state.on_hand_bf,
+            "sheetsOnHand": mfg::rate(state.on_hand_bf / row.bf_per_sheet),
+            "averagePerBf": state.average_per_bf,
+            "latestPerBf": row.landed_per_bf,
+            "value": state.value,
+            "reorderBf": reorder,
+            "low": reorder.is_some_and(|r| state.on_hand_bf < r),
+            "wentNegative": state.went_negative,
+            "shrinkageValue": state.shrinkage_value,
+        }));
+    }
+    to_json(out)
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MaterialRef {
+    realm: String,
+    material_id: String,
+}
+
+fn stock_ledger(store: &Store, args: Value) -> Result<Value, ApiError> {
+    let args: MaterialRef = parse(args)?;
+    let realm = realm(&args.realm)?;
+    store.material(&realm, &args.material_id)?.ok_or(ApiError::NotFound)?;
+    to_json(mfg::stock(store.stock_events(&realm, &args.material_id)?)?)
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CountArgs {
+    realm: String,
+    material_id: String,
+    counted_on: String,
+    /// Board-feet, or sheets when `sheets` is set.
+    amount: String,
+    #[serde(default)]
+    sheets: bool,
+    note: Option<String>,
+}
+
+fn record_count(store: &Store, args: Value, now: DateTime<Utc>) -> Result<Value, ApiError> {
+    let args: CountArgs = parse(args)?;
+    let realm = realm(&args.realm)?;
+    let material = store.material(&realm, &args.material_id)?.ok_or(ApiError::NotFound)?;
+    let amount = mfg::decimal(&args.amount, "count")?;
+    if amount < Decimal::ZERO {
+        return Err(ApiError::BadArguments("a count cannot be negative".into()));
+    }
+    // Sheets are what a person counts on the rack; board-feet is what costs.
+    let board_feet = if args.sheets {
+        amount * mfg::board_feet(material.thickness_in, material.width_in, material.length_in)?
+    } else {
+        amount
+    };
+    let count_id = format!("count-{}", Uuid::now_v7().simple());
+    store.record_count(&realm, &count_id, &args.material_id, &date_arg(&args.counted_on)?, board_feet, args.note.as_deref().filter(|n| !n.trim().is_empty()), now)?;
+    to_json(json!({ "countId": count_id, "boardFeet": board_feet }))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ReorderArgs {
+    realm: String,
+    material_id: String,
+    /// Board-feet; blank clears it.
+    board_feet: Option<String>,
+}
+
+fn set_reorder_point(store: &Store, args: Value) -> Result<Value, ApiError> {
+    let args: ReorderArgs = parse(args)?;
+    let realm = realm(&args.realm)?;
+    let value = match args.board_feet.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
+        Some(raw) => {
+            let v = mfg::decimal(raw, "reorder point")?;
+            if v < Decimal::ZERO {
+                return Err(ApiError::BadArguments("a reorder point cannot be negative".into()));
+            }
+            Some(v)
+        }
+        None => None,
+    };
+    store.material(&realm, &args.material_id)?.ok_or(ApiError::NotFound)?;
+    store.set_reorder_point(&realm, &args.material_id, value)?;
+    to_json(json!({ "materialId": args.material_id, "reorderBf": value }))
+}
+
 #[cfg(test)]
 mod tests {
     use chrono::TimeZone;
@@ -419,6 +555,42 @@ mod tests {
         let listed = call(&store, "builds", json!({ "realm": r, "itemId": item.qbo_id }));
         let ours = listed.as_array().unwrap().iter().find(|b| b["buildId"] == build["buildId"]).unwrap();
         assert_eq!(ours["varianceMinor"], 3_115);
+    }
+
+    #[test]
+    fn stock_counts_and_reorder_points() {
+        let store = book();
+        let r = DEMO_REALM;
+        let material = call(&store, "saveMaterial", json!({ "realm": r, "name": "EVA 1 in black", "thicknessIn": "1", "widthIn": "48", "lengthIn": "96" }));
+        let id = material["materialId"].as_str().unwrap().to_string();
+        call(&store, "recordReceipt", json!({ "realm": r, "receivedOn": "2026-10-01", "freight": "0", "lines": [ { "materialId": id, "sheets": "10", "pricePerSheet": "48" } ] }));
+        call(&store, "setReorderPoint", json!({ "realm": r, "materialId": id, "boardFeet": "300" }));
+        // 10 sheets × 32 bf; a count of 8 sheets is 256 bf, under the reorder point.
+        call(&store, "recordCount", json!({ "realm": r, "materialId": id, "countedOn": "2026-10-15", "amount": "8", "sheets": true }));
+        let stock = call(&store, "stock", json!({ "realm": r }));
+        let row = stock.as_array().unwrap().iter().find(|m| m["materialId"] == id.as_str()).unwrap();
+        assert_eq!(row["onHandBf"], "256");
+        assert_eq!(row["sheetsOnHand"], "8");
+        assert_eq!(row["averagePerBf"], "1.5");
+        assert_eq!(row["low"], true);
+        assert_eq!(row["shrinkageValue"], 9_600);
+        let ledger = call(&store, "stockLedger", json!({ "realm": r, "materialId": id }));
+        assert_eq!(ledger["moves"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn a_build_sheet_can_cost_on_the_moving_average() {
+        let store = book();
+        let r = DEMO_REALM;
+        let sheets = call(&store, "buildSheets", json!({ "realm": r }));
+        let latest = call(&store, "buildSheets", json!({ "realm": r, "basis": "latest" }));
+        assert_eq!(sheets, latest, "latest is the default");
+        let average = call(&store, "buildSheets", json!({ "realm": r, "basis": "average" }));
+        // Seeded prices rose across deliveries, so the shelf average sits below the latest.
+        let foam = |v: &serde_json::Value| v.as_array().unwrap().iter().find(|s| s["materialCost"] != "0").cloned().unwrap();
+        let (l, a) = (foam(&latest), foam(&average));
+        assert!(a["unitCost"].as_str().unwrap().parse::<f64>().unwrap() < l["unitCost"].as_str().unwrap().parse::<f64>().unwrap());
+        assert_eq!(dispatch_at(&store, "buildSheets", json!({ "realm": r, "basis": "fifo" }), now()).unwrap_err().status(), 400);
     }
 
     #[test]

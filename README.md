@@ -31,7 +31,7 @@ than engineering judgement.
 ## Build
 
 ```sh
-cargo test          # 293 tests, all offline
+cargo test          # 300 tests, all offline
 cargo clippy --all-targets
 cargo run --bin qbo-local
 
@@ -103,7 +103,9 @@ Built and tested:
   per board-foot (freight allocated by board-foot, to the cent), build sheets
   per product (material over yield, parts, labour) with margin and a
   price-by-yield sensitivity table, and builds with priced variance against
-  the sheet. The replica's own data; never sent to QuickBooks (DECISIONS D15)
+  the sheet; material stock on hand replayed from deliveries, builds and
+  counts, with moving-average cost, shrinkage, reorder points and a choice
+  of latest or average cost on build sheets. The replica's own data; never sent to QuickBooks (DECISIONS D15)
 
 Not built yet: the trial-balance diff (§7.5,
 ledger territory), the Tauri shell, the React UI.

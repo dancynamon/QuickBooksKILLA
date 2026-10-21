@@ -263,6 +263,32 @@ export interface BuildRow {
   actual: { materialId: string; boardFeet: string }[];
 }
 
+export interface StockRow {
+  materialId: string;
+  name: string;
+  onHandBf: string;
+  sheetsOnHand: string;
+  averagePerBf: string | null;
+  latestPerBf: string | null;
+  value: number;
+  reorderBf: string | null;
+  low: boolean;
+  wentNegative: boolean;
+  shrinkageValue: number;
+}
+
+export interface StockMove {
+  date: string;
+  kind: "received" | "used" | "counted";
+  reference: string;
+  changeBf: string;
+  onHandBf: string;
+  averagePerBf: string;
+  valueChange: number;
+}
+
+export type CostBasis = "latest" | "average";
+
 export interface SheetDetail {
   item: { qboId: string; name: string; sku: string | null; unitPrice: string | null };
   components: Component[];
@@ -328,8 +354,13 @@ export const api = {
     realm: string,
     r: { receivedOn: string; reference?: string; freight: string; lines: { materialId: string; sheets: string; pricePerSheet: string; surchargePerSheet?: string }[] },
   ) => call<{ receiptId: string }>("recordReceipt", { realm, ...r }),
-  buildSheets: (realm: string) => call<SheetSummary[]>("buildSheets", { realm }),
-  buildSheet: (realm: string, itemId: string) => call<SheetDetail>("buildSheet", { realm, itemId }),
+  buildSheets: (realm: string, basis: CostBasis = "latest") => call<SheetSummary[]>("buildSheets", { realm, basis }),
+  buildSheet: (realm: string, itemId: string, basis: CostBasis = "latest") => call<SheetDetail>("buildSheet", { realm, itemId, basis }),
+  stock: (realm: string) => call<StockRow[]>("stock", { realm }),
+  stockLedger: (realm: string, materialId: string) => call<{ moves: StockMove[]; wentNegative: boolean }>("stockLedger", { realm, materialId }),
+  recordCount: (realm: string, materialId: string, countedOn: string, amount: string, sheets: boolean, note?: string) =>
+    call<{ countId: string }>("recordCount", { realm, materialId, countedOn, amount, sheets, note }),
+  setReorderPoint: (realm: string, materialId: string, boardFeet: string | null) => call<unknown>("setReorderPoint", { realm, materialId, boardFeet }),
   saveBuildSheet: (realm: string, itemId: string, components: Component[]) => call<{ itemId: string }>("saveBuildSheet", { realm, itemId, components }),
   builds: (realm: string, itemId?: string) => call<BuildRow[]>("builds", { realm, itemId }),
   recordBuild: (realm: string, b: { itemId: string; builtOn: string; quantity: string; actual: { materialId: string; boardFeet: string }[]; note?: string }) =>
