@@ -191,6 +191,111 @@ impl Store {
         Ok(events)
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_product_count(
+        &self,
+        realm: &RealmId,
+        count_id: &str,
+        item_id: &str,
+        counted_on: &str,
+        units: Decimal,
+        note: Option<&str>,
+        now: DateTime<Utc>,
+    ) -> Result<(), StoreError> {
+        self.connection.execute(
+            "INSERT INTO product_counts (realm_id, count_id, item_id, counted_on, units, note, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![realm.as_str(), count_id, item_id, counted_on, units.to_string(), note, now.to_rfc3339()],
+        )?;
+        Ok(())
+    }
+
+    /// A finished product's stock history, and the date it starts: its first
+    /// count or first build, whichever is earlier. `None` when it has neither,
+    /// because a product nobody counted or built has no starting shelf.
+    ///
+    /// Builds come in at their actual cost; invoices and sales receipts take
+    /// units off, credit memos and refund receipts put them back, at the
+    /// average. Units are carried in the `board_feet` field of the shared
+    /// [`StockEvent`]: the replay is the same arithmetic in any unit.
+    pub fn product_stock_events(
+        &self,
+        realm: &RealmId,
+        item_id: &str,
+    ) -> Result<(Vec<StockEvent>, Option<String>), StoreError> {
+        let mut events = Vec::new();
+        for build in self.builds(realm, Some(item_id))? {
+            events.push(StockEvent::Received {
+                date: build.built_on.clone(),
+                reference: format!("build {}", build.built_on),
+                board_feet: build.quantity,
+                landed: Money::from_minor(build.actual_minor),
+            });
+        }
+        let mut statement = self
+            .connection
+            .prepare("SELECT counted_on, units, note FROM product_counts WHERE realm_id = ?1 AND item_id = ?2")?;
+        let counts = statement
+            .query_map(params![realm.as_str(), item_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        for (date, units, note) in counts {
+            events.push(StockEvent::Counted {
+                date,
+                reference: note.unwrap_or_else(|| "count".into()),
+                board_feet: dec(&units)?,
+            });
+        }
+        let start = events
+            .iter()
+            .map(|e| match e {
+                StockEvent::Received { date, .. }
+                | StockEvent::Counted { date, .. }
+                | StockEvent::Consumed { date, .. } => date.clone(),
+            })
+            .min();
+        let Some(start) = start else {
+            return Ok((events, None));
+        };
+
+        let mut statement = self.connection.prepare(
+            "SELECT d.txn_date, d.doc_type, d.doc_number, d.qbo_id, l.qty
+             FROM document_lines l
+             JOIN documents d ON d.realm_id = l.realm_id AND d.qbo_id = l.doc_qbo_id
+             WHERE l.realm_id = ?1 AND l.item_id = ?2 AND d.is_deleted = 0 AND d.txn_date >= ?3
+               AND d.doc_type IN ('Invoice', 'SalesReceipt', 'CreditMemo', 'RefundReceipt')",
+        )?;
+        let sales = statement
+            .query_map(params![realm.as_str(), item_id, start], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        for (date, doc_type, number, id, qty) in sales {
+            let Some(qty) = qty else { continue };
+            let units = dec(&qty)?;
+            let returned = doc_type == "CreditMemo" || doc_type == "RefundReceipt";
+            events.push(StockEvent::Consumed {
+                date,
+                reference: format!("{} {}", doc_type, number.unwrap_or(id)),
+                // A return is a negative sale: it goes back on the shelf at the average.
+                board_feet: if returned { -units } else { units },
+            });
+        }
+        Ok((events, Some(start)))
+    }
+
+
     pub fn save_material(&self, realm: &RealmId, material: &Material, now: DateTime<Utc>) -> Result<(), StoreError> {
         self.connection.execute(
             "INSERT INTO materials (realm_id, material_id, name, thickness_in, width_in, length_in, color, created_at)

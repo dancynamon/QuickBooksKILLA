@@ -311,3 +311,16 @@ than an optimisation, which fixes the one-transaction-per-entity cost flagged in
 - **Build sheets cost on the latest delivery by default** (how a quote is priced), with the
   shelf average a per-viewer choice. When nothing is on the shelf the average means
   nothing, so the latest stands in.
+
+### D15 addendum — finished goods and spreadsheet import (21 Oct 2026)
+
+- **A product's stock starts at its first count or first build.** Sales before that are
+  not replayed: nothing before it says how many were on the shelf, so the history would
+  start negative and mean nothing.
+- **Builds come in at their actual cost; invoices and sales receipts take units off;
+  credit memos and refund receipts put them back** at the average.
+- **An opening count is valued at the build sheet's cost** (latest delivery prices) when
+  no build has set an average yet, rather than at zero.
+- **Import is preview, then commit, all or nothing.** Every row is checked and every
+  problem reported by line before anything is written; the commit runs inside one
+  savepoint, so a file never lands half in.

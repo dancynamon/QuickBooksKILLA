@@ -164,6 +164,25 @@ await page.click('button.primary:has-text("Record build")');
 await page.waitForSelector(".inline-form", { state: "detached" });
 await page.waitForFunction(() => [...document.querySelectorAll(".grid tbody tr td:nth-child(2)")].some((td) => td.textContent.trim() === "10"));
 
+// Import: preview, an error by line, then a clean import, all or nothing.
+await page.goto(`${base}/#/r/${realm}/import`);
+await page.waitForSelector("text=Import from a spreadsheet");
+await page.fill('[aria-label="CSV text"]', "name,thickness,width,length\nNeoprene 0.5 in,0.5,48,96\nBroken,0,48,96\n");
+await page.click('button:has-text("Preview")');
+await page.waitForSelector("text=Fix these rows first");
+assert.match(await page.textContent(".grid tbody"), /3.*more than zero/s);
+await page.fill('[aria-label="CSV text"]', "name,thickness,width,length\nNeoprene 0.5 in,0.5,48,96\n");
+await page.click('button:has-text("Preview")');
+await page.waitForSelector("text=Ready to import 1 rows");
+await page.click('button.primary:has-text("Import")');
+await page.waitForSelector("text=Imported 1 rows");
+await page.selectOption('[aria-label="Import kind"]', "counts");
+await page.fill('[aria-label="CSV text"]', "what,date,amount,unit\nRT-RED-000,2026-10-31,40,units\n");
+await page.click('button:has-text("Preview")');
+await page.waitForSelector("text=Ready to import 1 rows");
+await page.click('button.primary:has-text("Import")');
+await page.waitForSelector("text=Imported 1 rows");
+
 assert.deepEqual(errors, []);
 await browser.close();
 console.log("e2e-writes: ok");

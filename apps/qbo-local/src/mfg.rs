@@ -526,7 +526,17 @@ pub struct StockState {
 /// Replay a material's history in date order into on-hand, average cost and
 /// value. Value is carried exactly and rounded only when reported, so a long
 /// history does not accumulate rounding.
-pub fn stock(mut events: Vec<StockEvent>) -> Result<StockState, CostError> {
+pub fn stock(events: Vec<StockEvent>) -> Result<StockState, CostError> {
+    stock_from(events, None)
+}
+
+/// [`stock`], with a cost to value a count by when no delivery or build has
+/// set an average yet — an opening count of finished goods, valued at the
+/// build sheet's unit cost rather than at zero.
+pub fn stock_from(
+    mut events: Vec<StockEvent>,
+    opening_average: Option<Decimal>,
+) -> Result<StockState, CostError> {
     events.sort_by(|a, b| a.date().cmp(b.date()).then(a.rank().cmp(&b.rank())));
     let mut on_hand = Decimal::ZERO;
     let mut value = Decimal::ZERO;
@@ -565,6 +575,9 @@ pub fn stock(mut events: Vec<StockEvent>) -> Result<StockState, CostError> {
             StockEvent::Counted { reference, board_feet, .. } => {
                 if *board_feet < Decimal::ZERO {
                     return Err(invalid("a count cannot be negative"));
+                }
+                if average.is_none() {
+                    average = opening_average;
                 }
                 let avg = average.unwrap_or(Decimal::ZERO);
                 let difference = *board_feet - on_hand;
@@ -750,6 +763,23 @@ mod tests {
         assert_eq!(state.on_hand_bf, dec!(150));
         assert_eq!(state.average_per_bf, Some(dec!(2)));
         assert_eq!(state.value, Money::from_minor(30_000));
+    }
+
+    #[test]
+    fn an_opening_count_is_valued_at_the_opening_cost() {
+        let count = StockEvent::Counted {
+            date: "2026-10-31".into(),
+            reference: "opening".into(),
+            board_feet: dec!(40),
+        };
+        let state = stock_from(vec![count.clone()], Some(dec!(9.9871))).unwrap();
+        assert_eq!(state.value, Money::from_minor(39_948));
+        assert_eq!(
+            state.shrinkage_bf,
+            dec!(-40),
+            "an opening count is found stock, not a loss"
+        );
+        assert_eq!(stock(vec![count]).unwrap().value, Money::from_minor(0));
     }
 
     #[test]

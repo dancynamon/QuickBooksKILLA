@@ -481,6 +481,31 @@ CREATE INDEX idx_counts_material ON material_counts(realm_id, material_id, count
 ALTER TABLE materials ADD COLUMN reorder_bf TEXT;
 "#,
     },
+    Migration {
+        version: 6,
+        name: "finished goods counts",
+        sql: r#"
+-- A physical count of a finished product. The first count (or first build)
+-- starts the product's stock history: sales before it are not replayed,
+-- since nothing before it says how many were on the shelf.
+CREATE TABLE product_counts (
+    realm_id    TEXT NOT NULL REFERENCES realms(realm_id),
+    count_id    TEXT NOT NULL,
+    item_id     TEXT NOT NULL,
+    counted_on  TEXT NOT NULL,
+    units       TEXT NOT NULL,
+    note        TEXT,
+    created_at  TEXT NOT NULL,
+    PRIMARY KEY (realm_id, count_id)
+) STRICT;
+
+CREATE INDEX idx_product_counts_item ON product_counts(realm_id, item_id, counted_on);
+
+-- "Where is this item used" — the item list, item pages and finished-goods
+-- stock all ask it, and without an index each asks it of every line.
+CREATE INDEX idx_lines_item ON document_lines(realm_id, item_id);
+"#,
+    },
 ];
 
 pub fn latest_version() -> i64 {
@@ -608,6 +633,31 @@ impl Store {
             .ok_or_else(|| StoreError::Corrupt(format!("snapshot path is not UTF-8: {}", path.display())))?;
         self.connection.execute("VACUUM INTO ?1", params![target])?;
         Ok(())
+    }
+
+    /// Run `f` all-or-nothing inside a savepoint: an import that fails on
+    /// its fortieth row leaves the first thirty-nine unwritten.
+    pub fn atomically<T, E: From<StoreError>>(
+        &self,
+        f: impl FnOnce() -> Result<T, E>,
+    ) -> Result<T, E> {
+        self.connection
+            .execute_batch("SAVEPOINT atomically")
+            .map_err(StoreError::from)?;
+        match f() {
+            Ok(value) => {
+                self.connection
+                    .execute_batch("RELEASE atomically")
+                    .map_err(StoreError::from)?;
+                Ok(value)
+            }
+            Err(error) => {
+                self.connection
+                    .execute_batch("ROLLBACK TO atomically; RELEASE atomically")
+                    .map_err(StoreError::from)?;
+                Err(error)
+            }
+        }
     }
 
     /// Every registered realm — the company switcher's list.

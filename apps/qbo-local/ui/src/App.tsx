@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Aging, api, ApiError, BuildRow, Component, ContactType, CostBasis, StockMove, StockRow, Customer, DocType, Document, DocumentDetail, Draft, DraftLine, Hit, Item, MaterialRow, ReceiptRow, Realm, SalesRow, SearchResult, SheetDetail, SheetSummary, Status, Write } from "./api";
+import { Aging, api, ApiError, BuildRow, Component, ContactType, CostBasis, ImportKind, ImportResult, ProductStockRow, StockMove, StockRow, Customer, DocType, Document, DocumentDetail, Draft, DraftLine, Hit, Item, MaterialRow, ReceiptRow, Realm, SalesRow, SearchResult, SheetDetail, SheetSummary, Status, Write } from "./api";
 import { createContext, useContext } from "react";
 import { ago, DOC_LABELS, DOC_PLURALS, formatDate, formatDecimal, formatMoney, formatPerBf, formatQty, formatRate, lineAmountMinor } from "./format";
 
@@ -22,6 +22,7 @@ type Route =
   | { view: "sheets" }
   | { view: "sheet"; itemId: string }
   | { view: "builds" }
+  | { view: "import" }
   | { view: "doc"; qboId: string }
   | { view: "contact"; contactType: ContactType; contactId: string };
 
@@ -41,6 +42,7 @@ function parseRoute(hash: string): { realm: string | null; route: Route } {
   if (parts[2] === "sheets") return { realm, route: { view: "sheets" } };
   if (parts[2] === "sheet" && parts[3]) return { realm, route: { view: "sheet", itemId: parts[3] } };
   if (parts[2] === "builds") return { realm, route: { view: "builds" } };
+  if (parts[2] === "import") return { realm, route: { view: "import" } };
   if (parts[2] === "new" && EDITABLE.includes(parts[3] as DocType)) return { realm, route: { view: "new", docType: parts[3] as DocType } };
   if (parts[2] === "edit" && parts[3]) return { realm, route: { view: "edit", qboId: parts[3] } };
   if (parts[2] === "item" && parts[3]) return { realm, route: { view: "item", itemId: parts[3] } };
@@ -77,6 +79,8 @@ function href(realm: string, route: Route): string {
       return `#/r/${realm}/sheet/${encodeURIComponent(route.itemId)}`;
     case "builds":
       return `#/r/${realm}/builds`;
+    case "import":
+      return `#/r/${realm}/import`;
   }
 }
 
@@ -316,6 +320,9 @@ export function App() {
           <a className={route.view === "builds" ? "rail-item active" : "rail-item"} href={href(realm, { view: "builds" })}>
             <span>Builds</span>
           </a>
+          <a className={route.view === "import" ? "rail-item active" : "rail-item"} href={href(realm, { view: "import" })}>
+            <span>Import from a spreadsheet</span>
+          </a>
         </div>
         <div className="rail-group">
           <div className="rail-head">Reports</div>
@@ -343,6 +350,7 @@ export function App() {
         {route.view === "sheets" && <SheetsView key={realm} realm={realm} go={go} />}
         {route.view === "sheet" && <SheetView key={`${realm}:${route.itemId}`} realm={realm} itemId={route.itemId} />}
         {route.view === "builds" && <BuildsView key={realm} realm={realm} />}
+        {route.view === "import" && <ImportView key={realm} realm={realm} />}
         {route.view === "contact" && (
           <ContactView key={`${realm}:${route.contactId}`} realm={realm} contactType={route.contactType} contactId={route.contactId} go={go} />
         )}
@@ -1982,8 +1990,10 @@ function SheetsView({ realm, go }: { realm: string; go: (r: Route) => void }) {
   const [error, setError] = useState<string | null>(null);
   const [filter, setFilter] = useState("");
   const [basis, setBasis] = useCostBasis();
+  const [stock, setStock] = useState<Map<string, ProductStockRow>>(new Map());
   useEffect(() => {
     api.buildSheets(realm, basis).then(setRows, (e: ApiError) => setError(e.message));
+    api.productStock(realm).then((all) => setStock(new Map(all.map((p) => [p.itemId, p]))), () => setStock(new Map()));
   }, [realm, basis]);
   const needle = filter.trim().toLowerCase();
   const shown = (rows ?? []).filter((r) => !needle || [r.name, r.sku].some((v) => v?.toLowerCase().includes(needle)));
@@ -2011,6 +2021,7 @@ function SheetsView({ realm, go }: { realm: string; go: (r: Route) => void }) {
                 <th className="r">of which waste</th>
                 <th className="r">Price</th>
                 <th className="r">Margin</th>
+                <th className="r" title="Finished units on the shelf: built, less sold, from the first count or build">On hand</th>
               </tr>
             </thead>
             <tbody>
@@ -2024,6 +2035,9 @@ function SheetsView({ realm, go }: { realm: string; go: (r: Route) => void }) {
                   <td className="num r muted">{r.wasteCost ? formatRate(r.wasteCost) : ""}</td>
                   <td className="num r">{r.price ? formatRate(r.price) : ""}</td>
                   <td className={marginClass(r.marginPct)}>{r.marginPct !== null ? `${r.marginPct}%` : "—"}</td>
+                  <td className="num r">
+                    {stock.get(r.itemId)?.tracked ? formatQty(stock.get(r.itemId)!.onHand, 1) : <span className="muted" title="Not counted or built yet">—</span>}
+                  </td>
                 </tr>
               ))}
             </tbody>
@@ -2248,6 +2262,8 @@ function SheetView({ realm, itemId }: { realm: string; itemId: string }) {
         </>
       )}
 
+      <ProductStockPanel realm={realm} itemId={itemId} refresh={tick} />
+
       <h2>
         Builds
         {detail.components.length > 0 && !run && (
@@ -2361,5 +2377,201 @@ function BasisToggle({ basis, setBasis }: { basis: CostBasis; setBasis: (b: Cost
         <option value="average">shelf average</option>
       </select>
     </label>
+  );
+}
+
+function ProductStockPanel({ realm, itemId, refresh }: { realm: string; itemId: string; refresh: number }) {
+  const [data, setData] = useState<{ since: string | null; stock: { moves: StockMove[]; onHandBf: string; averagePerBf: string | null; value: number } } | null>(null);
+  const [counting, setCounting] = useState<{ on: string; units: string } | null>(null);
+  const [open, setOpen] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [tick, setTick] = useState(0);
+  useEffect(() => {
+    api.productLedger(realm, itemId).then(setData, (e: ApiError) => setError(e.message));
+  }, [realm, itemId, refresh, tick]);
+
+  const save = async () => {
+    if (!counting) return;
+    setError(null);
+    try {
+      await api.recordProductCount(realm, itemId, counting.on, counting.units);
+      setCounting(null);
+      setTick((t) => t + 1);
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  };
+
+  return (
+    <>
+      <h2>
+        Finished stock
+        {!counting && <button className="link inline" onClick={() => setCounting({ on: todayIso(), units: "" })}>Count the shelf</button>}
+        {data?.since && <button className="link inline" onClick={() => setOpen(!open)}>{open ? "Hide history" : "History"}</button>}
+      </h2>
+      {error && <div className="error">{error}</div>}
+      {counting && (
+        <div className="inline-form">
+          <input type="date" value={counting.on} onChange={(e) => setCounting({ ...counting, on: e.target.value })} aria-label="Product counted on" />
+          <input className="num" value={counting.units} onChange={(e) => setCounting({ ...counting, units: e.target.value })} placeholder="Units on the shelf" aria-label="Units counted" autoFocus />
+          <button className="button primary" onClick={() => void save()}>Record count</button>
+          <button className="button" onClick={() => setCounting(null)}>Cancel</button>
+        </div>
+      )}
+      {data && !data.since && <p className="muted indent">Not tracked yet: count the shelf or record a build to start this product's stock.</p>}
+      {data?.since && (
+        <dl className="facts">
+          <div><dt>On hand</dt><dd className="num">{formatQty(data.stock.onHandBf, 1)} units</dd></div>
+          <div><dt>Average cost</dt><dd className="num">{data.stock.averagePerBf ? formatRate(data.stock.averagePerBf) : "—"}</dd></div>
+          <div><dt>Shelf value</dt><dd className="num">{formatMoney(data.stock.value)}</dd></div>
+          <div><dt>Tracked since</dt><dd className="num">{formatDate(data.since)}</dd></div>
+        </dl>
+      )}
+      {open && data?.since && (
+        <div className="grid-wrap">
+          <table className="grid">
+            <thead>
+              <tr><th>Date</th><th>What</th><th>Reference</th><th className="r">Change</th><th className="r">On hand</th><th className="r">Value change</th></tr>
+            </thead>
+            <tbody>
+              {[...data.stock.moves].reverse().map((mv, i) => (
+                <tr key={i}>
+                  <td className="num">{formatDate(mv.date)}</td>
+                  <td>{mv.kind === "received" ? "Built" : mv.kind === "used" ? (Number(mv.changeBf) > 0 ? "Returned" : "Sold") : "Count"}</td>
+                  <td className="ellipsis">{mv.reference}</td>
+                  <td className={Number(mv.changeBf) < 0 ? "num r crit-text" : "num r"}>{Number(mv.changeBf) > 0 ? "+" : ""}{formatQty(mv.changeBf, 1)}</td>
+                  <td className="num r">{formatQty(mv.onHandBf, 1)}</td>
+                  <td className="num r">{formatMoney(mv.valueChange)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </>
+  );
+}
+
+const IMPORT_TEMPLATES: Record<ImportKind, { label: string; columns: string; example: string; note: string }> = {
+  materials: {
+    label: "Materials",
+    columns: "name, thickness, width, length, colour, reorder",
+    example: "name,thickness,width,length,colour,reorder\nXLPE 2 in blue,2,48,96,blue,640\nEVA 1 in black,1,48,96,black,320",
+    note: "Inches, and the reorder point in board-feet. A name already on the list is updated, not duplicated.",
+  },
+  buildSheets: {
+    label: "Build sheets",
+    columns: "product, kind, what, amount, rate",
+    example: "product,kind,what,amount,rate\nRT-RED-000,material,XLPE 2 in red,2.1,78\nRT-RED-000,part,Webbing strap,1,1.85\nRT-RED-000,labour,CNC and finish,6,30",
+    note: "Product is the QuickBooks SKU or name. Material: net bf and yield %. Part: quantity and cost each. Labour: minutes and $ per hour. Replaces the product's sheet.",
+  },
+  counts: {
+    label: "Counts",
+    columns: "what, date, amount, unit",
+    example: "what,date,amount,unit\nXLPE 2 in blue,2026-10-31,12,sheets\nRT-RED-000,2026-10-31,140,units",
+    note: "A material counts in sheets (the default) or bf; a product in units. Sets the shelf on that date.",
+  },
+};
+
+function ImportView({ realm }: { realm: string }) {
+  const [kind, setKind] = useState<ImportKind>("materials");
+  const [text, setText] = useState("");
+  const [result, setResult] = useState<ImportResult | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const template = IMPORT_TEMPLATES[kind];
+
+  const run = async (commit: boolean) => {
+    setBusy(true);
+    setError(null);
+    try {
+      setResult(await api.importCsv(realm, kind, text, commit));
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const loadFile = (file: File | undefined) => {
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      setText(String(reader.result ?? ""));
+      setResult(null);
+    };
+    reader.readAsText(file);
+  };
+
+  const columns = result?.rows.length ? Object.keys(result.rows[0]) : [];
+
+  return (
+    <section className="document">
+      <div className="toolbar">
+        <h1>Import from a spreadsheet</h1>
+        <span className="spacer" />
+        <span className="muted">Preview first; nothing is written until you commit, and then all of it or none</span>
+      </div>
+      {error && <div className="error">{error}</div>}
+      <div className="form-grid">
+        <label className="field">
+          <span>What</span>
+          <select value={kind} onChange={(e) => { setKind(e.target.value as ImportKind); setResult(null); }} aria-label="Import kind">
+            {(Object.keys(IMPORT_TEMPLATES) as ImportKind[]).map((k) => (
+              <option key={k} value={k}>{IMPORT_TEMPLATES[k].label}</option>
+            ))}
+          </select>
+        </label>
+        <label className="field">
+          <span>CSV file</span>
+          <input type="file" accept=".csv,text/csv,text/plain" onChange={(e) => loadFile(e.target.files?.[0])} aria-label="CSV file" />
+        </label>
+        <div className="field wide">
+          <span>Columns</span>
+          <div><code>{template.columns}</code> <button className="link" onClick={() => { setText(template.example.replace(/\\n/g, "\n")); setResult(null); }}>Paste an example</button></div>
+          <div className="muted small">{template.note}</div>
+        </div>
+        <label className="field wide">
+          <span>Or paste from the spreadsheet (save as CSV, or copy with commas)</span>
+          <textarea rows={8} value={text} onChange={(e) => { setText(e.target.value); setResult(null); }} className="mono-area" aria-label="CSV text" />
+        </label>
+      </div>
+      <div className="toolbar plain">
+        <button className="button" onClick={() => void run(false)} disabled={busy || !text.trim()}>Preview</button>
+        <button className="button primary" onClick={() => void run(true)} disabled={busy || !result?.ok || result.committed}>
+          {result?.committed ? "Imported" : `Import ${result?.rows.length ?? ""} rows`}
+        </button>
+      </div>
+      {result && !result.ok && (
+        <>
+          <h2>Fix these rows first</h2>
+          <div className="grid-wrap">
+            <table className="grid">
+              <thead><tr><th className="r">Line</th><th>Problem</th></tr></thead>
+              <tbody>
+                {result.errors.map((e, i) => (
+                  <tr key={i}><td className="num r">{e.line}</td><td className="wrap">{e.message}</td></tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
+      {result?.ok && (
+        <>
+          <h2>{result.committed ? `Imported ${result.rows.length} rows` : `Ready to import ${result.rows.length} rows`}</h2>
+          <div className="grid-wrap">
+            <table className="grid">
+              <thead><tr>{columns.map((c) => <th key={c}>{c}</th>)}</tr></thead>
+              <tbody>
+                {result.rows.map((row, i) => (
+                  <tr key={i}>{columns.map((c) => <td key={c} className="num">{row[c] === null || row[c] === undefined ? "" : String(row[c])}</td>)}</tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
+    </section>
   );
 }

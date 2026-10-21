@@ -289,6 +289,29 @@ export interface StockMove {
 
 export type CostBasis = "latest" | "average";
 
+export interface ProductStockRow {
+  itemId: string;
+  name: string | null;
+  sku: string | null;
+  qboOnHand: string | null;
+  tracked: boolean;
+  since?: string;
+  onHand?: string;
+  averageCost?: string | null;
+  value?: number;
+  netSold?: string;
+  wentNegative?: boolean;
+}
+
+export type ImportKind = "materials" | "buildSheets" | "counts";
+
+export interface ImportResult {
+  ok: boolean;
+  committed?: boolean;
+  rows: Record<string, unknown>[];
+  errors: { line: number; message: string }[];
+}
+
 export interface SheetDetail {
   item: { qboId: string; name: string; sku: string | null; unitPrice: string | null };
   components: Component[];
@@ -357,6 +380,12 @@ export const api = {
   buildSheets: (realm: string, basis: CostBasis = "latest") => call<SheetSummary[]>("buildSheets", { realm, basis }),
   buildSheet: (realm: string, itemId: string, basis: CostBasis = "latest") => call<SheetDetail>("buildSheet", { realm, itemId, basis }),
   stock: (realm: string) => call<StockRow[]>("stock", { realm }),
+  productStock: (realm: string) => call<ProductStockRow[]>("productStock", { realm }),
+  productLedger: (realm: string, itemId: string) =>
+    call<{ since: string | null; stock: { moves: StockMove[]; onHandBf: string; averagePerBf: string | null; value: number } }>("productLedger", { realm, itemId }),
+  recordProductCount: (realm: string, itemId: string, countedOn: string, units: string, note?: string) =>
+    call<{ countId: string }>("recordProductCount", { realm, itemId, countedOn, units, note }),
+  importCsv: (realm: string, kind: ImportKind, text: string, commit: boolean) => call<ImportResult>("importCsv", { realm, kind, text, commit }),
   stockLedger: (realm: string, materialId: string) => call<{ moves: StockMove[]; wentNegative: boolean }>("stockLedger", { realm, materialId }),
   recordCount: (realm: string, materialId: string, countedOn: string, amount: string, sheets: boolean, note?: string) =>
     call<{ countId: string }>("recordCount", { realm, materialId, countedOn, amount, sheets, note }),

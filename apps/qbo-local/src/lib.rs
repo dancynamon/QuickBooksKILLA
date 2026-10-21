@@ -10,6 +10,7 @@
 //! - [`demo`]     — §11: a synthetic book for the UI and benchmarks
 //! - [`compose`]  — drafts typed in the UI to QBO payloads
 //! - [`mfg`]      — manufacturing costing: landed cost, build sheets, builds
+//! - [`mfg_import`] — CSV import of materials, build sheets, counts
 //! - [`domain`]   — §2: realm scoping, entity types
 //! - [`store`]    — §3: replica schema and migrations
 //! - [`project`]  — §3.2: raw payloads to the parsed projection
@@ -37,6 +38,7 @@ pub mod mfg;
 pub mod driver;
 pub mod http;
 pub mod keychain;
+pub mod mfg_import;
 pub mod oauth;
 pub mod outbox;
 pub mod project;

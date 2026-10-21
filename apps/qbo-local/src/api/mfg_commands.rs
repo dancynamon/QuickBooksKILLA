@@ -33,6 +33,10 @@ pub const MFG_COMMANDS: &[&str] = &[
     "stockLedger",
     "recordCount",
     "setReorderPoint",
+    "productStock",
+    "productLedger",
+    "recordProductCount",
+    "importCsv",
 ];
 
 impl From<CostError> for ApiError {
@@ -62,6 +66,10 @@ pub(super) fn dispatch(store: &Store, command: &str, args: Value, now: DateTime<
         "stockLedger" => stock_ledger(store, args),
         "recordCount" => record_count(store, args, now),
         "setReorderPoint" => set_reorder_point(store, args),
+        "productStock" => product_stock(store, args),
+        "productLedger" => product_ledger(store, args),
+        "recordProductCount" => record_product_count(store, args, now),
+        "importCsv" => import_csv(store, args, now),
         _ => return None,
     };
     Some(result)
@@ -502,6 +510,328 @@ fn set_reorder_point(store: &Store, args: Value) -> Result<Value, ApiError> {
     to_json(json!({ "materialId": args.material_id, "reorderBf": value }))
 }
 
+/// What an opening count of a product is worth per unit before any build has
+/// set an average: its build sheet's cost at the latest delivery prices.
+fn opening_cost(
+    store: &Store,
+    realm: &RealmId,
+    item_id: &str,
+) -> Result<Option<Decimal>, ApiError> {
+    let Some(components) = store.build_sheet(realm, item_id)? else {
+        return Ok(None);
+    };
+    Ok(mfg::unit_cost(&components, &store.material_prices(realm)?)
+        .ok()
+        .map(|c| c.total))
+}
+
+/// Finished-goods stock for every product with a build sheet or a count.
+fn product_stock(store: &Store, args: Value) -> Result<Value, ApiError> {
+    let args: RealmArgs = parse(args)?;
+    let realm = realm(&args.realm)?;
+    let items = items_by_id(store, &realm)?;
+    let mut out = Vec::new();
+    for (item_id, _, _) in store.build_sheets(&realm)? {
+        let (events, start) = store.product_stock_events(&realm, &item_id)?;
+        let item = items.get(&item_id);
+        let base = json!({
+            "itemId": item_id,
+            "name": item.map(|i| i.name.clone()),
+            "sku": item.and_then(|i| i.sku.clone()),
+            "qboOnHand": item.and_then(|i| i.qty_on_hand.clone()),
+        });
+        let mut row = base;
+        match start {
+            None => {
+                row["tracked"] = json!(false);
+            }
+            Some(start) => {
+                let sold: Decimal = events
+                    .iter()
+                    .filter_map(|e| match e {
+                        mfg::StockEvent::Consumed { board_feet, .. } => Some(*board_feet),
+                        _ => None,
+                    })
+                    .sum();
+                let state = mfg::stock_from(events, opening_cost(store, &realm, &item_id)?)?;
+                row["tracked"] = json!(true);
+                row["since"] = json!(start);
+                row["onHand"] = json!(state.on_hand_bf);
+                row["averageCost"] = json!(state.average_per_bf);
+                row["value"] = json!(state.value);
+                row["netSold"] = json!(sold);
+                row["wentNegative"] = json!(state.went_negative);
+            }
+        }
+        out.push(row);
+    }
+    out.sort_by(|a, b| {
+        a["name"]
+            .as_str()
+            .unwrap_or("")
+            .to_lowercase()
+            .cmp(&b["name"].as_str().unwrap_or("").to_lowercase())
+    });
+    to_json(out)
+}
+
+fn product_ledger(store: &Store, args: Value) -> Result<Value, ApiError> {
+    let args: SheetArgs = parse(args)?;
+    let realm = realm(&args.realm)?;
+    let (events, start) = store.product_stock_events(&realm, &args.item_id)?;
+    let state = mfg::stock_from(events, opening_cost(store, &realm, &args.item_id)?)?;
+    to_json(json!({ "since": start, "stock": state }))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProductCountArgs {
+    realm: String,
+    item_id: String,
+    counted_on: String,
+    units: String,
+    note: Option<String>,
+}
+
+fn record_product_count(store: &Store, args: Value, now: DateTime<Utc>) -> Result<Value, ApiError> {
+    let args: ProductCountArgs = parse(args)?;
+    let realm = realm(&args.realm)?;
+    if !items_by_id(store, &realm)?.contains_key(&args.item_id) {
+        return Err(ApiError::NotFound);
+    }
+    let units = mfg::decimal(&args.units, "count")?;
+    if units < Decimal::ZERO {
+        return Err(ApiError::BadArguments("a count cannot be negative".into()));
+    }
+    let count_id = format!("pcount-{}", Uuid::now_v7().simple());
+    store.record_product_count(
+        &realm,
+        &count_id,
+        &args.item_id,
+        &date_arg(&args.counted_on)?,
+        units,
+        args.note.as_deref().filter(|n| !n.trim().is_empty()),
+        now,
+    )?;
+    to_json(json!({ "countId": count_id }))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ImportArgs {
+    realm: String,
+    /// materials, buildSheets or counts.
+    kind: String,
+    text: String,
+    /// False (the default) previews; true writes, all or nothing.
+    #[serde(default)]
+    commit: bool,
+}
+
+/// A failed import: the rows that are wrong, by spreadsheet line.
+fn row_errors(errors: Vec<crate::mfg_import::RowError>) -> Result<Value, ApiError> {
+    to_json(json!({ "ok": false, "errors": errors, "rows": [] }))
+}
+
+fn import_csv(store: &Store, args: Value, now: DateTime<Utc>) -> Result<Value, ApiError> {
+    use crate::mfg_import as import;
+    let args: ImportArgs = parse(args)?;
+    let realm = realm(&args.realm)?;
+    let materials = store.materials(&realm)?;
+    let material_named = |name: &str| {
+        materials
+            .iter()
+            .find(|m| m.material.name.eq_ignore_ascii_case(name.trim()))
+    };
+    let items: Vec<ItemRow> = store.items(&realm)?;
+    let product_named = |name: &str| {
+        let name = name.trim();
+        items
+            .iter()
+            .find(|i| {
+                i.sku
+                    .as_deref()
+                    .is_some_and(|s| s.eq_ignore_ascii_case(name))
+            })
+            .or_else(|| items.iter().find(|i| i.name.eq_ignore_ascii_case(name)))
+    };
+
+    match args.kind.as_str() {
+        "materials" => {
+            let parsed = match import::materials(&args.text) {
+                Ok(p) => p,
+                Err(e) => return row_errors(e),
+            };
+            let rows: Vec<Value> = parsed
+                .iter()
+                .map(|m| json!({ "name": m.name, "action": if material_named(&m.name).is_some() { "update" } else { "add" },
+                                 "bfPerSheet": mfg::board_feet(m.thickness_in, m.width_in, m.length_in).ok(), "reorderBf": m.reorder_bf }))
+                .collect();
+            if args.commit {
+                store.atomically(|| -> Result<(), ApiError> {
+                    for m in &parsed {
+                        let id = material_named(&m.name)
+                            .map(|r| r.material.material_id.clone())
+                            .unwrap_or_else(|| format!("mat-{}", Uuid::now_v7().simple()));
+                        store.save_material(
+                            &realm,
+                            &Material {
+                                material_id: id.clone(),
+                                name: m.name.clone(),
+                                thickness_in: m.thickness_in,
+                                width_in: m.width_in,
+                                length_in: m.length_in,
+                                color: m.color.clone(),
+                            },
+                            now,
+                        )?;
+                        if m.reorder_bf.is_some() {
+                            store.set_reorder_point(&realm, &id, m.reorder_bf)?;
+                        }
+                    }
+                    Ok(())
+                })?;
+            }
+            to_json(json!({ "ok": true, "committed": args.commit, "rows": rows, "errors": [] }))
+        }
+        "buildSheets" => {
+            let parsed = match import::build_sheets(&args.text) {
+                Ok(p) => p,
+                Err(e) => return row_errors(e),
+            };
+            let mut errors = Vec::new();
+            let mut ready = Vec::new();
+            let resolve = |name: &str| material_named(name).map(|m| m.material.material_id.clone());
+            let probe: HashMap<String, Decimal> = materials
+                .iter()
+                .map(|m| (m.material.material_id.clone(), Decimal::ONE))
+                .collect();
+            for sheet in &parsed {
+                let Some(item) = product_named(&sheet.product) else {
+                    errors.push(import::RowError {
+                        line: sheet.lines[0].line,
+                        message: format!("no product with SKU or name {:?}", sheet.product),
+                    });
+                    continue;
+                };
+                match import::components(sheet, &resolve) {
+                    Ok(components) => match mfg::unit_cost(&components, &probe) {
+                        Ok(_) => ready.push((item, components, sheet.lines.len())),
+                        Err(e) => errors.push(import::RowError {
+                            line: sheet.lines[0].line,
+                            message: format!("{}: {e}", sheet.product),
+                        }),
+                    },
+                    Err(mut e) => errors.append(&mut e),
+                }
+            }
+            if !errors.is_empty() {
+                return row_errors(errors);
+            }
+            let rows: Vec<Value> = ready
+                .iter()
+                .map(|(item, _, lines)| json!({ "name": item.name, "sku": item.sku, "components": lines,
+                    "action": if store.build_sheet(&realm, &item.qbo_id).ok().flatten().is_some() { "replace" } else { "add" } }))
+                .collect();
+            if args.commit {
+                store.atomically(|| -> Result<(), ApiError> {
+                    for (item, components, _) in &ready {
+                        store.save_build_sheet(&realm, &item.qbo_id, components, now)?;
+                    }
+                    Ok(())
+                })?;
+            }
+            to_json(json!({ "ok": true, "committed": args.commit, "rows": rows, "errors": [] }))
+        }
+        "counts" => {
+            let parsed = match import::counts(&args.text) {
+                Ok(p) => p,
+                Err(e) => return row_errors(e),
+            };
+            enum Target {
+                Material(String, Decimal),
+                Product(String),
+            }
+            let mut errors = Vec::new();
+            let mut ready = Vec::new();
+            for c in &parsed {
+                if let Some(m) = material_named(&c.what) {
+                    let bf = match c.unit.as_str() {
+                        "sheets" | "default" => c.amount * m.bf_per_sheet,
+                        "bf" => c.amount,
+                        _ => {
+                            errors.push(import::RowError {
+                                line: c.line,
+                                message: format!(
+                                    "{} is a material: count it in sheets or bf",
+                                    c.what
+                                ),
+                            });
+                            continue;
+                        }
+                    };
+                    ready.push((c, Target::Material(m.material.material_id.clone(), bf)));
+                } else if let Some(item) = product_named(&c.what) {
+                    if !matches!(c.unit.as_str(), "units" | "default") {
+                        errors.push(import::RowError {
+                            line: c.line,
+                            message: format!("{} is a product: count it in units", c.what),
+                        });
+                        continue;
+                    }
+                    ready.push((c, Target::Product(item.qbo_id.clone())));
+                } else {
+                    errors.push(import::RowError {
+                        line: c.line,
+                        message: format!("no material or product named {:?}", c.what),
+                    });
+                }
+            }
+            if !errors.is_empty() {
+                return row_errors(errors);
+            }
+            let rows: Vec<Value> = ready
+                .iter()
+                .map(|(c, t)| match t {
+                    Target::Material(_, bf) => json!({ "name": c.what, "date": c.date, "kind": "material", "amount": bf, "unit": "bf" }),
+                    Target::Product(_) => json!({ "name": c.what, "date": c.date, "kind": "product", "amount": c.amount, "unit": "units" }),
+                })
+                .collect();
+            if args.commit {
+                store.atomically(|| -> Result<(), ApiError> {
+                    for (c, t) in &ready {
+                        match t {
+                            Target::Material(id, bf) => store.record_count(
+                                &realm,
+                                &format!("count-{}", Uuid::now_v7().simple()),
+                                id,
+                                &c.date,
+                                *bf,
+                                Some("imported"),
+                                now,
+                            )?,
+                            Target::Product(id) => store.record_product_count(
+                                &realm,
+                                &format!("pcount-{}", Uuid::now_v7().simple()),
+                                id,
+                                &c.date,
+                                c.amount,
+                                Some("imported"),
+                                now,
+                            )?,
+                        }
+                    }
+                    Ok(())
+                })?;
+            }
+            to_json(json!({ "ok": true, "committed": args.commit, "rows": rows, "errors": [] }))
+        }
+        other => Err(ApiError::BadArguments(format!(
+            "kind must be materials, buildSheets or counts, not {other:?}"
+        ))),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use chrono::TimeZone;
@@ -591,6 +921,113 @@ mod tests {
         let (l, a) = (foam(&latest), foam(&average));
         assert!(a["unitCost"].as_str().unwrap().parse::<f64>().unwrap() < l["unitCost"].as_str().unwrap().parse::<f64>().unwrap());
         assert_eq!(dispatch_at(&store, "buildSheets", json!({ "realm": r, "basis": "fifo" }), now()).unwrap_err().status(), 400);
+    }
+
+    #[test]
+    fn an_import_previews_then_commits_all_or_nothing() {
+        let store = book();
+        let r = DEMO_REALM;
+        let csv = "name,thickness,width,length,reorder\nEVA 1 in black,1,48,96,300\nXLPE 2 in blue,2,48,96,640\n";
+        let preview = call(
+            &store,
+            "importCsv",
+            json!({ "realm": r, "kind": "materials", "text": csv }),
+        );
+        assert_eq!(preview["ok"], true);
+        assert_eq!(preview["rows"][0]["action"], "add");
+        assert_eq!(
+            preview["rows"][1]["action"], "update",
+            "the demo book already has blue"
+        );
+        let before = call(&store, "materials", json!({ "realm": r }))
+            .as_array()
+            .unwrap()
+            .len();
+        assert_eq!(
+            call(&store, "materials", json!({ "realm": r }))
+                .as_array()
+                .unwrap()
+                .len(),
+            before,
+            "a preview writes nothing"
+        );
+        call(
+            &store,
+            "importCsv",
+            json!({ "realm": r, "kind": "materials", "text": csv, "commit": true }),
+        );
+        assert_eq!(
+            call(&store, "materials", json!({ "realm": r }))
+                .as_array()
+                .unwrap()
+                .len(),
+            before + 1
+        );
+
+        let item = store
+            .items(&crate::domain::RealmId::parse(r).unwrap())
+            .unwrap()
+            .remove(0);
+        let sku = item.sku.clone().unwrap();
+        let sheets = format!("product,kind,what,amount,rate\n{sku},material,EVA 1 in black,1,80\n{sku},labour,Pack,3,28\nNOPE-1,part,Strap,1,1\n");
+        let bad = call(
+            &store,
+            "importCsv",
+            json!({ "realm": r, "kind": "buildSheets", "text": sheets, "commit": true }),
+        );
+        assert_eq!(bad["ok"], false);
+        assert_eq!(bad["errors"][0]["line"], 4);
+        let good = format!("product,kind,what,amount,rate\n{sku},material,EVA 1 in black,1,80\n{sku},labour,Pack,3,28\n");
+        let done = call(
+            &store,
+            "importCsv",
+            json!({ "realm": r, "kind": "buildSheets", "text": good, "commit": true }),
+        );
+        assert_eq!(done["rows"][0]["action"], "replace");
+
+        let counts =
+            format!("what,date,amount\nEVA 1 in black,2026-10-31,5\n{sku},2026-10-31,40\n");
+        call(
+            &store,
+            "importCsv",
+            json!({ "realm": r, "kind": "counts", "text": counts, "commit": true }),
+        );
+        let stock = call(&store, "productStock", json!({ "realm": r }));
+        let row = stock
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["itemId"] == item.qbo_id.as_str())
+            .unwrap();
+        assert_eq!(row["tracked"], true);
+        assert_eq!(row["onHand"], "40");
+    }
+
+    #[test]
+    fn finished_goods_come_in_from_builds_and_go_out_on_sales() {
+        let store = book();
+        let r = DEMO_REALM;
+        let realm = crate::domain::RealmId::parse(r).unwrap();
+        // The demo seeds builds; the first built product is tracked from its first build.
+        let built = store.builds(&realm, None).unwrap().pop().unwrap();
+        let ledger = call(
+            &store,
+            "productLedger",
+            json!({ "realm": r, "itemId": built.item_id }),
+        );
+        assert_eq!(ledger["since"], built.built_on.as_str());
+        assert_eq!(ledger["stock"]["moves"][0]["kind"], "received");
+        call(
+            &store,
+            "recordProductCount",
+            json!({ "realm": r, "itemId": built.item_id, "countedOn": "2026-12-31", "units": "12" }),
+        );
+        let after = call(
+            &store,
+            "productLedger",
+            json!({ "realm": r, "itemId": built.item_id }),
+        );
+        assert_eq!(after["stock"]["onHandBf"], "12");
     }
 
     #[test]
