@@ -121,6 +121,7 @@ impl Store {
         raw.flatten().as_deref().map(dec).transpose()
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn record_count(
         &self,
         realm: &RealmId,
