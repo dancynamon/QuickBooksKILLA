@@ -95,6 +95,15 @@ const CLASSES: &[(&str, &str)] = &[
     ("4", "UV Printing"),
 ];
 
+/// The accounts a payment is made from or deposited to; no real bank names.
+const ACCOUNTS: &[(&str, &str, &str)] = &[
+    ("90", "Operating Checking", "Bank"),
+    ("91", "Payroll Checking", "Bank"),
+    ("92", "Undeposited Funds", "Other Current Asset"),
+    ("93", "Business Card", "Credit Card"),
+    ("94", "Accounts Payable (A/P)", "Accounts Payable"),
+];
+
 fn money(minor: i64) -> Value {
     // Two-decimal JSON numbers, exactly as QBO serialises amounts.
     json!((minor as f64) / 100.0)
@@ -126,6 +135,12 @@ pub fn generate(size: DemoSize, seed: u64, now: DateTime<Utc>) -> Vec<MirroredEn
 
     for (class_id, name) in CLASSES {
         out.push(entity(EntityType::Class, class_id, now, json!({ "Id": class_id, "Name": name, "FullyQualifiedName": name, "Active": true })));
+    }
+
+    for (account_id, name, account_type) in ACCOUNTS {
+        out.push(entity(EntityType::Account, account_id, now, json!({
+            "Id": account_id, "Name": name, "FullyQualifiedName": name, "AccountType": account_type, "Active": true
+        })));
     }
 
     let mut customers = Vec::new();

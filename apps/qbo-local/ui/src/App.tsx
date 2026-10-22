@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Aging, api, ApiError, BuildRow, Component, ContactType, CostBasis, ImportKind, ImportResult, OpenInvoice, PaymentDraft, PaymentPlan, ProductStockRow, StockMove, StockRow, Customer, DocType, Document, DocumentDetail, Draft, DraftLine, Hit, Item, MaterialRow, ReceiptRow, Realm, SalesRow, SearchResult, SheetDetail, SheetSummary, Status, Write } from "./api";
+import { Aging, api, ApiError, BuildRow, Component, ContactType, CostBasis, ImportKind, ImportResult, OpenInvoice, PaymentAccount, PaymentPlan, ProductStockRow, StockMove, StockRow, Customer, DocType, Document, DocumentDetail, Draft, DraftLine, Hit, Item, MaterialRow, ReceiptRow, Realm, SalesRow, SearchResult, SheetDetail, SheetSummary, Status, Write } from "./api";
 import { createContext, useContext } from "react";
 import { ago, DOC_LABELS, DOC_PLURALS, formatDate, formatDecimal, formatMoney, formatPerBf, formatQty, formatRate, lineAmountMinor } from "./format";
 
@@ -24,6 +24,7 @@ type Route =
   | { view: "builds" }
   | { view: "import" }
   | { view: "pay"; customerId: string | null }
+  | { view: "paybills"; vendorId: string | null }
   | { view: "doc"; qboId: string }
   | { view: "contact"; contactType: ContactType; contactId: string };
 
@@ -44,6 +45,7 @@ function parseRoute(hash: string): { realm: string | null; route: Route } {
   if (parts[2] === "sheet" && parts[3]) return { realm, route: { view: "sheet", itemId: parts[3] } };
   if (parts[2] === "builds") return { realm, route: { view: "builds" } };
   if (parts[2] === "import") return { realm, route: { view: "import" } };
+  if (parts[2] === "paybills") return { realm, route: { view: "paybills", vendorId: parts[3] ? decodeURIComponent(parts[3]) : null } };
   if (parts[2] === "pay") return { realm, route: { view: "pay", customerId: parts[3] ? decodeURIComponent(parts[3]) : null } };
   if (parts[2] === "new" && EDITABLE.includes(parts[3] as DocType)) return { realm, route: { view: "new", docType: parts[3] as DocType } };
   if (parts[2] === "edit" && parts[3]) return { realm, route: { view: "edit", qboId: parts[3] } };
@@ -83,6 +85,8 @@ function href(realm: string, route: Route): string {
       return `#/r/${realm}/builds`;
     case "import":
       return `#/r/${realm}/import`;
+    case "paybills":
+      return route.vendorId ? `#/r/${realm}/paybills/${encodeURIComponent(route.vendorId)}` : `#/r/${realm}/paybills`;
     case "pay":
       return route.customerId ? `#/r/${realm}/pay/${encodeURIComponent(route.customerId)}` : `#/r/${realm}/pay`;
   }
@@ -355,7 +359,8 @@ export function App() {
         {route.view === "sheet" && <SheetView key={`${realm}:${route.itemId}`} realm={realm} itemId={route.itemId} />}
         {route.view === "builds" && <BuildsView key={realm} realm={realm} />}
         {route.view === "import" && <ImportView key={realm} realm={realm} />}
-        {route.view === "pay" && <ReceivePayment key={`${realm}:${route.customerId ?? ""}`} realm={realm} customerId={route.customerId} go={go} />}
+        {route.view === "pay" && <PaymentEntry key={`${realm}:in:${route.customerId ?? ""}`} realm={realm} side="receive" contactId={route.customerId} go={go} />}
+        {route.view === "paybills" && <PaymentEntry key={`${realm}:out:${route.vendorId ?? ""}`} realm={realm} side="pay" contactId={route.vendorId} go={go} />}
         {route.view === "contact" && (
           <ContactView key={`${realm}:${route.contactId}`} realm={realm} contactType={route.contactType} contactId={route.contactId} go={go} />
         )}
@@ -536,6 +541,7 @@ function Register({ realm, docType, go }: { realm: string; docType: DocType; go:
         <span className="spacer" />
         {EDITABLE.includes(docType) && <NewButton realm={realm} docType={docType} />}
         {docType === "Payment" && <PayButton realm={realm} customerId={null} primary />}
+        {docType === "BillPayment" && <PayButton realm={realm} side="pay" customerId={null} primary />}
         {elapsed !== null && rows && (
           <span className="muted num">
             {visible.length.toLocaleString()} of {rows.length.toLocaleString()} · {elapsed.toFixed(0)} ms
@@ -670,6 +676,9 @@ function DocumentView({ realm, qboId, go }: { realm: string; qboId: string; go: 
         <span className="spacer" />
         {d.docType === "Invoice" && !d.pendingWrite && (d.balanceMinor ?? 0) > 0 && d.contactId && writes.enabled && (
           <PayButton realm={realm} customerId={d.contactId} />
+        )}
+        {d.docType === "Bill" && !d.pendingWrite && (d.balanceMinor ?? 0) > 0 && d.contactId && writes.enabled && (
+          <PayButton realm={realm} side="pay" customerId={d.contactId} />
         )}
         {EDITABLE.includes(d.docType) && !d.pendingWrite && writes.enabled ? (
           <a className="button" href={href(realm, { view: "edit", qboId: d.qboId })}>Edit</a>
@@ -851,7 +860,7 @@ function ContactView({
         <span className="badge">{contactType}</span>
         <span className="spacer" />
         <span className="num">Open {formatMoney(open)}</span>
-        {contactType === "Customer" && open > 0 && <PayButton realm={realm} customerId={contactId} />}
+        {open > 0 && <PayButton realm={realm} side={contactType === "Vendor" ? "pay" : "receive"} customerId={contactId} />}
       </div>
       {aging && (
         <dl className="facts aging-strip" aria-label="Open balance by days past due">
@@ -2590,19 +2599,25 @@ function ImportView({ realm }: { realm: string }) {
 // Receive payment: a cheque against a customer's open invoices
 // ---------------------------------------------------------------------------
 
-function PayButton({ realm, customerId, primary }: { realm: string; customerId: string | null; primary?: boolean }) {
+function PayButton({ realm, customerId, primary, side = "receive" }: { realm: string; customerId: string | null; primary?: boolean; side?: "receive" | "pay" }) {
   const writes = useContext(Writes);
+  const label = side === "pay" ? "Pay bills" : "Receive payment";
   if (!writes.enabled) {
-    return primary ? <span className="button disabled" title="Writes are off for this company. They are turned on after the read-only period.">Receive payment</span> : null;
+    return primary ? <span className="button disabled" title="Writes are off for this company. They are turned on after the read-only period.">{label}</span> : null;
   }
-  return <a className={primary ? "button primary" : "button"} href={href(realm, { view: "pay", customerId })}>Receive payment</a>;
+  const route: Route = side === "pay" ? { view: "paybills", vendorId: customerId } : { view: "pay", customerId };
+  return <a className={primary ? "button primary" : "button"} href={href(realm, route)}>{label}</a>;
 }
 
 /** Minor units as plain text an input accepts: 123456 → "1234.56". */
 const plainMoney = (minor: number) => `${minor < 0 ? "-" : ""}${Math.trunc(Math.abs(minor) / 100)}.${String(Math.abs(minor) % 100).padStart(2, "0")}`;
 
-function ReceivePayment({ realm, customerId, go }: { realm: string; customerId: string | null; go: (r: Route) => void }) {
+function PaymentEntry({ realm, side, contactId: customerId, go }: { realm: string; side: "receive" | "pay"; contactId: string | null; go: (r: Route) => void }) {
   const writes = useContext(Writes);
+  const paying = side === "pay";
+  const noun = paying ? "Bill" : "Invoice";
+  const [accounts, setAccounts] = useState<PaymentAccount[]>([]);
+  const [accountId, setAccountId] = useState("");
   const [customers, setCustomers] = useState<Customer[]>([]);
   const [customer, setCustomer] = useState<string>(customerId ?? "");
   const [customerText, setCustomerText] = useState("");
@@ -2618,40 +2633,48 @@ function ReceivePayment({ realm, customerId, go }: { realm: string; customerId: 
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
-    api.customers(realm).then((all) => {
+    if (!paying) return;
+    api.paymentAccounts(realm).then((all) => {
+      setAccounts(all);
+      setAccountId((current) => current || all.find((a) => a.accountType === "Bank")?.qboId || all[0]?.qboId || "");
+    }, (e: ApiError) => setError(e.message));
+  }, [realm, paying]);
+  useEffect(() => {
+    (paying ? api.vendors(realm) : api.customers(realm)).then((all) => {
       const real = all.filter((c) => !c.pending);
       setCustomers(real);
       if (customerId) setCustomerText(real.find((c) => c.qboId === customerId)?.displayName ?? "");
     }, (e: ApiError) => setError(e.message));
-  }, [realm, customerId]);
+  }, [realm, customerId, paying]);
   useEffect(() => {
     setOpen(null);
     setManual(null);
     if (!customer) return;
-    api.openInvoices(realm, customer).then(setOpen, (e: ApiError) => setError(e.message));
-  }, [realm, customer]);
+    (paying ? api.openBills(realm, customer) : api.openInvoices(realm, customer)).then(setOpen, (e: ApiError) => setError(e.message));
+  }, [realm, customer, paying]);
 
-  const draft = (): PaymentDraft => ({
-    customerId: customer,
+  const common = {
     txnDate,
     amount,
     reference: reference || null,
     privateNote: note || null,
     applications: manual ? Object.entries(manual).filter(([, a]) => a.trim() !== "").map(([invoiceId, a]) => ({ invoiceId, amount: a })) : undefined,
-  });
+  };
+  const preview = () => (paying ? api.billPaymentPreview(realm, { ...common, vendorId: customer, accountId }) : api.paymentPreview(realm, { ...common, customerId: customer }));
+  const submit = () => (paying ? api.payBills(realm, { ...common, vendorId: customer, accountId }) : api.receivePayment(realm, { ...common, customerId: customer }));
 
   // Where the money goes is the server's call, asked on every change.
   useEffect(() => {
     setPlan(null);
     if (!customer || !amount.trim()) return;
     let current = true;
-    api.paymentPreview(realm, draft()).then(
+    preview().then(
       (p) => { if (current) { setPlan(p); setError(null); } },
       (e: ApiError) => { if (current) setError(e.message); },
     );
     return () => { current = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [realm, customer, amount, txnDate, manual]);
+  }, [realm, customer, amount, txnDate, manual, accountId]);
 
   if (!writes.enabled) {
     return <div className="pad">Writes are off for this company. They are turned on with <code>qbo-local writes --enable</code> after the read-only period.</div>;
@@ -2666,11 +2689,11 @@ function ReceivePayment({ realm, customerId, go }: { realm: string; customerId: 
 
   const save = async () => {
     setError(null);
-    if (!customer) return setError("Choose a customer from the list.");
-    if (!plan) return setError("Enter the amount received.");
+    if (!customer) return setError(paying ? "Choose a vendor from the list." : "Choose a customer from the list.");
+    if (!plan) return setError(paying ? "Enter the amount paid." : "Enter the amount received.");
     setSaving(true);
     try {
-      const result = await api.receivePayment(realm, draft());
+      const result = await submit();
       writes.refresh();
       go({ view: "doc", qboId: result.entityId });
     } catch (e) {
@@ -2682,8 +2705,8 @@ function ReceivePayment({ realm, customerId, go }: { realm: string; customerId: 
   return (
     <section className="document editor" onKeyDown={(e) => { if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "s") { e.preventDefault(); void save(); } }}>
       <div className="toolbar">
-        <a className="back" href={href(realm, { view: "list", docType: "Payment" })}>← Payments</a>
-        <h1>Receive payment</h1>
+        <a className="back" href={href(realm, { view: "list", docType: paying ? "BillPayment" : "Payment" })}>← {paying ? "Bill payments" : "Payments"}</a>
+        <h1>{paying ? "Pay bills" : "Receive payment"}</h1>
         <span className="spacer" />
         {writes.environment === "sandbox" && <span className="pill">Sandbox</span>}
         <button className="button primary" onClick={() => void save()} disabled={saving || !plan}>
@@ -2693,7 +2716,7 @@ function ReceivePayment({ realm, customerId, go }: { realm: string; customerId: 
       {error && <div className="error">{error}</div>}
       <div className="form-grid">
         <label className="field wide">
-          <span>Customer</span>
+          <span>{paying ? "Vendor" : "Customer"}</span>
           <input list="bb-pay-customers" value={customerText} onChange={(e) => chooseCustomer(e.target.value)} placeholder="Start typing a name" autoFocus={!customerId} />
           <datalist id="bb-pay-customers">
             {customers.map((c) => <option key={c.qboId} value={c.displayName}>{c.companyName ?? ""}</option>)}
@@ -2703,22 +2726,32 @@ function ReceivePayment({ realm, customerId, go }: { realm: string; customerId: 
           <span>Date</span>
           <input type="date" value={txnDate} onChange={(e) => setTxnDate(e.target.value)} />
         </label>
+        {paying && (
+          <label className="field">
+            <span>Paid from</span>
+            <select value={accountId} onChange={(e) => setAccountId(e.target.value)} aria-label="Paid from">
+              {accounts.map((a) => <option key={a.qboId} value={a.qboId}>{a.name}{a.accountType === "Credit Card" ? " (card)" : ""}</option>)}
+            </select>
+          </label>
+        )}
         <label className="field">
-          <span>Amount received</span>
-          <input className="num r" inputMode="decimal" value={amount} onChange={(e) => setAmount(e.target.value)} autoFocus={!!customerId} aria-label="Amount received" />
+          <span>{paying ? "Amount paid" : "Amount received"}</span>
+          <input className="num r" inputMode="decimal" value={amount} onChange={(e) => setAmount(e.target.value)} autoFocus={!!customerId} aria-label={paying ? "Amount paid" : "Amount received"} />
         </label>
         <label className="field">
-          <span>Cheque or reference no.</span>
+          <span>{paying ? "Cheque no." : "Cheque or reference no."}</span>
           <input value={reference} onChange={(e) => setReference(e.target.value)} />
         </label>
       </div>
-      {customer && open && open.length === 0 && <p className="muted pad">No open invoices. A payment saved now stays on the customer as a credit.</p>}
+      {customer && open && open.length === 0 && (
+        <p className="muted pad">{paying ? "No open bills for this vendor." : "No open invoices. A payment saved now stays on the customer as a credit."}</p>
+      )}
       {open && open.length > 0 && (
         <div className="grid-wrap">
           <table className="grid lines">
             <thead>
               <tr>
-                <th>Invoice</th>
+                <th>{noun}</th>
                 <th>Date</th>
                 <th>Due</th>
                 <th className="r">Open</th>
@@ -2739,7 +2772,7 @@ function ReceivePayment({ realm, customerId, go }: { realm: string; customerId: 
                     <input
                       className="num r"
                       inputMode="decimal"
-                      aria-label={`Payment on invoice ${i.docNumber ?? i.qboId}`}
+                      aria-label={`Payment on ${noun.toLowerCase()} ${i.docNumber ?? i.qboId}`}
                       value={manual ? manual[i.qboId] ?? "" : appliedTo(i.qboId) ? plainMoney(appliedTo(i.qboId)) : ""}
                       onChange={(e) => {
                         const base = manual ?? Object.fromEntries((plan?.applied ?? []).map((a) => [a.invoiceId, plainMoney(a.amountMinor)]));
@@ -2763,10 +2796,10 @@ function ReceivePayment({ realm, customerId, go }: { realm: string; customerId: 
       )}
       {plan && (
         <dl className="facts">
-          <div><dt>Received</dt><dd className="num">{formatMoney(plan.totalMinor)}</dd></div>
+          <div><dt>{paying ? "Paid" : "Received"}</dt><dd className="num">{formatMoney(plan.totalMinor)}</dd></div>
           <div><dt>Applied</dt><dd className="num">{formatMoney(plan.totalMinor - plan.unappliedMinor)}</dd></div>
-          <div><dt>Left as credit</dt><dd className={plan.unappliedMinor ? "num warn-text" : "num"}>{formatMoney(plan.unappliedMinor)}</dd></div>
-          <div><dt>Deposit to</dt><dd>Undeposited Funds</dd></div>
+          {!paying && <div><dt>Left as credit</dt><dd className={plan.unappliedMinor ? "num warn-text" : "num"}>{formatMoney(plan.unappliedMinor)}</dd></div>}
+          <div><dt>{paying ? "Paid from" : "Deposit to"}</dt><dd>{paying ? accounts.find((a) => a.qboId === accountId)?.name ?? "" : "Undeposited Funds"}</dd></div>
         </dl>
       )}
       <div className="form-grid">

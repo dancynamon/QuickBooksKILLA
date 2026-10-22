@@ -221,6 +221,17 @@ impl Store {
     }
 
     /// Active contacts of one type by name — the customer picker's list.
+    /// Active bank and credit card accounts, by name: `(id, name, type)`.
+    pub fn payment_accounts(&self, realm: &RealmId) -> Result<Vec<(String, String, String)>, StoreError> {
+        let mut statement = self.connection.prepare(
+            "SELECT qbo_id, name, account_type FROM accounts
+             WHERE realm_id = ?1 AND is_active = 1 AND is_deleted = 0 AND account_type IN ('Bank', 'Credit Card')
+             ORDER BY account_type, name COLLATE NOCASE",
+        )?;
+        let rows = statement.query_map(params![realm.as_str()], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
     pub fn contacts(&self, realm: &RealmId, contact_type: crate::domain::ContactType) -> Result<Vec<(String, String, Option<String>)>, StoreError> {
         let mut statement = self.connection.prepare(
             "SELECT qbo_id, display_name, company_name FROM contacts

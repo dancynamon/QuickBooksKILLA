@@ -228,6 +228,40 @@ pub struct PaymentApplication {
     pub amount: String,
 }
 
+/// A payment to a vendor against open bills, by cheque from a bank account
+/// or on a credit card — which one follows from the account chosen.
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct BillPaymentDraft {
+    pub vendor_id: String,
+    pub txn_date: String,
+    pub amount: String,
+    pub account_id: String,
+    /// The cheque number; QuickBooks numbers it if left blank.
+    pub reference: Option<String>,
+    pub private_note: Option<String>,
+    pub applications: Option<Vec<PaymentApplication>>,
+}
+
+/// How a bill payment leaves the business.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum PayFrom {
+    Check,
+    CreditCard,
+}
+
+impl PayFrom {
+    /// From the QBO `AccountType` of the account chosen; anything else is not
+    /// an account a bill can be paid from.
+    pub fn for_account_type(account_type: &str) -> Option<Self> {
+        match account_type {
+            "Bank" => Some(PayFrom::Check),
+            "Credit Card" => Some(PayFrom::CreditCard),
+            _ => None,
+        }
+    }
+}
+
 /// An invoice a payment can go against, with what is still owed on it after
 /// any payment already queued.
 #[derive(Clone, Debug, PartialEq)]
@@ -291,12 +325,43 @@ pub fn plan_payment(draft: &PaymentDraft, open: &[OpenInvoice]) -> Result<Paymen
     if draft.customer_id.trim().is_empty() {
         return Err(invalid("choose a customer"));
     }
-    date(&draft.txn_date, "date")?;
-    let total = cents(&draft.amount, "amount")?;
+    plan(&draft.txn_date, &draft.amount, draft.applications.as_deref(), open, "invoice", "received")
+}
+
+/// The same rules on the vendor side, plus one: the whole amount must go on
+/// bills. Money sent to a vendor against nothing is a prepayment, which is
+/// entered in QuickBooks.
+pub fn plan_bill_payment(draft: &BillPaymentDraft, open: &[OpenInvoice]) -> Result<PaymentPlan, ComposeError> {
+    if draft.vendor_id.trim().is_empty() {
+        return Err(invalid("choose a vendor"));
+    }
+    if draft.account_id.trim().is_empty() {
+        return Err(invalid("choose the account it is paid from"));
+    }
+    let plan = plan(&draft.txn_date, &draft.amount, draft.applications.as_deref(), open, "bill", "paid")?;
+    if plan.unapplied.minor() != 0 {
+        return Err(invalid(format!(
+            "{} is not on any bill; a payment to a vendor must go on bills in full",
+            show(plan.unapplied)
+        )));
+    }
+    Ok(plan)
+}
+
+fn plan(
+    txn_date: &str,
+    amount: &str,
+    applications: Option<&[PaymentApplication]>,
+    open: &[OpenInvoice],
+    noun: &str,
+    verb: &str,
+) -> Result<PaymentPlan, ComposeError> {
+    date(txn_date, "date")?;
+    let total = cents(amount, "amount")?;
     if total.minor() <= 0 {
         return Err(invalid("a payment needs an amount above zero"));
     }
-    let applied = match &draft.applications {
+    let applied = match applications {
         None => apply_oldest_first(open, total),
         Some(applications) => {
             let mut out: Vec<(String, Money)> = Vec::new();
@@ -308,29 +373,29 @@ pub fn plan_payment(draft: &PaymentDraft, open: &[OpenInvoice]) -> Result<Paymen
                 if amount.minor() < 0 {
                     return Err(invalid("an applied amount cannot be negative"));
                 }
-                let invoice = open
+                let open_doc = open
                     .iter()
                     .find(|i| i.qbo_id == application.invoice_id)
-                    .ok_or_else(|| invalid(format!("invoice {} is not open for this customer", application.invoice_id)))?;
-                if out.iter().any(|(id, _)| id == &invoice.qbo_id) {
-                    return Err(invalid(format!("invoice {} is listed twice", invoice.doc_number.as_deref().unwrap_or(&invoice.qbo_id))));
+                    .ok_or_else(|| invalid(format!("{noun} {} is not open", application.invoice_id)))?;
+                let name = open_doc.doc_number.as_deref().unwrap_or(&open_doc.qbo_id);
+                if out.iter().any(|(id, _)| id == &open_doc.qbo_id) {
+                    return Err(invalid(format!("{noun} {name} is listed twice")));
                 }
-                if amount.minor() > invoice.balance.minor() {
+                if amount.minor() > open_doc.balance.minor() {
                     return Err(invalid(format!(
-                        "invoice {} has {} open; {} is more than that",
-                        invoice.doc_number.as_deref().unwrap_or(&invoice.qbo_id),
-                        show(invoice.balance),
+                        "{noun} {name} has {} open; {} is more than that",
+                        show(open_doc.balance),
                         show(amount)
                     )));
                 }
-                out.push((invoice.qbo_id.clone(), amount));
+                out.push((open_doc.qbo_id.clone(), amount));
             }
             out
         }
     };
     let applied_total: i64 = applied.iter().map(|(_, m)| m.minor()).sum();
     if applied_total > total.minor() {
-        return Err(invalid(format!("{} is applied but only {} was received", show(Money::from_minor(applied_total)), show(total))));
+        return Err(invalid(format!("{} is applied but only {} was {verb}", show(Money::from_minor(applied_total)), show(total))));
     }
     Ok(PaymentPlan { total, applied, unapplied: Money::from_minor(total.minor() - applied_total) })
 }
@@ -353,6 +418,37 @@ pub fn payment_payload(draft: &PaymentDraft, plan: &PaymentPlan) -> Result<Value
         .applied
         .iter()
         .map(|(id, amount)| json!({ "Amount": money(*amount), "LinkedTxn": [{ "TxnId": id, "TxnType": "Invoice" }] }))
+        .collect();
+    body.insert("Line".into(), Value::Array(lines));
+    Ok(Value::Object(body))
+}
+
+/// The QBO body for a planned bill payment.
+pub fn bill_payment_payload(draft: &BillPaymentDraft, plan: &PaymentPlan, pay_from: PayFrom) -> Result<Value, ComposeError> {
+    let mut body = Map::new();
+    body.insert("VendorRef".into(), json!({ "value": draft.vendor_id }));
+    body.insert("TxnDate".into(), json!(date(&draft.txn_date, "date")?));
+    body.insert("TotalAmt".into(), money(plan.total));
+    match pay_from {
+        PayFrom::Check => {
+            body.insert("PayType".into(), json!("Check"));
+            body.insert("CheckPayment".into(), json!({ "BankAccountRef": { "value": draft.account_id } }));
+        }
+        PayFrom::CreditCard => {
+            body.insert("PayType".into(), json!("CreditCard"));
+            body.insert("CreditCardPayment".into(), json!({ "CCAccountRef": { "value": draft.account_id } }));
+        }
+    }
+    if let Some(reference) = draft.reference.as_deref().map(str::trim).filter(|r| !r.is_empty()) {
+        body.insert("DocNumber".into(), json!(reference));
+    }
+    if let Some(note) = draft.private_note.as_deref().filter(|n| !n.trim().is_empty()) {
+        body.insert("PrivateNote".into(), json!(note));
+    }
+    let lines: Vec<Value> = plan
+        .applied
+        .iter()
+        .map(|(id, amount)| json!({ "Amount": money(*amount), "LinkedTxn": [{ "TxnId": id, "TxnType": "Bill" }] }))
         .collect();
     body.insert("Line".into(), Value::Array(lines));
     Ok(Value::Object(body))
@@ -535,9 +631,37 @@ mod tests {
         let refuse = |amount: &str, apps: Vec<(&str, &str)>| plan_payment(&payment(amount, Some(apps)), &invoices).unwrap_err().to_string();
         assert!(refuse("400", vec![("2", "300.01")]).contains("has 300.00 open"));
         assert!(refuse("100", vec![("1", "60"), ("2", "60")]).contains("only 100.00 was received"));
-        assert!(refuse("100", vec![("9", "10")]).contains("not open for this customer"));
+        assert!(refuse("100", vec![("9", "10")]).contains("is not open"));
         assert!(refuse("100", vec![("1", "10"), ("1", "10")]).contains("twice"));
         assert!(refuse("100", vec![("1", "10.005")]).contains("two decimal places"));
         assert!(plan_payment(&payment("0", None), &invoices).unwrap_err().to_string().contains("above zero"));
+    }
+
+    #[test]
+    fn a_bill_payment_goes_on_bills_in_full_from_the_account_chosen() {
+        let bills = [open("7", 40_000), open("8", 10_000)];
+        let draft = BillPaymentDraft {
+            vendor_id: "61".into(),
+            txn_date: "2026-11-02".into(),
+            amount: "450".into(),
+            account_id: "90".into(),
+            reference: Some("1207".into()),
+            private_note: None,
+            applications: None,
+        };
+        let plan = plan_bill_payment(&draft, &bills).unwrap();
+        assert_eq!(plan.applied, vec![("7".into(), Money::from_minor(40_000)), ("8".into(), Money::from_minor(5_000))]);
+        let body = bill_payment_payload(&draft, &plan, PayFrom::Check).unwrap();
+        assert_eq!(body["PayType"], "Check");
+        assert_eq!(body["CheckPayment"]["BankAccountRef"]["value"], "90");
+        assert_eq!(body["DocNumber"], "1207");
+        assert_eq!(body["Line"][0]["LinkedTxn"][0]["TxnType"], "Bill");
+        let card = bill_payment_payload(&draft, &plan, PayFrom::CreditCard).unwrap();
+        assert_eq!(card["CreditCardPayment"]["CCAccountRef"]["value"], "90");
+
+        let over = BillPaymentDraft { amount: "600".into(), ..draft.clone() };
+        assert!(plan_bill_payment(&over, &bills).unwrap_err().to_string().contains("100.00 is not on any bill"));
+        assert_eq!(PayFrom::for_account_type("Bank"), Some(PayFrom::Check));
+        assert_eq!(PayFrom::for_account_type("Accounts Payable"), None);
     }
 }

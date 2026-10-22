@@ -338,3 +338,6 @@ than an optimisation, which fixes the one-transaction-per-entity cost flagged in
   applied twice before the first lands.
 - **Only invoices QuickBooks already holds can be paid.** A queued invoice has no tax yet,
   so its balance is not known until it lands.
+- **Bills are paid from a bank or credit card account the person picks**; the account type
+  decides cheque or card. A bill payment must go on bills in full: money sent to a vendor
+  against nothing is a prepayment, entered in QuickBooks.

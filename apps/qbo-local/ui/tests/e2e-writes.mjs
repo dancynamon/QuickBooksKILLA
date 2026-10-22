@@ -202,6 +202,24 @@ await page.keyboard.press("Control+s");
 await page.waitForSelector(".document .banner");
 assert.match(await page.textContent(".lines tbody"), /Applied to invoice/);
 
+// Pay bills: from an open bill, paid in full from the checking account.
+await page.goto(`${base}/#/r/${realm}/list/Bill`);
+await page.waitForSelector(".grid tbody tr[data-index]");
+await page.check("text=Open only");
+await page.waitForSelector(".grid tbody tr[data-index]");
+await page.dblclick(".grid tbody tr[data-index]");
+await page.click('a:has-text("Pay bills")');
+await page.waitForSelector("h1:has-text('Pay bills')");
+await page.waitForSelector('[aria-label^="Payment on bill"]');
+await page.waitForFunction(() => document.querySelector('[aria-label="Paid from"]')?.selectedOptions[0]?.textContent.includes("Checking"));
+const owed = (await page.textContent(".lines tbody tr td:nth-child(4)")).trim().split(/\s/)[0].replace(/,/g, "");
+await page.fill('[aria-label="Amount paid"]', owed);
+await page.waitForFunction(() => document.querySelector(".facts")?.textContent.includes("Paid from"));
+await shot("pay-bills");
+await page.keyboard.press("Control+s");
+await page.waitForSelector(".document .banner");
+assert.match(await page.textContent(".lines tbody"), /Applied to bill/);
+
 assert.deepEqual(errors, []);
 await browser.close();
 console.log("e2e-writes: ok");

@@ -371,6 +371,18 @@ export type PaymentDraft = {
   applications?: { invoiceId: string; amount: string }[];
 };
 
+export type BillPaymentDraft = {
+  vendorId: string;
+  txnDate: string;
+  amount: string;
+  accountId: string;
+  reference: string | null;
+  privateNote: string | null;
+  applications?: { invoiceId: string; amount: string }[];
+};
+
+export type PaymentAccount = { qboId: string; name: string; accountType: string };
+
 export type PaymentPlan = {
   totalMinor: number;
   unappliedMinor: number;
@@ -393,6 +405,11 @@ export const api = {
   paymentPreview: (realm: string, draft: PaymentDraft) => call<PaymentPlan>("paymentPreview", { realm, draft }),
   receivePayment: (realm: string, draft: PaymentDraft) =>
     call<PaymentPlan & { outboxId: string; entityId: string }>("receivePayment", { realm, draft }),
+  paymentAccounts: (realm: string) => call<PaymentAccount[]>("paymentAccounts", { realm }),
+  openBills: (realm: string, vendorId: string) => call<OpenInvoice[]>("openBills", { realm, vendorId }),
+  billPaymentPreview: (realm: string, draft: BillPaymentDraft) => call<PaymentPlan>("billPaymentPreview", { realm, draft }),
+  payBills: (realm: string, draft: BillPaymentDraft) =>
+    call<PaymentPlan & { outboxId: string; entityId: string }>("payBills", { realm, draft }),
   saveDocument: (realm: string, draft: Draft, qboId?: string) =>
     call<{ outboxId: string; entityId: string; state: string }>("saveDocument", { realm, draft, qboId }),
   createCustomer: (realm: string, displayName: string, companyName?: string, email?: string) =>
