@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Aging, api, ApiError, BuildRow, Component, ContactType, CostBasis, ImportKind, ImportResult, OpenInvoice, PaymentAccount, PaymentPlan, ProductStockRow, StockMove, StockRow, Customer, DocType, Document, DocumentDetail, Draft, DraftLine, Hit, Item, MaterialRow, ReceiptRow, Realm, SalesRow, SearchResult, SheetDetail, SheetSummary, Status, Write } from "./api";
+import { Aging, api, ApiError, BuildRow, Component, ContactType, CostBasis, ImportKind, ImportResult, OpenInvoice, PaymentAccount, PaymentPlan, Undeposited, ProductStockRow, StockMove, StockRow, Customer, DocType, Document, DocumentDetail, Draft, DraftLine, Hit, Item, MaterialRow, ReceiptRow, Realm, SalesRow, SearchResult, SheetDetail, SheetSummary, Status, Write } from "./api";
 import { createContext, useContext } from "react";
 import { ago, DOC_LABELS, DOC_PLURALS, formatDate, formatDecimal, formatMoney, formatPerBf, formatQty, formatRate, lineAmountMinor } from "./format";
 
@@ -25,6 +25,7 @@ type Route =
   | { view: "import" }
   | { view: "pay"; customerId: string | null }
   | { view: "paybills"; vendorId: string | null }
+  | { view: "deposit" }
   | { view: "doc"; qboId: string }
   | { view: "contact"; contactType: ContactType; contactId: string };
 
@@ -45,6 +46,7 @@ function parseRoute(hash: string): { realm: string | null; route: Route } {
   if (parts[2] === "sheet" && parts[3]) return { realm, route: { view: "sheet", itemId: parts[3] } };
   if (parts[2] === "builds") return { realm, route: { view: "builds" } };
   if (parts[2] === "import") return { realm, route: { view: "import" } };
+  if (parts[2] === "deposit") return { realm, route: { view: "deposit" } };
   if (parts[2] === "paybills") return { realm, route: { view: "paybills", vendorId: parts[3] ? decodeURIComponent(parts[3]) : null } };
   if (parts[2] === "pay") return { realm, route: { view: "pay", customerId: parts[3] ? decodeURIComponent(parts[3]) : null } };
   if (parts[2] === "new" && EDITABLE.includes(parts[3] as DocType)) return { realm, route: { view: "new", docType: parts[3] as DocType } };
@@ -85,6 +87,8 @@ function href(realm: string, route: Route): string {
       return `#/r/${realm}/builds`;
     case "import":
       return `#/r/${realm}/import`;
+    case "deposit":
+      return `#/r/${realm}/deposit`;
     case "paybills":
       return route.vendorId ? `#/r/${realm}/paybills/${encodeURIComponent(route.vendorId)}` : `#/r/${realm}/paybills`;
     case "pay":
@@ -360,6 +364,7 @@ export function App() {
         {route.view === "builds" && <BuildsView key={realm} realm={realm} />}
         {route.view === "import" && <ImportView key={realm} realm={realm} />}
         {route.view === "pay" && <PaymentEntry key={`${realm}:in:${route.customerId ?? ""}`} realm={realm} side="receive" contactId={route.customerId} go={go} />}
+        {route.view === "deposit" && <DepositView key={realm} realm={realm} go={go} />}
         {route.view === "paybills" && <PaymentEntry key={`${realm}:out:${route.vendorId ?? ""}`} realm={realm} side="pay" contactId={route.vendorId} go={go} />}
         {route.view === "contact" && (
           <ContactView key={`${realm}:${route.contactId}`} realm={realm} contactType={route.contactType} contactId={route.contactId} go={go} />
@@ -542,6 +547,7 @@ function Register({ realm, docType, go }: { realm: string; docType: DocType; go:
         {EDITABLE.includes(docType) && <NewButton realm={realm} docType={docType} />}
         {docType === "Payment" && <PayButton realm={realm} customerId={null} primary />}
         {docType === "BillPayment" && <PayButton realm={realm} side="pay" customerId={null} primary />}
+        {docType === "Deposit" && <DepositButton realm={realm} />}
         {elapsed !== null && rows && (
           <span className="muted num">
             {visible.length.toLocaleString()} of {rows.length.toLocaleString()} · {elapsed.toFixed(0)} ms
@@ -2801,6 +2807,136 @@ function PaymentEntry({ realm, side, contactId: customerId, go }: { realm: strin
           {!paying && <div><dt>Left as credit</dt><dd className={plan.unappliedMinor ? "num warn-text" : "num"}>{formatMoney(plan.unappliedMinor)}</dd></div>}
           <div><dt>{paying ? "Paid from" : "Deposit to"}</dt><dd>{paying ? accounts.find((a) => a.qboId === accountId)?.name ?? "" : "Undeposited Funds"}</dd></div>
         </dl>
+      )}
+      <div className="form-grid">
+        <label className="field wide">
+          <span>Internal note</span>
+          <textarea rows={2} value={note} onChange={(e) => setNote(e.target.value)} />
+        </label>
+      </div>
+    </section>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Make a deposit: banking what is waiting in Undeposited Funds
+// ---------------------------------------------------------------------------
+
+function DepositButton({ realm }: { realm: string }) {
+  const writes = useContext(Writes);
+  if (!writes.enabled) {
+    return <span className="button disabled" title="Writes are off for this company. They are turned on after the read-only period.">Make a deposit</span>;
+  }
+  return <a className="button primary" href={href(realm, { view: "deposit" })}>Make a deposit</a>;
+}
+
+function DepositView({ realm, go }: { realm: string; go: (r: Route) => void }) {
+  const writes = useContext(Writes);
+  const [rows, setRows] = useState<Undeposited[] | null>(null);
+  const [accounts, setAccounts] = useState<PaymentAccount[]>([]);
+  const [accountId, setAccountId] = useState("");
+  const [txnDate, setTxnDate] = useState(todayIso);
+  const [note, setNote] = useState("");
+  const [ticked, setTicked] = useState<Set<string>>(new Set());
+  const [error, setError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    api.undeposited(realm).then(setRows, (e: ApiError) => setError(e.message));
+    api.paymentAccounts(realm).then((all) => {
+      const banks = all.filter((a) => a.accountType === "Bank");
+      setAccounts(banks);
+      setAccountId((current) => current || banks[0]?.qboId || "");
+    }, (e: ApiError) => setError(e.message));
+  }, [realm]);
+
+  if (!writes.enabled) {
+    return <div className="pad">Writes are off for this company. They are turned on with <code>qbo-local writes --enable</code> after the read-only period.</div>;
+  }
+  if (!rows) return error ? <div className="error pad">{error}</div> : <div className="muted pad">Loading…</div>;
+
+  const total = rows.filter((r) => ticked.has(r.qboId)).reduce((sum, r) => sum + r.amountMinor, 0);
+  const toggle = (id: string) => {
+    const next = new Set(ticked);
+    if (next.has(id)) next.delete(id); else next.add(id);
+    setTicked(next);
+  };
+  const all = rows.length > 0 && ticked.size === rows.length;
+
+  const save = async () => {
+    setError(null);
+    if (!accountId) return setError("Choose the bank account.");
+    if (ticked.size === 0) return setError("Tick the payments on this deposit slip.");
+    setSaving(true);
+    try {
+      const result = await api.makeDeposit(realm, { accountId, txnDate, paymentIds: rows.filter((r) => ticked.has(r.qboId)).map((r) => r.qboId), privateNote: note || null });
+      writes.refresh();
+      go({ view: "doc", qboId: result.entityId });
+    } catch (e) {
+      setError((e as Error).message);
+      setSaving(false);
+    }
+  };
+
+  return (
+    <section className="document editor" onKeyDown={(e) => { if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "s") { e.preventDefault(); void save(); } }}>
+      <div className="toolbar">
+        <a className="back" href={href(realm, { view: "list", docType: "Deposit" })}>← Deposits</a>
+        <h1>Make a deposit</h1>
+        <span className="spacer" />
+        {writes.environment === "sandbox" && <span className="pill">Sandbox</span>}
+        <button className="button primary" onClick={() => void save()} disabled={saving || ticked.size === 0}>
+          {saving ? "Saving…" : "Save"} <kbd>{navigator.platform.includes("Mac") ? "⌘S" : "Ctrl S"}</kbd>
+        </button>
+      </div>
+      {error && <div className="error">{error}</div>}
+      <div className="form-grid">
+        <label className="field">
+          <span>Deposit to</span>
+          <select value={accountId} onChange={(e) => setAccountId(e.target.value)} aria-label="Deposit to">
+            {accounts.map((a) => <option key={a.qboId} value={a.qboId}>{a.name}</option>)}
+          </select>
+        </label>
+        <label className="field">
+          <span>Date</span>
+          <input type="date" value={txnDate} onChange={(e) => setTxnDate(e.target.value)} />
+        </label>
+      </div>
+      {rows.length === 0 ? (
+        <p className="muted pad">Nothing is waiting in Undeposited Funds.</p>
+      ) : (
+        <div className="grid-wrap">
+          <table className="grid lines">
+            <thead>
+              <tr>
+                <th><input type="checkbox" checked={all} onChange={() => setTicked(all ? new Set() : new Set(rows.map((r) => r.qboId)))} aria-label="Tick all" /></th>
+                <th>Received</th>
+                <th>From</th>
+                <th>Type</th>
+                <th>Ref no.</th>
+                <th className="r">Amount</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((r) => (
+                <tr key={r.qboId} onClick={() => toggle(r.qboId)}>
+                  <td><input type="checkbox" checked={ticked.has(r.qboId)} onChange={() => toggle(r.qboId)} onClick={(e) => e.stopPropagation()} aria-label={`Deposit ${r.customerName ?? r.qboId} ${formatMoney(r.amountMinor)}`} /></td>
+                  <td className="num">{formatDate(r.txnDate)}</td>
+                  <td><a href={href(realm, { view: "doc", qboId: r.qboId })} onClick={(e) => e.stopPropagation()}>{r.customerName ?? `#${r.qboId}`}</a></td>
+                  <td>{DOC_LABELS[r.docType]}</td>
+                  <td className="num">{r.reference ?? ""}</td>
+                  <td className="num r">{formatMoney(r.amountMinor)}</td>
+                </tr>
+              ))}
+            </tbody>
+            <tfoot>
+              <tr>
+                <td colSpan={5} className="r">{ticked.size} ticked · deposit total</td>
+                <td className="num r">{formatMoney(total)}</td>
+              </tr>
+            </tfoot>
+          </table>
+        </div>
       )}
       <div className="form-grid">
         <label className="field wide">

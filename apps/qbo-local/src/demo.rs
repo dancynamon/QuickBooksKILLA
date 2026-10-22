@@ -256,9 +256,14 @@ pub fn generate(size: DemoSize, seed: u64, now: DateTime<Utc>) -> Vec<MirroredEn
 
         if paid {
             let payment_id = id();
+            let paid_on = txn_date + Duration::days(10 + rng.below(30) as i64);
+            // The last fortnight's cheques are still waiting to be banked.
+            let deposited_to = if (now.date_naive() - paid_on).num_days() > 14 { "90" } else { "92" };
             out.push(entity(EntityType::Payment, &payment_id, updated, json!({
                 "Id": payment_id, "SyncToken": "0",
-                "TxnDate": (txn_date + Duration::days(10 + rng.below(30) as i64)).to_string(),
+                "TxnDate": paid_on.to_string(),
+                "PaymentRefNum": format!("{}", 1000 + n % 9000),
+                "DepositToAccountRef": { "value": deposited_to },
                 "CustomerRef": { "value": customer }, "TotalAmt": money(total),
                 "Line": [ { "Amount": money(total), "LinkedTxn": [ { "TxnId": invoice_id, "TxnType": "Invoice" } ] } ]
             })));

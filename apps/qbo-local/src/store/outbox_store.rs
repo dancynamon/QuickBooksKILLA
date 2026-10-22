@@ -76,6 +76,10 @@ fn record_from(raw: RawRecord) -> Result<OutboxRecord, StoreError> {
     })
 }
 
+/// A payment waiting in Undeposited Funds:
+/// `(id, type, reference, date, customer, amount_minor)`.
+pub type UndepositedRow = (String, String, Option<String>, String, Option<String>, i64);
+
 impl Store {
     pub fn realm_environment(&self, realm: &RealmId) -> Result<Environment, StoreError> {
         let raw: Option<String> = self
@@ -221,6 +225,34 @@ impl Store {
     }
 
     /// Active contacts of one type by name — the customer picker's list.
+    /// Customer payments and sales receipts sitting in Undeposited Funds: put
+    /// there (or left there by default) and not yet on any deposit. Oldest
+    /// first. `(id, type, reference, date, customer, amount)`.
+    pub fn undeposited(&self, realm: &RealmId) -> Result<Vec<UndepositedRow>, StoreError> {
+        let mut statement = self.connection.prepare(
+            "SELECT d.qbo_id, d.doc_type,
+                    COALESCE(json_extract(e.raw_json, '$.PaymentRefNum'), d.doc_number),
+                    d.txn_date, c.display_name, d.total_minor
+             FROM documents d
+             JOIN entities e ON e.realm_id = d.realm_id AND e.entity_type = d.doc_type AND e.qbo_id = d.qbo_id
+             LEFT JOIN contacts c ON c.realm_id = d.realm_id AND c.contact_type = 'Customer' AND c.qbo_id = d.contact_id
+             WHERE d.realm_id = ?1 AND d.doc_type IN ('Payment', 'SalesReceipt') AND d.is_deleted = 0
+               AND d.total_minor > 0
+               AND (json_extract(e.raw_json, '$.DepositToAccountRef.value') IS NULL
+                    OR json_extract(e.raw_json, '$.DepositToAccountRef.value') IN (
+                        SELECT qbo_id FROM accounts
+                        WHERE realm_id = ?1 AND (account_subtype = 'UndepositedFunds' OR name = 'Undeposited Funds')))
+               AND NOT EXISTS (
+                   SELECT 1 FROM document_links l
+                   WHERE l.realm_id = d.realm_id AND l.from_type = 'Deposit' AND l.to_qbo_id = d.qbo_id)
+             ORDER BY d.txn_date, d.qbo_id",
+        )?;
+        let rows = statement.query_map(params![realm.as_str()], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?))
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
     /// Active bank and credit card accounts, by name: `(id, name, type)`.
     pub fn payment_accounts(&self, realm: &RealmId) -> Result<Vec<(String, String, String)>, StoreError> {
         let mut statement = self.connection.prepare(

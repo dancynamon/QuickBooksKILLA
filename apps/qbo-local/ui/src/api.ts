@@ -383,6 +383,15 @@ export type BillPaymentDraft = {
 
 export type PaymentAccount = { qboId: string; name: string; accountType: string };
 
+export type Undeposited = {
+  qboId: string;
+  docType: "Payment" | "SalesReceipt";
+  reference: string | null;
+  txnDate: string;
+  customerName: string | null;
+  amountMinor: number;
+};
+
 export type PaymentPlan = {
   totalMinor: number;
   unappliedMinor: number;
@@ -410,6 +419,9 @@ export const api = {
   billPaymentPreview: (realm: string, draft: BillPaymentDraft) => call<PaymentPlan>("billPaymentPreview", { realm, draft }),
   payBills: (realm: string, draft: BillPaymentDraft) =>
     call<PaymentPlan & { outboxId: string; entityId: string }>("payBills", { realm, draft }),
+  undeposited: (realm: string) => call<Undeposited[]>("undeposited", { realm }),
+  makeDeposit: (realm: string, draft: { accountId: string; txnDate: string; paymentIds: string[]; privateNote: string | null }) =>
+    call<{ outboxId: string; entityId: string; totalMinor: number; count: number }>("makeDeposit", { realm, draft }),
   saveDocument: (realm: string, draft: Draft, qboId?: string) =>
     call<{ outboxId: string; entityId: string; state: string }>("saveDocument", { realm, draft, qboId }),
   createCustomer: (realm: string, displayName: string, companyName?: string, email?: string) =>

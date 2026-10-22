@@ -220,6 +220,20 @@ await page.keyboard.press("Control+s");
 await page.waitForSelector(".document .banner");
 assert.match(await page.textContent(".lines tbody"), /Applied to bill/);
 
+// Make a deposit: two cheques waiting in Undeposited Funds, banked together.
+await page.goto(`${base}/#/r/${realm}/list/Deposit`);
+await page.click('a:has-text("Make a deposit")');
+await page.waitForSelector("h1:has-text('Make a deposit')");
+await page.waitForSelector('tbody [aria-label^="Deposit "]');
+const boxes = page.locator('tbody [aria-label^="Deposit "]');
+await boxes.nth(0).check();
+await boxes.nth(1).check();
+assert.match(await page.textContent(".lines tfoot"), /2 ticked/);
+await shot("deposit");
+await page.keyboard.press("Control+s");
+await page.waitForSelector(".document .banner");
+assert.match(await page.textContent(".lines tbody"), /Payment from/);
+
 assert.deepEqual(errors, []);
 await browser.close();
 console.log("e2e-writes: ok");

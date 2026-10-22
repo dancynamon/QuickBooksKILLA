@@ -341,3 +341,8 @@ than an optimisation, which fixes the one-transaction-per-entity cost flagged in
 - **Bills are paid from a bank or credit card account the person picks**; the account type
   decides cheque or card. A bill payment must go on bills in full: money sent to a vendor
   against nothing is a prepayment, entered in QuickBooks.
+- **Deposits bank what is waiting in Undeposited Funds.** A payment or sales receipt is
+  waiting when its deposit account is Undeposited Funds (or unset) and no deposit links
+  it. Each deposit line links its payment, so QuickBooks clears it from Undeposited Funds
+  rather than counting it twice; a payment on a queued deposit is not offered again.
+  Deposits go to bank accounts only.

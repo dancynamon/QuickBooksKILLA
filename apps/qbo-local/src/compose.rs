@@ -454,6 +454,50 @@ pub fn bill_payment_payload(draft: &BillPaymentDraft, plan: &PaymentPlan, pay_fr
     Ok(Value::Object(body))
 }
 
+/// A bank deposit of payments waiting in Undeposited Funds.
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct DepositDraft {
+    pub account_id: String,
+    pub txn_date: String,
+    /// Payments and sales receipts to put on the slip, by QBO id.
+    pub payment_ids: Vec<String>,
+    pub private_note: Option<String>,
+}
+
+/// One payment as it goes on a deposit: its id, QBO type and amount.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DepositItem {
+    pub qbo_id: String,
+    pub txn_type: String,
+    pub amount: Money,
+}
+
+/// The QBO body for a deposit. Each line links the payment it banks, so
+/// QuickBooks moves it out of Undeposited Funds rather than counting it twice.
+pub fn deposit_payload(draft: &DepositDraft, items: &[DepositItem]) -> Result<Value, ComposeError> {
+    if draft.account_id.trim().is_empty() {
+        return Err(invalid("choose the bank account"));
+    }
+    if items.is_empty() {
+        return Err(invalid("tick at least one payment"));
+    }
+    let mut body = Map::new();
+    body.insert("DepositToAccountRef".into(), json!({ "value": draft.account_id }));
+    body.insert("TxnDate".into(), json!(date(&draft.txn_date, "date")?));
+    if let Some(note) = draft.private_note.as_deref().filter(|n| !n.trim().is_empty()) {
+        body.insert("PrivateNote".into(), json!(note));
+    }
+    let total = Money::checked_sum(items.iter().map(|i| i.amount)).map_err(|e| invalid(e.to_string()))?;
+    body.insert("TotalAmt".into(), money(total));
+    let lines: Vec<Value> = items
+        .iter()
+        .map(|i| json!({ "Amount": money(i.amount), "LinkedTxn": [{ "TxnId": i.qbo_id, "TxnType": i.txn_type, "TxnLineId": "0" }] }))
+        .collect();
+    body.insert("Line".into(), Value::Array(lines));
+    Ok(Value::Object(body))
+}
+
 /// A new customer. `DisplayName` is the unique name QBO enforces and the one
 /// the drain's duplicate guard queries by (§6.5).
 pub fn customer_payload(display_name: &str, company_name: Option<&str>, email: Option<&str>) -> Result<Value, ComposeError> {

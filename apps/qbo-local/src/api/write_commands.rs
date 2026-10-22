@@ -14,7 +14,7 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use super::{parse, realm, to_json, ApiError, DocumentDto, LineDto};
-use crate::compose::{self, BillPaymentDraft, DocumentDraft, DraftLine, OpenInvoice, PayFrom, PaymentDraft, PaymentPlan};
+use crate::compose::{self, BillPaymentDraft, DepositDraft, DepositItem, DocumentDraft, DraftLine, OpenInvoice, PayFrom, PaymentDraft, PaymentPlan};
 use crate::domain::{ContactType, DocumentType, EntityType, RealmId};
 use crate::outbox::{Operation, OutboxRecord, OutboxState};
 use crate::store::Store;
@@ -37,6 +37,8 @@ pub const WRITE_COMMANDS: &[&str] = &[
     "openBills",
     "billPaymentPreview",
     "payBills",
+    "undeposited",
+    "makeDeposit",
 ];
 
 impl From<WriteError> for ApiError {
@@ -104,6 +106,9 @@ pub(super) fn pending_document(store: &Store, realm: &RealmId, record: &OutboxRe
         Some(id) => customer_name(store, realm, id)?,
         None => None,
     };
+    if doc_type == DocumentType::Deposit {
+        return Ok(Some(pending_deposit(store, realm, record)?));
+    }
     if matches!(doc_type, DocumentType::Payment | DocumentType::BillPayment) {
         return Ok(Some(pending_payment(store, realm, record, contact_id, contact_name)?));
     }
@@ -199,6 +204,65 @@ fn pending_payment(
         pending_write: Some(record.state.as_str().to_string()),
     };
     Ok((document, lines))
+}
+
+/// A queued deposit: one line per payment it banks.
+fn pending_deposit(store: &Store, realm: &RealmId, record: &OutboxRecord) -> Result<(DocumentDto, Vec<LineDto>), ApiError> {
+    let payload = &record.payload_json;
+    let mut lines = Vec::new();
+    for (i, line) in payload.get("Line").and_then(|l| l.as_array()).into_iter().flatten().enumerate() {
+        let from = match text(line, "/LinkedTxn/0/TxnId") {
+            Some(id) => store.get_document(realm, &id)?.and_then(|d| d.contact_name).unwrap_or(id),
+            None => String::new(),
+        };
+        lines.push(LineDto {
+            line_no: i as i64 + 1,
+            item_id: None,
+            description: Some(format!("Payment from {from}")),
+            qty: None,
+            unit_price: None,
+            amount_minor: line.get("Amount").map(minor_of).unwrap_or(0),
+            class_id: None,
+            taxable: false,
+        });
+    }
+    let document = DocumentDto {
+        qbo_id: record.local_entity_id.clone(),
+        doc_type: DocumentType::Deposit,
+        doc_number: None,
+        txn_date: text(payload, "/TxnDate").unwrap_or_default(),
+        due_date: None,
+        contact_id: None,
+        contact_type: None,
+        contact_name: None,
+        class_id: None,
+        total_minor: payload.get("TotalAmt").map(minor_of).unwrap_or(0),
+        balance_minor: None,
+        status: Some(write_status(record.state).to_string()),
+        po_number: None,
+        private_note: text(payload, "/PrivateNote"),
+        customer_memo: None,
+        pending_write: Some(record.state.as_str().to_string()),
+    };
+    Ok((document, lines))
+}
+
+/// Payments already on a deposit that has not landed yet.
+fn queued_deposits(store: &Store, realm: &RealmId) -> Result<std::collections::HashSet<String>, ApiError> {
+    Ok(store
+        .outbox_records(realm, OPEN)?
+        .into_iter()
+        .filter(|r| r.entity_type == EntityType::Deposit && r.operation == Operation::Create)
+        .flat_map(|r| {
+            r.payload_json
+                .get("Line")
+                .and_then(|l| l.as_array())
+                .into_iter()
+                .flatten()
+                .filter_map(|line| text(line, "/LinkedTxn/0/TxnId"))
+                .collect::<Vec<_>>()
+        })
+        .collect())
 }
 
 /// Amounts queued payments will take off each invoice once they land.
@@ -420,6 +484,8 @@ pub(super) fn dispatch(store: &Store, command: &str, args: Value, now: DateTime<
         "openBills" => open_bills_command(store, args),
         "billPaymentPreview" => bill_payment_preview(store, args),
         "payBills" => pay_bills(store, args, now),
+        "undeposited" => undeposited(store, args),
+        "makeDeposit" => make_deposit(store, args, now),
         _ => return None,
     };
     Some(result)
@@ -618,6 +684,56 @@ fn pay_bills(store: &Store, args: Value, now: DateTime<Utc>) -> Result<Value, Ap
     out["outboxId"] = serde_json::json!(record.id.to_string());
     out["entityId"] = serde_json::json!(record.local_entity_id);
     to_json(out)
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DepositArgs {
+    realm: String,
+    draft: DepositDraft,
+}
+
+/// What is waiting to be banked, less anything already on a queued deposit.
+fn undeposited_rows(store: &Store, realm: &RealmId) -> Result<Vec<crate::store::outbox_store::UndepositedRow>, ApiError> {
+    let queued = queued_deposits(store, realm)?;
+    Ok(store.undeposited(realm)?.into_iter().filter(|r| !queued.contains(&r.0)).collect())
+}
+
+fn undeposited(store: &Store, args: Value) -> Result<Value, ApiError> {
+    let args: RealmOnly = parse(args)?;
+    to_json(
+        undeposited_rows(store, &realm(&args.realm)?)?
+            .into_iter()
+            .map(|(id, doc_type, reference, date, customer, amount)| {
+                serde_json::json!({ "qboId": id, "docType": doc_type, "reference": reference, "txnDate": date, "customerName": customer, "amountMinor": amount })
+            })
+            .collect::<Vec<_>>(),
+    )
+}
+
+fn make_deposit(store: &Store, args: Value, now: DateTime<Utc>) -> Result<Value, ApiError> {
+    let args: DepositArgs = parse(args)?;
+    let realm = realm(&args.realm)?;
+    let bank = store.payment_accounts(&realm)?.into_iter().any(|(id, _, t)| id == args.draft.account_id && t == "Bank");
+    if !bank {
+        return Err(ApiError::BadArguments("deposit to a bank account".into()));
+    }
+    let waiting = undeposited_rows(store, &realm)?;
+    let mut items = Vec::new();
+    for id in &args.draft.payment_ids {
+        let row = waiting
+            .iter()
+            .find(|r| &r.0 == id)
+            .ok_or_else(|| ApiError::BadArguments(format!("payment {id} is not waiting to be deposited")))?;
+        if items.iter().any(|i: &DepositItem| &i.qbo_id == id) {
+            return Err(ApiError::BadArguments(format!("payment {id} is ticked twice")));
+        }
+        items.push(DepositItem { qbo_id: row.0.clone(), txn_type: row.1.clone(), amount: ledger_core::Money::from_minor(row.5) });
+    }
+    let payload = compose::deposit_payload(&args.draft, &items).map_err(|e| ApiError::BadArguments(e.to_string()))?;
+    let total = payload.get("TotalAmt").map(minor_of).unwrap_or(0);
+    let record = writes::queue_create(store, &realm, EntityType::Deposit, payload, now)?;
+    to_json(serde_json::json!({ "outboxId": record.id.to_string(), "entityId": record.local_entity_id, "totalMinor": total, "count": items.len() }))
 }
 
 fn open_json(open: Vec<OpenInvoice>, held: Vec<i64>) -> Result<Value, ApiError> {
@@ -900,5 +1016,36 @@ mod tests {
         let mut qbo = MockQbo::new(now());
         crate::writes::drain_once(&store, &realm, &mut qbo, now()).unwrap();
         assert_eq!(qbo.count(&realm, crate::domain::EntityType::BillPayment), 1);
+    }
+
+    #[test]
+    fn a_deposit_banks_waiting_payments_once() {
+        let store = Store::open_in_memory().unwrap();
+        let size = DemoSize { customers: 6, vendors: 2, items: 8, invoices: 400, purchase_orders: 2 };
+        demo::seed(&store, size, 5, now()).unwrap();
+        let realm = crate::domain::RealmId::parse(DEMO_REALM).unwrap();
+        store.set_write_enabled(&realm, true).unwrap();
+        let waiting = dispatch_at(&store, "undeposited", json!({ "realm": DEMO_REALM }), now()).unwrap();
+        let waiting = waiting.as_array().unwrap().clone();
+        assert!(!waiting.is_empty(), "the demo leaves recent cheques in Undeposited Funds");
+        let ids: Vec<_> = waiting.iter().take(2).map(|w| w["qboId"].clone()).collect();
+        let expected: i64 = waiting.iter().take(2).map(|w| w["amountMinor"].as_i64().unwrap()).sum();
+
+        let wrong = json!({ "accountId": "92", "txnDate": "2026-11-02", "paymentIds": ids });
+        assert_eq!(dispatch_at(&store, "makeDeposit", json!({ "realm": DEMO_REALM, "draft": wrong }), now()).unwrap_err().status(), 400);
+
+        let draft = json!({ "accountId": "90", "txnDate": "2026-11-02", "paymentIds": ids });
+        let saved = dispatch_at(&store, "makeDeposit", json!({ "realm": DEMO_REALM, "draft": draft }), now()).unwrap();
+        assert_eq!(saved["totalMinor"], expected);
+        let after = dispatch_at(&store, "undeposited", json!({ "realm": DEMO_REALM }), now()).unwrap();
+        assert_eq!(after.as_array().unwrap().len(), waiting.len() - 2, "banked payments leave the list");
+        let again = dispatch_at(&store, "makeDeposit", json!({ "realm": DEMO_REALM, "draft": draft }), now()).unwrap_err();
+        assert!(again.to_string().contains("not waiting"), "{again}");
+
+        let register = dispatch_at(&store, "documents", json!({ "realm": DEMO_REALM, "docType": "Deposit" }), now()).unwrap();
+        assert_eq!(register[0]["totalMinor"], expected);
+        let mut qbo = MockQbo::new(now());
+        crate::writes::drain_once(&store, &realm, &mut qbo, now()).unwrap();
+        assert_eq!(qbo.count(&realm, crate::domain::EntityType::Deposit), 1);
     }
 }
