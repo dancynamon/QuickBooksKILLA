@@ -12,10 +12,15 @@ use thiserror::Error;
 
 use ledger_core::Money;
 
+pub mod backup;
+pub mod index;
 pub mod lineage;
+pub mod query;
+pub mod sales_orders;
 pub mod search;
 
 use crate::domain::{ContactType, DocumentType, EntityType, RealmId};
+use crate::outbox::{Operation, OutboxRecord, OutboxState};
 use crate::project::{ParsedDocument, ParsedEntity, Projection};
 use crate::sync::SyncCursor;
 
@@ -27,6 +32,20 @@ pub enum StoreError {
     Json(#[from] serde_json::Error),
     #[error("replica schema version {found} is newer than this build supports ({supported})")]
     SchemaTooNew { found: i64, supported: i64 },
+    /// A computed total overflowed `i64` minor units. Unreachable at any
+    /// realistic book size, but money arithmetic returns `Result` everywhere
+    /// (D5), and a read path is no exception.
+    #[error("money: {0}")]
+    Money(#[from] ledger_core::MoneyError),
+    /// Snapshotting (`store::backup`, `DESIGN.md` §8) touches the filesystem
+    /// directly — creating the snapshot directory, pruning old files — which
+    /// none of the SQL-only paths above needed an error variant for.
+    #[error("io: {0}")]
+    Io(#[from] std::io::Error),
+    /// A sales-order feed (D42) that cannot be projected, or a stored row
+    /// that no longer reads back.
+    #[error("sales orders: {0}")]
+    SalesOrder(String),
 }
 
 /// A forward-only, numbered migration. Applied in a transaction, version
@@ -358,6 +377,73 @@ CREATE TRIGGER lines_fts_au AFTER UPDATE ON document_lines BEGIN
 END;
 "#,
     },
+    Migration {
+        version: 3,
+        name: "sales orders, mirrored from a feed (D42)",
+        sql: r#"
+-- QBO sales orders are a commerce-module object, not a v3 entity (D42), so
+-- they get their own tables rather than rows in entities/documents: their
+-- ids are the commerce module's, and no v3 path may ever reach them.
+CREATE TABLE sales_orders (
+    realm_id           TEXT NOT NULL REFERENCES realms(realm_id),
+    qbo_id             TEXT NOT NULL,
+    doc_number         TEXT,
+    txn_date           TEXT NOT NULL,
+    customer_id        TEXT,
+    customer_name      TEXT,
+    po_number          TEXT,
+    due_date           TEXT,
+    ship_date          TEXT,
+    order_status       TEXT,
+    invoice_status     TEXT,
+    fulfillment_status TEXT,
+    total_minor        INTEGER NOT NULL,
+    -- Still to be invoiced, before tax.
+    open_minor         INTEGER NOT NULL,
+    is_open            INTEGER NOT NULL,
+    version            TEXT,
+    memo               TEXT,
+    invoice_ids        TEXT NOT NULL,   -- JSON array of v3 Invoice ids
+    is_deleted         INTEGER NOT NULL DEFAULT 0,
+    raw_json           TEXT NOT NULL,
+    mirrored_at        TEXT NOT NULL,
+    PRIMARY KEY (realm_id, qbo_id)
+) STRICT;
+
+CREATE INDEX idx_sales_orders_open ON sales_orders(realm_id, is_open, txn_date);
+CREATE INDEX idx_sales_orders_number ON sales_orders(realm_id, doc_number);
+
+CREATE TABLE sales_order_lines (
+    realm_id      TEXT NOT NULL,
+    so_qbo_id     TEXT NOT NULL,
+    line_no       INTEGER NOT NULL,
+    line_id       TEXT,
+    item_id       TEXT,
+    description   TEXT,
+    qty           TEXT,
+    unit_price    TEXT,
+    amount_minor  INTEGER NOT NULL,
+    is_taxable    INTEGER NOT NULL DEFAULT 0,
+    qty_invoiced  TEXT NOT NULL,
+    qty_open      TEXT,
+    open_minor    INTEGER NOT NULL,
+    invoice_ids   TEXT NOT NULL,        -- JSON array of v3 Invoice ids
+    PRIMARY KEY (realm_id, so_qbo_id, line_no),
+    FOREIGN KEY (realm_id, so_qbo_id) REFERENCES sales_orders(realm_id, qbo_id)
+) STRICT;
+
+-- One row per realm: the last feed applied. A sales order has no CDC, so
+-- this is how a reader knows how fresh the mirror is.
+CREATE TABLE sales_order_snapshots (
+    realm_id     TEXT PRIMARY KEY REFERENCES realms(realm_id),
+    captured_at  TEXT NOT NULL,
+    synced_at    TEXT NOT NULL,
+    source       TEXT NOT NULL,
+    order_count  INTEGER NOT NULL,
+    complete     INTEGER NOT NULL
+) STRICT;
+"#,
+    },
 ];
 
 pub fn latest_version() -> i64 {
@@ -390,6 +476,33 @@ impl Store {
         Ok(store)
     }
 
+    /// Open an existing replica strictly read-only — no create, no write.
+    ///
+    /// `SQLITE_OPEN_READ_ONLY` with `SQLITE_OPEN_CREATE` omitted is enforced by
+    /// SQLite itself, not by caller discipline: an attempted write on this
+    /// connection fails at the engine rather than depending on every future
+    /// caller remembering not to issue one. This is what the MCP server
+    /// (`mcp.rs`) opens with — a read surface that cannot become a write path
+    /// by accident.
+    ///
+    /// The file must already exist and be migrated; this never runs
+    /// migrations, which write.
+    pub fn open_read_only(path: impl AsRef<std::path::Path>) -> Result<Self, StoreError> {
+        let connection =
+            Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        connection.execute_batch("PRAGMA foreign_keys = ON;")?;
+        let store = Store { connection };
+
+        let version = store.schema_version()?;
+        if version > latest_version() {
+            return Err(StoreError::SchemaTooNew {
+                found: version,
+                supported: latest_version(),
+            });
+        }
+        Ok(store)
+    }
+
     /// In-memory, for tests. WAL does not apply to a memory database.
     pub fn open_in_memory() -> Result<Self, StoreError> {
         let connection = Connection::open_in_memory()?;
@@ -401,8 +514,7 @@ impl Store {
 
     fn configure(connection: &Connection) -> Result<(), StoreError> {
         // journal_mode returns a row, so it cannot go through execute_batch.
-        let _: String =
-            connection.query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))?;
+        let _: String = connection.query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))?;
         connection.execute_batch(
             "PRAGMA foreign_keys = ON;
              PRAGMA synchronous = FULL;",
@@ -419,11 +531,11 @@ impl Store {
              ) STRICT;",
         )?;
 
-        let current: i64 = self
-            .connection
-            .query_row("SELECT COALESCE(MAX(version), 0) FROM schema_version", [], |row| {
-                row.get(0)
-            })?;
+        let current: i64 = self.connection.query_row(
+            "SELECT COALESCE(MAX(version), 0) FROM schema_version",
+            [],
+            |row| row.get(0),
+        )?;
 
         if current > latest_version() {
             return Err(StoreError::SchemaTooNew {
@@ -491,6 +603,34 @@ impl Store {
         Ok(())
     }
 
+    /// Every registered realm, for a status view that has no single realm to
+    /// scope to yet — the one place in this module that reads across realms,
+    /// because listing them is what lets a caller pick one.
+    pub fn list_realms(&self) -> Result<Vec<RealmSummary>, StoreError> {
+        let mut statement = self.connection.prepare(
+            "SELECT realm_id, display_name, is_write_enabled FROM realms ORDER BY realm_id",
+        )?;
+        let rows = statement.query_map([], |row| {
+            let raw_realm_id: String = row.get(0)?;
+            // As `document_row`'s `doc_type` decode: a row only ever lands here
+            // through `register_realm`, which takes a `&RealmId`, so a value
+            // that fails to parse means the file was edited outside the app.
+            let realm_id = RealmId::parse(&raw_realm_id).map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    0,
+                    rusqlite::types::Type::Text,
+                    Box::new(error),
+                )
+            })?;
+            Ok(RealmSummary {
+                realm_id,
+                display_name: row.get(1)?,
+                is_write_enabled: row.get::<_, i64>(2)? != 0,
+            })
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
     pub fn upsert_entity(
         &self,
         realm: &RealmId,
@@ -552,6 +692,43 @@ impl Store {
         )?)
     }
 
+    /// Every mirrored entity of the realm, one at a time, in a fixed order
+    /// (type, then id). A callback rather than a `Vec` so a whole book's raw
+    /// JSON (~170 MB at M0) never has to sit in memory at once — the slicer
+    /// keeps only a summary of each row.
+    pub fn for_each_entity(
+        &self,
+        realm: &RealmId,
+        mut visit: impl FnMut(MirroredEntity) -> Result<(), StoreError>,
+    ) -> Result<(), StoreError> {
+        let mut statement = self.connection.prepare(
+            "SELECT entity_type, qbo_id, sync_token, last_updated_utc, is_deleted, raw_json
+             FROM entities WHERE realm_id = ?1 ORDER BY entity_type, qbo_id",
+        )?;
+        let mut rows = statement.query(params![realm.as_str()])?;
+        while let Some(row) = rows.next()? {
+            let entity_type: String = row.get(0)?;
+            // A type this build does not know is skipped, not fatal: the
+            // slicer only follows the types it can name.
+            let Ok(entity_type) = EntityType::parse(&entity_type) else {
+                continue;
+            };
+            let last_updated: String = row.get(3)?;
+            let raw: String = row.get(5)?;
+            visit(MirroredEntity {
+                entity_type,
+                qbo_id: row.get(1)?,
+                sync_token: row.get(2)?,
+                last_updated_utc: DateTime::parse_from_rfc3339(&last_updated)
+                    .map(|dt| dt.with_timezone(&Utc))
+                    .unwrap_or_else(|_| Utc::now()),
+                is_deleted: row.get::<_, i64>(4)? != 0,
+                raw_json: serde_json::from_str(&raw)?,
+            })?;
+        }
+        Ok(())
+    }
+
     // -----------------------------------------------------------------------
     // Sync application (§4.1)
     // -----------------------------------------------------------------------
@@ -575,17 +752,22 @@ impl Store {
         let transaction = self.connection.unchecked_transaction()?;
         let mut report = BatchReport::default();
 
-        for entity in entities {
+        for incoming in entities {
+            let Some(entity) = &with_last_known_payload(&transaction, realm, incoming)? else {
+                // A deletion of something never mirrored: keep the tombstone,
+                // there is nothing to project or un-project.
+                upsert_entity_in(&transaction, realm, incoming, now)?;
+                clear_quarantine_in(&transaction, realm, incoming)?;
+                report.not_projected += 1;
+                report.mirrored += 1;
+                continue;
+            };
             upsert_entity_in(&transaction, realm, entity, now)?;
 
             match crate::project::parse(entity) {
                 Projection::Parsed(parsed) => {
                     write_parsed(&transaction, realm, &parsed, now)?;
-                    transaction.execute(
-                        "DELETE FROM quarantine_entities
-                         WHERE realm_id = ?1 AND entity_type = ?2 AND qbo_id = ?3",
-                        params![realm.as_str(), entity.entity_type.as_str(), entity.qbo_id],
-                    )?;
+                    clear_quarantine_in(&transaction, realm, entity)?;
                     report.projected += 1;
                 }
                 Projection::NotProjected => report.not_projected += 1,
@@ -676,7 +858,9 @@ impl Store {
                     params![realm.as_str(), entity.entity_type.as_str(), entity.qbo_id],
                 )?;
             }
-            Projection::Quarantine(reason) => quarantine_in(&transaction, realm, entity, reason, now)?,
+            Projection::Quarantine(reason) => {
+                quarantine_in(&transaction, realm, entity, reason, now)?
+            }
             Projection::NotProjected => {}
         }
 
@@ -850,13 +1034,196 @@ impl Store {
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
-    pub fn count_projected(&self, realm: &RealmId, table: ProjectedTable) -> Result<i64, StoreError> {
+    pub fn count_projected(
+        &self,
+        realm: &RealmId,
+        table: ProjectedTable,
+    ) -> Result<i64, StoreError> {
         Ok(self.connection.query_row(
-            &format!("SELECT COUNT(*) FROM {} WHERE realm_id = ?1", table.as_str()),
+            &format!(
+                "SELECT COUNT(*) FROM {} WHERE realm_id = ?1",
+                table.as_str()
+            ),
             params![realm.as_str()],
             |row| row.get(0),
         )?)
     }
+
+    // -----------------------------------------------------------------------
+    // The outbox (`DESIGN.md` §6). Durable storage for `outbox::OutboxRecord`
+    // — `worker::Drainer` runs the state machine in memory, one drain pass at
+    // a time; this is what lets a record's state survive past the process
+    // that was draining it, which is the entire premise `tests/chaos.rs`
+    // exercises.
+    // -----------------------------------------------------------------------
+
+    /// Persist a newly created outbox record.
+    pub fn insert_outbox_record(&self, record: &OutboxRecord) -> Result<(), StoreError> {
+        self.connection.execute(
+            "INSERT INTO outbox (id, realm_id, entity_type, operation, payload_json,
+                 local_entity_id, base_sync_token, request_id, state, attempts,
+                 depends_on, last_error, qbo_response_json, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, NULL, ?13, ?14)",
+            params![
+                record.id.to_string(),
+                record.realm_id.as_str(),
+                record.entity_type.as_str(),
+                record.operation.as_str(),
+                record.payload_json.to_string(),
+                record.local_entity_id,
+                record.base_sync_token,
+                record.request_id.to_string(),
+                record.state.as_str(),
+                record.attempts,
+                record.depends_on.map(|id| id.to_string()),
+                record.last_error,
+                record.created_at.to_rfc3339(),
+                record.updated_at.to_rfc3339(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Persist a state transition.
+    ///
+    /// Call this **immediately** after any `OutboxRecord` transition, in
+    /// particular `begin_attempt`'s move to `in_flight` — before the client
+    /// call it guards is issued, per `DESIGN.md` §6.1. `worker::Drainer`
+    /// exposes exactly this timing through `set_on_transition` without
+    /// depending on `Store` itself; wiring the two together is the caller's
+    /// job (`apps/qbo-local/src/bin/chaos-child.rs` is the only one that does
+    /// today).
+    pub fn save_outbox_record(&self, record: &OutboxRecord) -> Result<(), StoreError> {
+        self.connection.execute(
+            "UPDATE outbox
+             SET state = ?2, attempts = ?3, last_error = ?4, updated_at = ?5
+             WHERE id = ?1",
+            params![
+                record.id.to_string(),
+                record.state.as_str(),
+                record.attempts,
+                record.last_error,
+                record.updated_at.to_rfc3339(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Every outbox record for a realm, oldest first — UUIDv7 order, which is
+    /// creation order and therefore drain order (`DESIGN.md` §6.3).
+    pub fn list_outbox_records(&self, realm: &RealmId) -> Result<Vec<OutboxRecord>, StoreError> {
+        let mut statement = self.connection.prepare(
+            "SELECT id, realm_id, entity_type, operation, payload_json, local_entity_id,
+                    base_sync_token, request_id, state, attempts, depends_on, last_error,
+                    created_at, updated_at
+             FROM outbox WHERE realm_id = ?1 ORDER BY id",
+        )?;
+        let rows = statement.query_map(params![realm.as_str()], outbox_row)?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// Record the id QBO assigned to a `local:`-prefixed id, once the create
+    /// that owns it applies (`DESIGN.md` §6.4). Idempotent: replaying the same
+    /// mapping — the case a recovered `in_flight` create adopting rather than
+    /// duplicating produces — overwrites with the same value rather than
+    /// erroring.
+    pub fn record_local_id_mapping(
+        &self,
+        realm: &RealmId,
+        local_entity_id: &str,
+        entity_type: EntityType,
+        qbo_id: &str,
+        now: DateTime<Utc>,
+    ) -> Result<(), StoreError> {
+        self.connection.execute(
+            "INSERT INTO local_id_map (realm_id, local_entity_id, entity_type, qbo_id, mapped_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(realm_id, local_entity_id) DO UPDATE SET
+                 qbo_id = excluded.qbo_id, mapped_at = excluded.mapped_at",
+            params![
+                realm.as_str(),
+                local_entity_id,
+                entity_type.as_str(),
+                qbo_id,
+                now.to_rfc3339()
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Every `local:` id this realm has resolved to a real QBO id — what a
+    /// restarted process reloads to reseed a fresh `worker::Drainer` via
+    /// `seed_mapping`, so a dependant queued before the crash can still have
+    /// its reference rewritten without redraining its already-applied parent.
+    pub fn load_local_id_map(&self, realm: &RealmId) -> Result<Vec<(String, String)>, StoreError> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT local_entity_id, qbo_id FROM local_id_map WHERE realm_id = ?1")?;
+        let rows = statement.query_map(params![realm.as_str()], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+}
+
+fn outbox_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<OutboxRecord> {
+    let id: String = row.get(0)?;
+    let realm_id: String = row.get(1)?;
+    let entity_type: String = row.get(2)?;
+    let operation: String = row.get(3)?;
+    let payload_json: String = row.get(4)?;
+    let local_entity_id: String = row.get(5)?;
+    let base_sync_token: Option<String> = row.get(6)?;
+    let request_id: String = row.get(7)?;
+    let state: String = row.get(8)?;
+    let attempts: u32 = row.get(9)?;
+    let depends_on: Option<String> = row.get(10)?;
+    let last_error: Option<String> = row.get(11)?;
+    let created_at: String = row.get(12)?;
+    let updated_at: String = row.get(13)?;
+
+    // Every row here only ever came from `insert_outbox_record`, which takes
+    // an already-validated `OutboxRecord` — a value that fails one of these
+    // conversions means the file was edited outside the app, exactly as in
+    // `list_realms`'s `raw_realm_id` decode above.
+    fn fail(
+        column: usize,
+        error: impl std::error::Error + Send + Sync + 'static,
+    ) -> rusqlite::Error {
+        rusqlite::Error::FromSqlConversionFailure(
+            column,
+            rusqlite::types::Type::Text,
+            Box::new(error),
+        )
+    }
+    fn fail_message(column: usize, message: String) -> rusqlite::Error {
+        rusqlite::Error::FromSqlConversionFailure(
+            column,
+            rusqlite::types::Type::Text,
+            message.into(),
+        )
+    }
+
+    Ok(OutboxRecord {
+        id: uuid::Uuid::parse_str(&id).map_err(|e| fail(0, e))?,
+        realm_id: RealmId::parse(&realm_id).map_err(|e| fail(1, e))?,
+        entity_type: EntityType::parse(&entity_type).map_err(|e| fail(2, e))?,
+        operation: Operation::parse(&operation)
+            .ok_or_else(|| fail_message(3, format!("unknown outbox operation {operation:?}")))?,
+        payload_json: serde_json::from_str(&payload_json).map_err(|e| fail(4, e))?,
+        local_entity_id,
+        base_sync_token,
+        request_id: uuid::Uuid::parse_str(&request_id).map_err(|e| fail(7, e))?,
+        state: OutboxState::parse(&state)
+            .ok_or_else(|| fail_message(8, format!("unknown outbox state {state:?}")))?,
+        attempts,
+        depends_on: depends_on
+            .map(|raw| uuid::Uuid::parse_str(&raw).map_err(|e| fail(10, e)))
+            .transpose()?,
+        last_error,
+        created_at: parse_timestamp(&created_at),
+        updated_at: parse_timestamp(&updated_at),
+    })
 }
 
 /// The projected tables, named as a type so `count_projected` cannot be handed
@@ -893,6 +1260,16 @@ pub struct ReprojectReport {
     pub quarantined: usize,
 }
 
+/// A registered realm, as listed by [`Store::list_realms`] — enough for a
+/// status view to name each realm and know whether writes are on before it
+/// asks for anything more.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RealmSummary {
+    pub realm_id: RealmId,
+    pub display_name: String,
+    pub is_write_enabled: bool,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct QuarantinedEntity {
     pub entity_type: String,
@@ -900,7 +1277,7 @@ pub struct QuarantinedEntity {
     pub reason: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct DocumentRow {
     pub qbo_id: String,
     pub doc_type: DocumentType,
@@ -912,7 +1289,9 @@ pub struct DocumentRow {
     /// Joined from `contacts` so a register does not issue one query per row.
     pub contact_name: Option<String>,
     pub class_id: Option<String>,
+    #[serde(serialize_with = "serialize_money")]
     pub total: Money,
+    #[serde(serialize_with = "serialize_money_opt")]
     pub balance: Option<Money>,
     pub doc_status: Option<String>,
     pub po_number: Option<String>,
@@ -921,7 +1300,7 @@ pub struct DocumentRow {
     pub is_deleted: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct LineRow {
     pub line_no: i64,
     pub item_id: Option<String>,
@@ -929,9 +1308,48 @@ pub struct LineRow {
     /// Decimal as text, exactly as stored — parsing it is the caller's choice.
     pub qty: Option<String>,
     pub unit_price: Option<String>,
+    #[serde(serialize_with = "serialize_money")]
     pub amount: Money,
     pub class_id: Option<String>,
     pub is_taxable: bool,
+}
+
+/// Renders [`Money`] as a decimal string with two places — `"1234.56"`,
+/// negative as `"-12.00"` — for MCP tool output (`mcp.rs`), whose consumers
+/// are LLM skills reading text, not the bare minor-units integer `Money`'s own
+/// `Serialize` impl produces. That impl is untouched; this is only ever named
+/// from a field's `#[serde(serialize_with = ...)]`, never used to change what
+/// `Money` itself serialises as.
+pub(crate) fn serialize_money<S>(money: &Money, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    serializer.serialize_str(&format_money(*money))
+}
+
+/// The `Option<Money>` counterpart of [`serialize_money`], for balance and
+/// similar fields that may be absent.
+pub(crate) fn serialize_money_opt<S>(
+    money: &Option<Money>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    match money {
+        Some(money) => serializer.serialize_str(&format_money(*money)),
+        None => serializer.serialize_none(),
+    }
+}
+
+fn format_money(money: Money) -> String {
+    // `unsigned_abs` rather than `.abs()`: `i64::MIN` has no positive
+    // counterpart (money.rs's own overflow test makes the same point), and
+    // this path must never panic on a value that reached storage safely.
+    let minor = money.minor();
+    let sign = if minor < 0 { "-" } else { "" };
+    let magnitude = minor.unsigned_abs();
+    format!("{sign}{}.{:02}", magnitude / 100, magnitude % 100)
 }
 
 /// Every projected document read goes through this projection and join, so a
@@ -984,6 +1402,54 @@ pub(crate) fn document_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Document
         customer_memo: row.get(14)?,
         is_deleted: row.get::<_, i64>(15)? != 0,
     })
+}
+
+/// A CDC deletion carries only `Id`, `MetaData` and `status`. Projecting that
+/// stub quarantines it for a missing `TotalAmt` and leaves the old projected
+/// row looking live (M0, 15 Oct 2026: Estimate deleted in QBO). So a deletion
+/// keeps the last full payload the replica holds, flagged deleted, and the
+/// projection marks its row deleted. `None` when there is no earlier payload.
+fn with_last_known_payload(
+    connection: &rusqlite::Connection,
+    realm: &RealmId,
+    entity: &MirroredEntity,
+) -> Result<Option<MirroredEntity>, StoreError> {
+    if !entity.is_deleted {
+        return Ok(Some(entity.clone()));
+    }
+    let existing: Option<String> = connection
+        .query_row(
+            "SELECT raw_json FROM entities
+             WHERE realm_id = ?1 AND entity_type = ?2 AND qbo_id = ?3",
+            params![realm.as_str(), entity.entity_type.as_str(), entity.qbo_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(existing) = existing else {
+        return Ok(None);
+    };
+    let raw_json: serde_json::Value = serde_json::from_str(&existing)?;
+    if raw_json.get("status").and_then(serde_json::Value::as_str) == Some("Deleted") {
+        // Already a tombstone from an earlier deletion: nothing better to keep.
+        return Ok(None);
+    }
+    Ok(Some(MirroredEntity {
+        raw_json,
+        ..entity.clone()
+    }))
+}
+
+fn clear_quarantine_in(
+    connection: &rusqlite::Connection,
+    realm: &RealmId,
+    entity: &MirroredEntity,
+) -> Result<(), StoreError> {
+    connection.execute(
+        "DELETE FROM quarantine_entities
+         WHERE realm_id = ?1 AND entity_type = ?2 AND qbo_id = ?3",
+        params![realm.as_str(), entity.entity_type.as_str(), entity.qbo_id],
+    )?;
+    Ok(())
 }
 
 fn upsert_entity_in(
@@ -1351,8 +1817,12 @@ mod tests {
 
     fn store() -> Store {
         let store = Store::open_in_memory().unwrap();
-        store.register_realm(&aquamentor(), "Aquamentor, Inc.", now()).unwrap();
-        store.register_realm(&waterline(), "WaterLine CNC", now()).unwrap();
+        store
+            .register_realm(&aquamentor(), "Aquamentor, Inc.", now())
+            .unwrap();
+        store
+            .register_realm(&waterline(), "WaterLine CNC", now())
+            .unwrap();
         store
     }
 
@@ -1380,7 +1850,10 @@ mod tests {
         let mut sorted = versions.clone();
         sorted.sort_unstable();
         sorted.dedup();
-        assert_eq!(versions, sorted, "migrations must be uniquely and increasingly numbered");
+        assert_eq!(
+            versions, sorted,
+            "migrations must be uniquely and increasingly numbered"
+        );
     }
 
     #[test]
@@ -1389,14 +1862,23 @@ mod tests {
         let path = directory.path().join("replica.db");
 
         let first = Store::open(&path).unwrap();
-        first.register_realm(&aquamentor(), "Aquamentor, Inc.", now()).unwrap();
-        first.upsert_entity(&aquamentor(), &entity("71204"), now()).unwrap();
+        first
+            .register_realm(&aquamentor(), "Aquamentor, Inc.", now())
+            .unwrap();
+        first
+            .upsert_entity(&aquamentor(), &entity("71204"), now())
+            .unwrap();
         drop(first);
 
         let second = Store::open(&path).unwrap();
         assert_eq!(second.schema_version().unwrap(), latest_version());
         // Data survived, and re-running migrations did not clear it.
-        assert_eq!(second.count_entities(&aquamentor(), EntityType::Invoice).unwrap(), 1);
+        assert_eq!(
+            second
+                .count_entities(&aquamentor(), EntityType::Invoice)
+                .unwrap(),
+            1
+        );
     }
 
     #[test]
@@ -1444,7 +1926,9 @@ mod tests {
     fn an_entity_round_trips_with_its_raw_payload_intact() {
         let store = store();
         let original = entity("71204");
-        store.upsert_entity(&aquamentor(), &original, now()).unwrap();
+        store
+            .upsert_entity(&aquamentor(), &original, now())
+            .unwrap();
 
         let loaded = store
             .get_entity(&aquamentor(), EntityType::Invoice, "71204")
@@ -1458,14 +1942,21 @@ mod tests {
     #[test]
     fn upsert_updates_rather_than_duplicating() {
         let store = store();
-        store.upsert_entity(&aquamentor(), &entity("71204"), now()).unwrap();
+        store
+            .upsert_entity(&aquamentor(), &entity("71204"), now())
+            .unwrap();
 
         let mut updated = entity("71204");
         updated.sync_token = "1".to_string();
         updated.raw_json = serde_json::json!({ "DocNumber": "21234", "TotalAmt": 99.99 });
         store.upsert_entity(&aquamentor(), &updated, now()).unwrap();
 
-        assert_eq!(store.count_entities(&aquamentor(), EntityType::Invoice).unwrap(), 1);
+        assert_eq!(
+            store
+                .count_entities(&aquamentor(), EntityType::Invoice)
+                .unwrap(),
+            1
+        );
         let loaded = store
             .get_entity(&aquamentor(), EntityType::Invoice, "71204")
             .unwrap()
@@ -1484,11 +1975,25 @@ mod tests {
         let mut water_invoice = entity("71204");
         water_invoice.raw_json = serde_json::json!({ "DocNumber": "WATER" });
 
-        store.upsert_entity(&aquamentor(), &aqua_invoice, now()).unwrap();
-        store.upsert_entity(&waterline(), &water_invoice, now()).unwrap();
+        store
+            .upsert_entity(&aquamentor(), &aqua_invoice, now())
+            .unwrap();
+        store
+            .upsert_entity(&waterline(), &water_invoice, now())
+            .unwrap();
 
-        assert_eq!(store.count_entities(&aquamentor(), EntityType::Invoice).unwrap(), 1);
-        assert_eq!(store.count_entities(&waterline(), EntityType::Invoice).unwrap(), 1);
+        assert_eq!(
+            store
+                .count_entities(&aquamentor(), EntityType::Invoice)
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            store
+                .count_entities(&waterline(), EntityType::Invoice)
+                .unwrap(),
+            1
+        );
 
         let from_aqua = store
             .get_entity(&aquamentor(), EntityType::Invoice, "71204")
@@ -1510,10 +2015,22 @@ mod tests {
         customer.entity_type = EntityType::Customer;
 
         store.upsert_entity(&aquamentor(), &invoice, now()).unwrap();
-        store.upsert_entity(&aquamentor(), &customer, now()).unwrap();
+        store
+            .upsert_entity(&aquamentor(), &customer, now())
+            .unwrap();
 
-        assert_eq!(store.count_entities(&aquamentor(), EntityType::Invoice).unwrap(), 1);
-        assert_eq!(store.count_entities(&aquamentor(), EntityType::Customer).unwrap(), 1);
+        assert_eq!(
+            store
+                .count_entities(&aquamentor(), EntityType::Invoice)
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            store
+                .count_entities(&aquamentor(), EntityType::Customer)
+                .unwrap(),
+            1
+        );
     }
 
     #[test]
@@ -1544,6 +2061,26 @@ mod tests {
     }
 
     #[test]
+    fn list_realms_returns_every_registered_realm() {
+        let store = store();
+        store.set_write_enabled(&aquamentor(), true).unwrap();
+
+        let realms = store.list_realms().unwrap();
+        assert_eq!(realms.len(), 2);
+        let aqua = realms.iter().find(|r| r.realm_id == aquamentor()).unwrap();
+        assert_eq!(aqua.display_name, "Aquamentor, Inc.");
+        assert!(aqua.is_write_enabled);
+        let water = realms.iter().find(|r| r.realm_id == waterline()).unwrap();
+        assert!(!water.is_write_enabled);
+    }
+
+    #[test]
+    fn list_realms_is_empty_for_a_fresh_store() {
+        let store = Store::open_in_memory().unwrap();
+        assert!(store.list_realms().unwrap().is_empty());
+    }
+
+    #[test]
     fn strict_tables_reject_a_wrong_typed_value() {
         // Without STRICT, SQLite's type affinity would accept a string into an
         // integer column, which is not acceptable in a financial store.
@@ -1561,7 +2098,10 @@ mod tests {
     fn foreign_keys_stop_an_entity_landing_under_an_unknown_realm() {
         let store = Store::open_in_memory().unwrap();
         let result = store.upsert_entity(&aquamentor(), &entity("71204"), now());
-        assert!(result.is_err(), "unregistered realm should have been refused");
+        assert!(
+            result.is_err(),
+            "unregistered realm should have been refused"
+        );
     }
 
     #[test]
@@ -1574,5 +2114,119 @@ mod tests {
             params![aquamentor().as_str()],
         );
         assert!(result.is_err(), "orphaned line should have been refused");
+    }
+
+    // -----------------------------------------------------------------------
+    // Outbox persistence — the durability `tests/chaos.rs` depends on.
+    // -----------------------------------------------------------------------
+
+    fn outbox_record(entity_type: EntityType, local_entity_id: &str) -> OutboxRecord {
+        OutboxRecord::new(
+            crate::outbox::NewOutboxRecord {
+                id: uuid::Uuid::now_v7(),
+                request_id: uuid::Uuid::now_v7(),
+                realm_id: aquamentor(),
+                entity_type,
+                operation: Operation::Create,
+                payload_json: serde_json::json!({ "DisplayName": "BLUE HARBOR SWIM" }),
+                local_entity_id: local_entity_id.to_string(),
+                base_sync_token: None,
+            },
+            now(),
+        )
+    }
+
+    #[test]
+    fn an_inserted_outbox_record_round_trips_through_the_store() {
+        let store = store();
+        let record = outbox_record(EntityType::Customer, "local:cust-1");
+        store.insert_outbox_record(&record).unwrap();
+
+        let loaded = store.list_outbox_records(&aquamentor()).unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].id, record.id);
+        assert_eq!(loaded[0].request_id, record.request_id);
+        assert_eq!(loaded[0].entity_type, EntityType::Customer);
+        assert_eq!(loaded[0].operation, Operation::Create);
+        assert_eq!(loaded[0].state, OutboxState::Pending);
+        assert_eq!(loaded[0].local_entity_id, "local:cust-1");
+        assert_eq!(loaded[0].payload_json, record.payload_json);
+    }
+
+    #[test]
+    fn saving_a_transition_persists_the_new_state() {
+        let store = store();
+        let mut record = outbox_record(EntityType::Invoice, "local:inv-1");
+        store.insert_outbox_record(&record).unwrap();
+
+        record.begin_attempt(true, now()).unwrap();
+        store.save_outbox_record(&record).unwrap();
+
+        let loaded = store.list_outbox_records(&aquamentor()).unwrap();
+        assert_eq!(loaded[0].state, OutboxState::InFlight);
+        assert_eq!(loaded[0].attempts, 1);
+
+        record.mark_applied(now()).unwrap();
+        store.save_outbox_record(&record).unwrap();
+        let loaded = store.list_outbox_records(&aquamentor()).unwrap();
+        assert_eq!(loaded[0].state, OutboxState::Applied);
+    }
+
+    #[test]
+    fn outbox_records_are_listed_in_uuidv7_creation_order() {
+        let store = store();
+        let first = outbox_record(EntityType::Invoice, "local:inv-1");
+        let second = outbox_record(EntityType::Invoice, "local:inv-2");
+        // Insert out of order; listing order must come from the id, not from
+        // insertion order.
+        store.insert_outbox_record(&second).unwrap();
+        store.insert_outbox_record(&first).unwrap();
+
+        let loaded = store.list_outbox_records(&aquamentor()).unwrap();
+        assert_eq!(
+            loaded.iter().map(|r| r.id).collect::<Vec<_>>(),
+            vec![first.id, second.id]
+        );
+    }
+
+    #[test]
+    fn realms_do_not_see_each_others_outbox_records() {
+        let store = store();
+        let mut record = outbox_record(EntityType::Invoice, "local:inv-1");
+        record.realm_id = waterline();
+        store.insert_outbox_record(&record).unwrap();
+
+        assert!(store.list_outbox_records(&aquamentor()).unwrap().is_empty());
+        assert_eq!(store.list_outbox_records(&waterline()).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_local_id_mapping_round_trips_and_can_be_replaced() {
+        let store = store();
+        store
+            .record_local_id_mapping(
+                &aquamentor(),
+                "local:cust-1",
+                EntityType::Customer,
+                "42",
+                now(),
+            )
+            .unwrap();
+
+        let map = store.load_local_id_map(&aquamentor()).unwrap();
+        assert_eq!(map, vec![("local:cust-1".to_string(), "42".to_string())]);
+
+        // Recovering the same in_flight create twice (once for real, once for
+        // a test that re-adopts) must overwrite rather than error.
+        store
+            .record_local_id_mapping(
+                &aquamentor(),
+                "local:cust-1",
+                EntityType::Customer,
+                "42",
+                now(),
+            )
+            .unwrap();
+        assert_eq!(store.load_local_id_map(&aquamentor()).unwrap().len(), 1);
     }
 }

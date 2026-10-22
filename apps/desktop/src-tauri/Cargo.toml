@@ -1,0 +1,37 @@
+# Built on the Mac with `tools/desktop.sh` (`apps/desktop/README.md`,
+# "Building and running the app").
+#
+# Outside the repo root's workspace `members` list on purpose: on Linux the
+# Tauri toolchain needs system libraries (webkit2gtk, libappindicator, the
+# rest of tauri.app's prerequisites) that are not installed there, and even
+# on the Mac folding this crate in would make every `cargo build --workspace`
+# / `cargo clippy --workspace` compile all of Tauri. It has its own
+# Cargo.lock and target/ (gitignored). `qbo-desktop-commands`
+# (`apps/desktop/commands`) carries the actual logic both this crate's
+# commands call into, and it builds and is tested in the workspace on its
+# own; this crate is a window, a CSP, and two `#[tauri::command]`s each
+# wrapping one of those calls. `ledger` is a direct dependency too, only for
+# the `ledger::store::Ledger` type `ledger_query`'s state holds — no
+# `ledger::mcp` dispatch lives here, same division as `qbo-local` below it.
+
+# The empty `[workspace]` table below is what keeps it out: without it cargo
+# finds the repo root's workspace and refuses to build a package that
+# workspace does not list.
+[workspace]
+
+[package]
+name = "bunzbooks-desktop"
+version = "0.1.0"
+edition = "2021"
+description = "BunzBooks — Tauri v2 shell over qbo-desktop-commands."
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+qbo-desktop-commands = { path = "../commands" }
+ledger = { path = "../../ledger" }
+qbo-local = { path = "../../qbo-local" }
+serde_json = "1"
+chrono = "0.4"

@@ -9,7 +9,9 @@ Two projects, one workspace:
   removes the network from the interaction path so every read is a local query
   and every write commits locally and syncs in the background.
 - **`apps/ledger`** — the long-term project. A double-entry general ledger that
-  eventually replaces QBO. Stub only; not started.
+  replaces QBO at cutover (`ROADMAP.md` §F). Engine, posting rules, reports and
+  the replica importer are built; the UI, statement import and accountant mode
+  are not. Designed in `LEDGER-DESIGN.md`.
 - **`crates/ledger-core`** — money type and rounding policy, shared by both.
   Deliberately nothing else — see `DECISIONS.md` D3.
 
@@ -18,22 +20,26 @@ Two projects, one workspace:
 | File | What it is |
 |---|---|
 | `DESIGN.md` | The `qbo-local` design. Replica schema, sync, token rotation, outbox, reconciliation, safety. |
+| `LEDGER-DESIGN.md` | The ledger design. Posting rules, chart of accounts, class taxonomy, double-entry schema and oplog, period close, import from the replica, parallel run, accountant mode, sales tax, bank reconciliation, manufacturing costing. First draft, 30 open policy items for Dan and the CPA. |
 | `DECISIONS.md` | Running log of review decisions and the reasoning behind them. |
 | `HANDOFF.md` | What to build next to finish M0, and the constraints that go with it. |
+| `ROADMAP.md` | From `qbo-local` to a book of record that is not QBO: phases, 1/1/27 cutover plan with fallback, decoupling blockers, ranked risks. |
 | `docs/CLAUDE_CODE_KICKOFF_PROMPT.md` | Original brief for the ledger project. |
 | `docs/CLAUDE_CODE_PROMPT_2_QBO_CACHE.md` | Original brief for `qbo-local`. |
 
-`LEDGER-DESIGN.md` does not exist yet. It gets written when the ledger project
-starts, and leads with the posting-rules table — document type to debit and
-credit effects — because that encodes accounting policy that needs review rather
-than engineering judgement.
+`LEDGER-DESIGN.md` leads with the posting-rules table — document type to debit
+and credit effects — because that encodes accounting policy that needs review
+rather than engineering judgement. It is a first draft: the ledger engine does
+not start until the three ROADMAP §B2 policies and the other gating open items
+in its §13 come back answered.
 
 ## Build
 
 ```sh
-cargo test          # 128 tests, all offline
+cargo test          # 672 tests, all offline
 cargo clippy --all-targets
-cargo run --bin qbo-local
+cargo run --bin qbo-local -- --help
+cargo run --bin ledger -- --help
 ```
 
 The test suite never touches the network. That is a requirement rather than a
@@ -55,9 +61,77 @@ Built and tested:
   conflicts, `RequestId` replay, and the Customer/Item idempotency gap
 - The drain worker: per-entity ordering, dependency resolution, local-id
   rewriting, query-before-create adoption, convergence property test
+- The sync driver: full sweep, CDC poll, truncation backfill through the query
+  endpoint, cursor advanced only in the transaction that wrote its entities
+- The reconciliation sweep: id + timestamp index diff, heal missing and stale,
+  quarantine extra, never delete
+- The CDC daemon loop: focused/idle cadence, jittered backoff, nightly SQLite
+  snapshots with rotation
+- The read-only query API over the replica: document, contact and item detail,
+  AR/AP aging, open documents, sync status, classes, chart of accounts
 
-Not built yet: the HTTP transport behind the client trait, the OAuth flow, the
-reconciliation sweep, the Tauri shell, the React UI.
+- `HttpQboClient` over real HTTP, the OAuth loopback flow, `.local/config.toml`
+  and `--live`, proven against a fake Intuit server; fixture record/replay with
+  a deterministic scrubber; an exactly-once chaos test across process kills;
+  CI with thresholded benchmarks; the `qbo-local-mcp` and `ledger-mcp` servers
+  over a shared stdio crate
+
+- `apps/desktop`: the M1 read UI split out of the prototype as ES modules
+  over a provider layer (fixture data in a browser today, Tauri `invoke`
+  on the Mac), a commands crate that is the whole Tauri command body, and the
+  Tauri v2 scaffold, compiled on the Mac only
+
+Not built yet: the keychain token backend (macOS only), the first live sync,
+the Tauri shell compiled. See `ROADMAP.md` and `docs/cowork-mac-session/`.
+
+## Current state — the ledger
+
+`apps/ledger`, built against `LEDGER-DESIGN.md`:
+
+- The §2 chart as constants and a seed; the §3 class list
+- The §1 posting-rules table as one pure function, every document kind except
+  the three manufacturing rows, which wait for cutover (§11)
+- The §4 schema with its invariants enforced in SQLite: one non-zero side per
+  line, balanced-on-post trigger, posted entries immutable except `cleared_at`
+- The §5 period gate: a closed period rejects, reopening is loud (D7)
+- Trial balance, P&L by class, balance sheet, the §9 four-line sales tax
+  report with the ST-50 mapping, and the §7 tiered trial balance diff
+- The §6 importer: replica accounts and classes mapped onto the chart
+  (unmapped ones created and flagged, never dropped), every document
+  translated from raw JSON and posted through the same function the UI will
+  use, idempotent and re-runnable, changed documents reversed and reposted
+- Opening balances and the §6 boundary-year walk, run on scratch ledgers
+  against QBO trial balance snapshots
+- Per-line taxability on journal lines, so the §9 report's line E and its
+  variance against the derived taxable figure exist
+- §10 bank statements: Chase CSV and OFX/QFX parsers, exact and settlement
+  matching, proposals that never post unconfirmed, the per-statement close
+- §8 accountant mode read side: GL detail with running balances, audit trail,
+  CSV export pack, the adjusting-entry request queue, reclassify as a proposal
+- A `ledger` binary: `init`, `import`, `opening`, `boundary`, `tb`, `pnl`,
+  `bs`, `tax`, `close`, `reopen`, `tbdiff`, `gl`, `audit`, `export`,
+  `adjust`, `reclass`, `bank import|match|confirm|close|status`
+
+- §11 manufacturing costing: landed cost allocated by board-foot, build
+  sheets with yield as a divisor, builds with priced variance, sensitivity,
+  and the three posting rows that were unsupported (`docs/MFG.md`)
+- Authorize.net settlement import with fee-aware bank matching (D15,
+  `docs/AUTHNET.md`)
+- `ledger verify` (invariants sweep) and `ledger nightly` (the §E parallel-run
+  command, `docs/NIGHTLY.md`); `qbo-local report` pulls QBO's trial balance
+  and aging through the Reports API into the CSVs `tbdiff` and the boundary
+  walk read
+- `tools/nightly.sh`: the nightly parallel run as one command (daemon and
+  cursor checks, snapshot, replay, trial balance and aging diffs, a dated
+  report, a notification only on failure) and its two launchd jobs
+  (`docs/NIGHTLY.md`, "Switching it on")
+- `ledger-mcp` over the shared stdio crate, and the desktop app's ledger
+  screens (trial balance, P&L, balance sheet, sales tax with the ST-50
+  mapping, GL, audit trail, adjustments, bank reconciliation, period close)
+
+Not built yet: PDF exports, the Authorize.net hosted payment link, the order
+queue and progress invoicing UI. `docs/BANK.md`, `docs/ACCOUNTANT.md`,
+`docs/AUTHNET.md`, `docs/MFG.md` and `docs/NIGHTLY.md` describe the workflows.
 
 The first live authentication run should happen wherever the OAuth credentials
 already live, rather than moving them onto another machine.

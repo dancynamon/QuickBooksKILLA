@@ -1,8 +1,10 @@
 //! Per-realm rate limiting. `DESIGN.md` §4.4.
 //!
 //! Every budget here is a config value rather than a constant buried in code,
-//! because Intuit changes them: the batch limit moved from ~40/min to 120/min in
-//! October 2025, which the kickoff prompt predated.
+//! because Intuit changes them. Batch is the example: Intuit publishes 120
+//! batch requests/min per realm *and* a throttle of 40/min per realm and app
+//! (limits page, verified 28 Sep 2026, D25). One app talks to each realm, so
+//! the binding number is 40.
 //!
 //! Budgets are per realm. A heavy sweep on Aquamentor must not throttle
 //! WaterLine.
@@ -15,7 +17,7 @@ use serde::{Deserialize, Serialize};
 pub enum BucketClass {
     /// General API surface: 500/min/realm.
     General,
-    /// The batch endpoint: 120/min/realm as of 31 Oct 2025.
+    /// The batch endpoint: 40/min per realm and app (D25).
     Batch,
     /// Reports and other resource-intensive endpoints: 200/min/realm.
     Reports,
@@ -50,7 +52,7 @@ impl Default for RealmLimits {
         RealmLimits {
             general: BucketBudget::per_minute(500.0),
             // Corrects the kickoff prompt's ~40/min (DESIGN.md §0).
-            batch: BucketBudget::per_minute(120.0),
+            batch: BucketBudget::per_minute(40.0),
             reports: BucketBudget::per_minute(200.0),
             max_concurrent: 10,
         }
@@ -171,7 +173,9 @@ pub const MAX_BACKOFF_SECONDS: i64 = 300;
 /// every queued request retries at the same instant and the thundering herd
 /// reproduces the overload that caused the 429.
 pub fn backoff_delay(attempt: u32, jitter: f64) -> Duration {
-    let exponential = 2f64.powi(attempt.min(16) as i32).min(MAX_BACKOFF_SECONDS as f64);
+    let exponential = 2f64
+        .powi(attempt.min(16) as i32)
+        .min(MAX_BACKOFF_SECONDS as f64);
     let jittered = exponential * jitter.clamp(0.0, 1.0);
     Duration::milliseconds((jittered * 1000.0) as i64)
 }
@@ -190,10 +194,10 @@ mod tests {
     }
 
     #[test]
-    fn the_batch_budget_reflects_the_october_2025_change() {
-        // The kickoff prompt said ~40/min; it is 120/min.
+    fn the_batch_budget_is_the_per_app_throttle() {
+        // D25: 120/min per realm, but throttled at 40/min per realm and app.
         let limits = RealmLimits::default();
-        assert_eq!(limits.batch.refill_per_minute, 120.0);
+        assert_eq!(limits.batch.refill_per_minute, 40.0);
         assert_eq!(limits.general.refill_per_minute, 500.0);
         assert_eq!(limits.reports.refill_per_minute, 200.0);
     }
@@ -239,7 +243,7 @@ mod tests {
     #[test]
     fn the_classes_draw_on_separate_budgets() {
         let mut limiter = limiter();
-        for _ in 0..120 {
+        for _ in 0..40 {
             assert!(limiter.try_acquire(BucketClass::Batch, at(0)));
             limiter.release();
         }
@@ -314,7 +318,10 @@ mod tests {
         assert_eq!(backoff_delay(0, 1.0), Duration::seconds(1));
         assert_eq!(backoff_delay(1, 1.0), Duration::seconds(2));
         assert_eq!(backoff_delay(4, 1.0), Duration::seconds(16));
-        assert_eq!(backoff_delay(20, 1.0), Duration::seconds(MAX_BACKOFF_SECONDS));
+        assert_eq!(
+            backoff_delay(20, 1.0),
+            Duration::seconds(MAX_BACKOFF_SECONDS)
+        );
     }
 
     #[test]
