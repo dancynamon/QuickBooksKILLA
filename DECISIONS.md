@@ -346,3 +346,7 @@ than an optimisation, which fixes the one-transaction-per-entity cost flagged in
   it. Each deposit line links its payment, so QuickBooks clears it from Undeposited Funds
   rather than counting it twice; a payment on a queued deposit is not offered again.
   Deposits go to bank accounts only.
+- **An expense is a receipt paid at once**, charged line by line to expense or cost of
+  goods accounts, from a bank account or card. From a bank it is a cheque when it has a
+  cheque number and cash otherwise; on a card it is a card charge. The payee is optional
+  and, when given, must be a vendor on file.

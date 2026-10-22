@@ -392,6 +392,17 @@ export type Undeposited = {
   amountMinor: number;
 };
 
+export type ExpenseLine = { accountId: string; description: string | null; amount: string; classId: string | null };
+
+export type ExpenseDraft = {
+  payeeId: string | null;
+  txnDate: string;
+  accountId: string;
+  reference: string | null;
+  privateNote: string | null;
+  lines: ExpenseLine[];
+};
+
 export type PaymentPlan = {
   totalMinor: number;
   unappliedMinor: number;
@@ -422,6 +433,8 @@ export const api = {
   undeposited: (realm: string) => call<Undeposited[]>("undeposited", { realm }),
   makeDeposit: (realm: string, draft: { accountId: string; txnDate: string; paymentIds: string[]; privateNote: string | null }) =>
     call<{ outboxId: string; entityId: string; totalMinor: number; count: number }>("makeDeposit", { realm, draft }),
+  expenseAccounts: (realm: string) => call<PaymentAccount[]>("expenseAccounts", { realm }),
+  saveExpense: (realm: string, draft: ExpenseDraft) => call<{ outboxId: string; entityId: string; totalMinor: number }>("saveExpense", { realm, draft }),
   saveDocument: (realm: string, draft: Draft, qboId?: string) =>
     call<{ outboxId: string; entityId: string; state: string }>("saveDocument", { realm, draft, qboId }),
   createCustomer: (realm: string, displayName: string, companyName?: string, email?: string) =>

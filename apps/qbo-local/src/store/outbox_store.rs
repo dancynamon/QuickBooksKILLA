@@ -253,6 +253,18 @@ impl Store {
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
+    /// Active accounts an expense line can be charged to: `(id, name, type)`.
+    pub fn expense_accounts(&self, realm: &RealmId) -> Result<Vec<(String, String, String)>, StoreError> {
+        let mut statement = self.connection.prepare(
+            "SELECT qbo_id, name, account_type FROM accounts
+             WHERE realm_id = ?1 AND is_active = 1 AND is_deleted = 0
+               AND (account_type IN ('Expense', 'Other Expense', 'Cost of Goods Sold') OR classification = 'Expense')
+             ORDER BY name COLLATE NOCASE",
+        )?;
+        let rows = statement.query_map(params![realm.as_str()], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
     /// Active bank and credit card accounts, by name: `(id, name, type)`.
     pub fn payment_accounts(&self, realm: &RealmId) -> Result<Vec<(String, String, String)>, StoreError> {
         let mut statement = self.connection.prepare(

@@ -102,6 +102,10 @@ const ACCOUNTS: &[(&str, &str, &str)] = &[
     ("92", "Undeposited Funds", "Other Current Asset"),
     ("93", "Business Card", "Credit Card"),
     ("94", "Accounts Payable (A/P)", "Accounts Payable"),
+    ("95", "Shipping and Freight", "Expense"),
+    ("96", "Shop Supplies", "Expense"),
+    ("97", "Software and Subscriptions", "Expense"),
+    ("98", "Foam Stock", "Cost of Goods Sold"),
 ];
 
 fn money(minor: i64) -> Value {

@@ -454,6 +454,87 @@ pub fn bill_payment_payload(draft: &BillPaymentDraft, plan: &PaymentPlan, pay_fr
     Ok(Value::Object(body))
 }
 
+/// Money spent straight from a bank account or card — a receipt, not a bill —
+/// charged to expense accounts line by line.
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ExpenseDraft {
+    /// The vendor paid, when there is one on file.
+    pub payee_id: Option<String>,
+    pub txn_date: String,
+    /// The bank or credit card account it came out of.
+    pub account_id: String,
+    /// A cheque number makes it a cheque; without one a bank expense is cash.
+    pub reference: Option<String>,
+    pub private_note: Option<String>,
+    pub lines: Vec<ExpenseLine>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ExpenseLine {
+    pub account_id: String,
+    pub description: Option<String>,
+    pub amount: String,
+    pub class_id: Option<String>,
+}
+
+/// The QBO `Purchase` body for an expense, and its total.
+pub fn expense_payload(draft: &ExpenseDraft, pay_from: PayFrom) -> Result<(Value, Money), ComposeError> {
+    if draft.lines.is_empty() {
+        return Err(invalid("add at least one line"));
+    }
+    let reference = draft.reference.as_deref().map(str::trim).filter(|r| !r.is_empty());
+    let payment_type = match (pay_from, reference) {
+        (PayFrom::CreditCard, _) => "CreditCard",
+        (PayFrom::Check, Some(_)) => "Check",
+        (PayFrom::Check, None) => "Cash",
+    };
+    let mut lines = Vec::new();
+    let mut amounts = Vec::new();
+    for (index, line) in draft.lines.iter().enumerate() {
+        if line.account_id.trim().is_empty() {
+            return Err(invalid(format!("line {} needs an expense account", index + 1)));
+        }
+        let amount = cents(&line.amount, &format!("line {} amount", index + 1))?;
+        if amount.minor() <= 0 {
+            return Err(invalid(format!("line {} needs an amount above zero", index + 1)));
+        }
+        amounts.push(amount);
+        let mut detail = Map::new();
+        detail.insert("AccountRef".into(), json!({ "value": line.account_id }));
+        if let Some(class) = &line.class_id {
+            detail.insert("ClassRef".into(), json!({ "value": class }));
+        }
+        detail.insert("BillableStatus".into(), json!("NotBillable"));
+        let mut out = Map::new();
+        out.insert("LineNum".into(), json!(index + 1));
+        out.insert("DetailType".into(), json!("AccountBasedExpenseLineDetail"));
+        out.insert("Amount".into(), money(amount));
+        if let Some(description) = line.description.as_deref().filter(|d| !d.trim().is_empty()) {
+            out.insert("Description".into(), json!(description));
+        }
+        out.insert("AccountBasedExpenseLineDetail".into(), Value::Object(detail));
+        lines.push(Value::Object(out));
+    }
+    let total = Money::checked_sum(amounts).map_err(|e| invalid(e.to_string()))?;
+    let mut body = Map::new();
+    body.insert("PaymentType".into(), json!(payment_type));
+    body.insert("AccountRef".into(), json!({ "value": draft.account_id }));
+    body.insert("TxnDate".into(), json!(date(&draft.txn_date, "date")?));
+    if let Some(payee) = draft.payee_id.as_deref().filter(|p| !p.trim().is_empty()) {
+        body.insert("EntityRef".into(), json!({ "value": payee, "type": "Vendor" }));
+    }
+    if let Some(reference) = reference {
+        body.insert("DocNumber".into(), json!(reference));
+    }
+    if let Some(note) = draft.private_note.as_deref().filter(|n| !n.trim().is_empty()) {
+        body.insert("PrivateNote".into(), json!(note));
+    }
+    body.insert("Line".into(), Value::Array(lines));
+    Ok((Value::Object(body), total))
+}
+
 /// A bank deposit of payments waiting in Undeposited Funds.
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -707,5 +788,33 @@ mod tests {
         assert!(plan_bill_payment(&over, &bills).unwrap_err().to_string().contains("100.00 is not on any bill"));
         assert_eq!(PayFrom::for_account_type("Bank"), Some(PayFrom::Check));
         assert_eq!(PayFrom::for_account_type("Accounts Payable"), None);
+    }
+
+    #[test]
+    fn an_expense_is_cash_cheque_or_card_by_how_it_was_paid() {
+        let draft = ExpenseDraft {
+            payee_id: Some("61".into()),
+            txn_date: "2026-11-02".into(),
+            account_id: "90".into(),
+            reference: None,
+            private_note: None,
+            lines: vec![
+                ExpenseLine { account_id: "95".into(), description: Some("LTL to Garwood".into()), amount: "412.50".into(), class_id: Some("2".into()) },
+                ExpenseLine { account_id: "96".into(), description: None, amount: "38".into(), class_id: None },
+            ],
+        };
+        let (body, total) = expense_payload(&draft, PayFrom::Check).unwrap();
+        assert_eq!(total, Money::from_minor(45_050));
+        assert_eq!(body["PaymentType"], "Cash");
+        assert_eq!(body["EntityRef"], json!({ "value": "61", "type": "Vendor" }));
+        assert_eq!(body["Line"][0]["AccountBasedExpenseLineDetail"]["AccountRef"]["value"], "95");
+        assert_eq!(body["Line"][0]["AccountBasedExpenseLineDetail"]["ClassRef"]["value"], "2");
+        let cheque = ExpenseDraft { reference: Some("1208".into()), ..draft.clone() };
+        assert_eq!(expense_payload(&cheque, PayFrom::Check).unwrap().0["PaymentType"], "Check");
+        assert_eq!(expense_payload(&draft, PayFrom::CreditCard).unwrap().0["PaymentType"], "CreditCard");
+
+        let mut bad = draft.clone();
+        bad.lines[1].account_id = String::new();
+        assert!(expense_payload(&bad, PayFrom::Check).unwrap_err().to_string().contains("line 2 needs an expense account"));
     }
 }

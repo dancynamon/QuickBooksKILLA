@@ -234,6 +234,23 @@ await page.keyboard.press("Control+s");
 await page.waitForSelector(".document .banner");
 assert.match(await page.textContent(".lines tbody"), /Payment from/);
 
+// An expense on the card: two lines to two expense accounts.
+await page.goto(`${base}/#/r/${realm}/list/Purchase`);
+await page.click('a:has-text("New expense")');
+await page.waitForSelector("h1:has-text('New expense')");
+await page.waitForSelector('[aria-label="Line 1 account"] option:nth-child(2)', { state: "attached" });
+await page.selectOption('[aria-label="Line 1 account"]', { label: "Shipping and Freight" });
+await page.fill('[aria-label="Line 1 description"]', "LTL to Garwood");
+await page.fill('[aria-label="Line 1 amount"]', "412.50");
+await page.click("text=Add a line");
+await page.selectOption('[aria-label="Line 2 account"]', { label: "Shop Supplies" });
+await page.fill('[aria-label="Line 2 amount"]', "38");
+assert.match(await page.textContent(".edit-lines tfoot"), /450\.50/);
+await shot("expense");
+await page.keyboard.press("Control+s");
+await page.waitForSelector(".document .banner");
+assert.match(await page.textContent(".lines tbody"), /Shipping and Freight: LTL to Garwood/);
+
 assert.deepEqual(errors, []);
 await browser.close();
 console.log("e2e-writes: ok");
