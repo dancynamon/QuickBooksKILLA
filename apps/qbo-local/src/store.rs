@@ -752,17 +752,22 @@ impl Store {
         let transaction = self.connection.unchecked_transaction()?;
         let mut report = BatchReport::default();
 
-        for entity in entities {
+        for incoming in entities {
+            let Some(entity) = &with_last_known_payload(&transaction, realm, incoming)? else {
+                // A deletion of something never mirrored: keep the tombstone,
+                // there is nothing to project or un-project.
+                upsert_entity_in(&transaction, realm, incoming, now)?;
+                clear_quarantine_in(&transaction, realm, incoming)?;
+                report.not_projected += 1;
+                report.mirrored += 1;
+                continue;
+            };
             upsert_entity_in(&transaction, realm, entity, now)?;
 
             match crate::project::parse(entity) {
                 Projection::Parsed(parsed) => {
                     write_parsed(&transaction, realm, &parsed, now)?;
-                    transaction.execute(
-                        "DELETE FROM quarantine_entities
-                         WHERE realm_id = ?1 AND entity_type = ?2 AND qbo_id = ?3",
-                        params![realm.as_str(), entity.entity_type.as_str(), entity.qbo_id],
-                    )?;
+                    clear_quarantine_in(&transaction, realm, entity)?;
                     report.projected += 1;
                 }
                 Projection::NotProjected => report.not_projected += 1,
@@ -1397,6 +1402,54 @@ pub(crate) fn document_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Document
         customer_memo: row.get(14)?,
         is_deleted: row.get::<_, i64>(15)? != 0,
     })
+}
+
+/// A CDC deletion carries only `Id`, `MetaData` and `status`. Projecting that
+/// stub quarantines it for a missing `TotalAmt` and leaves the old projected
+/// row looking live (M0, 15 Oct 2026: Estimate deleted in QBO). So a deletion
+/// keeps the last full payload the replica holds, flagged deleted, and the
+/// projection marks its row deleted. `None` when there is no earlier payload.
+fn with_last_known_payload(
+    connection: &rusqlite::Connection,
+    realm: &RealmId,
+    entity: &MirroredEntity,
+) -> Result<Option<MirroredEntity>, StoreError> {
+    if !entity.is_deleted {
+        return Ok(Some(entity.clone()));
+    }
+    let existing: Option<String> = connection
+        .query_row(
+            "SELECT raw_json FROM entities
+             WHERE realm_id = ?1 AND entity_type = ?2 AND qbo_id = ?3",
+            params![realm.as_str(), entity.entity_type.as_str(), entity.qbo_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(existing) = existing else {
+        return Ok(None);
+    };
+    let raw_json: serde_json::Value = serde_json::from_str(&existing)?;
+    if raw_json.get("status").and_then(serde_json::Value::as_str) == Some("Deleted") {
+        // Already a tombstone from an earlier deletion: nothing better to keep.
+        return Ok(None);
+    }
+    Ok(Some(MirroredEntity {
+        raw_json,
+        ..entity.clone()
+    }))
+}
+
+fn clear_quarantine_in(
+    connection: &rusqlite::Connection,
+    realm: &RealmId,
+    entity: &MirroredEntity,
+) -> Result<(), StoreError> {
+    connection.execute(
+        "DELETE FROM quarantine_entities
+         WHERE realm_id = ?1 AND entity_type = ?2 AND qbo_id = ?3",
+        params![realm.as_str(), entity.entity_type.as_str(), entity.qbo_id],
+    )?;
+    Ok(())
 }
 
 fn upsert_entity_in(

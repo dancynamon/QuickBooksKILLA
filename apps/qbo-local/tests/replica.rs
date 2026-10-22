@@ -692,3 +692,76 @@ fn search_stays_fast_at_a_realistic_book_size() {
     bench_assert("search by document number", by_number, 25);
     bench_assert("search by line description", by_line_text, 125);
 }
+
+fn deleted_stub(entity_type: EntityType, id: &str) -> MirroredEntity {
+    MirroredEntity {
+        is_deleted: true,
+        raw_json: json!({
+            "Id": id, "domain": "QBO", "status": "Deleted",
+            "MetaData": { "LastUpdatedTime": "2026-10-15T10:50:03-07:00" }
+        }),
+        ..mirrored(entity_type, id, json!({}))
+    }
+}
+
+#[test]
+fn a_cdc_deletion_marks_the_document_deleted_and_keeps_its_last_payload() {
+    let store = seeded();
+    assert!(
+        !store
+            .get_document(&realm(), "377")
+            .unwrap()
+            .unwrap()
+            .is_deleted
+    );
+
+    let report = store
+        .apply_batch(
+            &realm(),
+            &[deleted_stub(EntityType::Estimate, "377")],
+            None,
+            now(),
+        )
+        .unwrap();
+
+    assert_eq!(report.quarantined, 0);
+    assert!(store.quarantined(&realm()).unwrap().is_empty());
+    assert!(
+        store
+            .get_document(&realm(), "377")
+            .unwrap()
+            .unwrap()
+            .is_deleted
+    );
+    let kept = store
+        .get_entity(&realm(), EntityType::Estimate, "377")
+        .unwrap()
+        .unwrap();
+    assert!(kept.is_deleted);
+    assert_eq!(kept.raw_json["TotalAmt"], json!(1234.56));
+}
+
+#[test]
+fn a_cdc_deletion_of_something_never_mirrored_is_kept_not_quarantined() {
+    let store = seeded();
+
+    let report = store
+        .apply_batch(
+            &realm(),
+            &[deleted_stub(EntityType::Estimate, "9999")],
+            None,
+            now(),
+        )
+        .unwrap();
+
+    assert_eq!(report.quarantined, 0);
+    assert!(store.quarantined(&realm()).unwrap().is_empty());
+    assert!(store.get_document(&realm(), "9999").unwrap().is_none());
+    assert!(
+        store
+            .get_entity(&realm(), EntityType::Estimate, "9999")
+            .unwrap()
+            .unwrap()
+            .is_deleted
+    );
+}
