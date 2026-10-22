@@ -206,6 +206,158 @@ pub fn to_payload(draft: &DocumentDraft, po_definition_id: Option<&str>, update:
     Ok(Value::Object(body))
 }
 
+/// A customer payment as typed: the amount received and, optionally, how it
+/// is spread. With no applications it is spread oldest-first.
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PaymentDraft {
+    pub customer_id: String,
+    pub txn_date: String,
+    /// Decimal as text, two places at most.
+    pub amount: String,
+    /// The cheque or transfer number.
+    pub reference: Option<String>,
+    pub private_note: Option<String>,
+    pub applications: Option<Vec<PaymentApplication>>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PaymentApplication {
+    pub invoice_id: String,
+    pub amount: String,
+}
+
+/// An invoice a payment can go against, with what is still owed on it after
+/// any payment already queued.
+#[derive(Clone, Debug, PartialEq)]
+pub struct OpenInvoice {
+    pub qbo_id: String,
+    pub doc_number: Option<String>,
+    pub txn_date: String,
+    pub due_date: Option<String>,
+    pub balance: Money,
+}
+
+/// How a payment lands: what goes on each invoice, and what is left over as
+/// a credit on the customer.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PaymentPlan {
+    pub total: Money,
+    pub applied: Vec<(String, Money)>,
+    pub unapplied: Money,
+}
+
+fn show(value: Money) -> String {
+    Decimal::new(value.minor(), 2).to_string()
+}
+
+/// Money as typed, refused rather than rounded if it has more than cents.
+pub fn cents(raw: &str, what: &str) -> Result<Money, ComposeError> {
+    let value = decimal(raw, what)?;
+    if value.normalize().scale() > 2 {
+        return Err(invalid(format!("{what} {raw:?} has more than two decimal places")));
+    }
+    let minor = (value * Decimal::from(100)).trunc();
+    i64::try_from(minor.mantissa())
+        .ok()
+        .filter(|_| minor.scale() == 0)
+        .map(Money::from_minor)
+        .ok_or_else(|| invalid(format!("{what} {raw:?} is too large")))
+}
+
+/// Spread `amount` across `open` in the order given — the caller sorts them
+/// oldest due first — paying each in full until the money runs out.
+pub fn apply_oldest_first(open: &[OpenInvoice], amount: Money) -> Vec<(String, Money)> {
+    let mut left = amount.minor();
+    let mut out = Vec::new();
+    for invoice in open {
+        if left <= 0 {
+            break;
+        }
+        let take = left.min(invoice.balance.minor());
+        if take > 0 {
+            out.push((invoice.qbo_id.clone(), Money::from_minor(take)));
+            left -= take;
+        }
+    }
+    out
+}
+
+/// Check a draft against the customer's open invoices and decide where the
+/// money goes. Nothing is applied past an invoice's balance, to an invoice
+/// that is not this customer's open one, or beyond the amount received.
+pub fn plan_payment(draft: &PaymentDraft, open: &[OpenInvoice]) -> Result<PaymentPlan, ComposeError> {
+    if draft.customer_id.trim().is_empty() {
+        return Err(invalid("choose a customer"));
+    }
+    date(&draft.txn_date, "date")?;
+    let total = cents(&draft.amount, "amount")?;
+    if total.minor() <= 0 {
+        return Err(invalid("a payment needs an amount above zero"));
+    }
+    let applied = match &draft.applications {
+        None => apply_oldest_first(open, total),
+        Some(applications) => {
+            let mut out: Vec<(String, Money)> = Vec::new();
+            for application in applications {
+                let amount = cents(&application.amount, "applied amount")?;
+                if amount.minor() == 0 {
+                    continue;
+                }
+                if amount.minor() < 0 {
+                    return Err(invalid("an applied amount cannot be negative"));
+                }
+                let invoice = open
+                    .iter()
+                    .find(|i| i.qbo_id == application.invoice_id)
+                    .ok_or_else(|| invalid(format!("invoice {} is not open for this customer", application.invoice_id)))?;
+                if out.iter().any(|(id, _)| id == &invoice.qbo_id) {
+                    return Err(invalid(format!("invoice {} is listed twice", invoice.doc_number.as_deref().unwrap_or(&invoice.qbo_id))));
+                }
+                if amount.minor() > invoice.balance.minor() {
+                    return Err(invalid(format!(
+                        "invoice {} has {} open; {} is more than that",
+                        invoice.doc_number.as_deref().unwrap_or(&invoice.qbo_id),
+                        show(invoice.balance),
+                        show(amount)
+                    )));
+                }
+                out.push((invoice.qbo_id.clone(), amount));
+            }
+            out
+        }
+    };
+    let applied_total: i64 = applied.iter().map(|(_, m)| m.minor()).sum();
+    if applied_total > total.minor() {
+        return Err(invalid(format!("{} is applied but only {} was received", show(Money::from_minor(applied_total)), show(total))));
+    }
+    Ok(PaymentPlan { total, applied, unapplied: Money::from_minor(total.minor() - applied_total) })
+}
+
+/// The QBO body for a planned payment. No deposit account is named, so
+/// QuickBooks puts it in Undeposited Funds, as its own screen does by
+/// default; whatever is not applied stays on the customer as a credit.
+pub fn payment_payload(draft: &PaymentDraft, plan: &PaymentPlan) -> Result<Value, ComposeError> {
+    let mut body = Map::new();
+    body.insert("CustomerRef".into(), json!({ "value": draft.customer_id }));
+    body.insert("TxnDate".into(), json!(date(&draft.txn_date, "date")?));
+    body.insert("TotalAmt".into(), money(plan.total));
+    if let Some(reference) = draft.reference.as_deref().map(str::trim).filter(|r| !r.is_empty()) {
+        body.insert("PaymentRefNum".into(), json!(reference));
+    }
+    if let Some(note) = draft.private_note.as_deref().filter(|n| !n.trim().is_empty()) {
+        body.insert("PrivateNote".into(), json!(note));
+    }
+    let lines: Vec<Value> = plan
+        .applied
+        .iter()
+        .map(|(id, amount)| json!({ "Amount": money(*amount), "LinkedTxn": [{ "TxnId": id, "TxnType": "Invoice" }] }))
+        .collect();
+    body.insert("Line".into(), Value::Array(lines));
+    Ok(Value::Object(body))
+}
+
 /// A new customer. `DisplayName` is the unique name QBO enforces and the one
 /// the drain's duplicate guard queries by (§6.5).
 pub fn customer_payload(display_name: &str, company_name: Option<&str>, email: Option<&str>) -> Result<Value, ComposeError> {
@@ -337,5 +489,55 @@ mod tests {
         assert!(customer_payload("", None, None).is_err());
         assert!(customer_payload("A:B", None, None).is_err());
         assert!(customer_payload("A", None, Some("nope")).is_err());
+    }
+
+    fn open(id: &str, balance: i64) -> OpenInvoice {
+        OpenInvoice { qbo_id: id.into(), doc_number: Some(format!("10{id}")), txn_date: "2026-09-01".into(), due_date: None, balance: Money::from_minor(balance) }
+    }
+
+    fn payment(amount: &str, applications: Option<Vec<(&str, &str)>>) -> PaymentDraft {
+        PaymentDraft {
+            customer_id: "58".into(),
+            txn_date: "2026-11-02".into(),
+            amount: amount.into(),
+            reference: Some(" 4417 ".into()),
+            private_note: None,
+            applications: applications
+                .map(|a| a.into_iter().map(|(id, amt)| PaymentApplication { invoice_id: id.into(), amount: amt.into() }).collect()),
+        }
+    }
+
+    #[test]
+    fn a_cheque_pays_the_oldest_invoices_first_and_leaves_the_rest_as_credit() {
+        let invoices = [open("1", 50_000), open("2", 30_000), open("3", 20_000)];
+        let plan = plan_payment(&payment("650.00", None), &invoices).unwrap();
+        assert_eq!(plan.applied, vec![("1".into(), Money::from_minor(50_000)), ("2".into(), Money::from_minor(15_000))]);
+        assert_eq!(plan.unapplied, Money::from_minor(0));
+
+        let over = plan_payment(&payment("1,100", None), &invoices).unwrap();
+        assert_eq!(over.applied.len(), 3);
+        assert_eq!(over.unapplied, Money::from_minor(10_000), "an overpayment stays on the customer");
+
+        let body = payment_payload(&payment("650.00", None), &plan).unwrap();
+        assert_eq!(body["TotalAmt"], json!(650));
+        assert_eq!(body["PaymentRefNum"], "4417");
+        assert_eq!(body["Line"][1]["Amount"], json!(150));
+        assert_eq!(body["Line"][1]["LinkedTxn"][0], json!({ "TxnId": "2", "TxnType": "Invoice" }));
+        assert!(body.get("DepositToAccountRef").is_none(), "QuickBooks defaults it to Undeposited Funds");
+    }
+
+    #[test]
+    fn a_chosen_spread_is_held_to_each_balance_and_to_the_amount_received() {
+        let invoices = [open("1", 50_000), open("2", 30_000)];
+        let plan = plan_payment(&payment("300", Some(vec![("2", "300.00"), ("1", "0")])), &invoices).unwrap();
+        assert_eq!(plan.applied, vec![("2".into(), Money::from_minor(30_000))]);
+
+        let refuse = |amount: &str, apps: Vec<(&str, &str)>| plan_payment(&payment(amount, Some(apps)), &invoices).unwrap_err().to_string();
+        assert!(refuse("400", vec![("2", "300.01")]).contains("has 300.00 open"));
+        assert!(refuse("100", vec![("1", "60"), ("2", "60")]).contains("only 100.00 was received"));
+        assert!(refuse("100", vec![("9", "10")]).contains("not open for this customer"));
+        assert!(refuse("100", vec![("1", "10"), ("1", "10")]).contains("twice"));
+        assert!(refuse("100", vec![("1", "10.005")]).contains("two decimal places"));
+        assert!(plan_payment(&payment("0", None), &invoices).unwrap_err().to_string().contains("above zero"));
     }
 }

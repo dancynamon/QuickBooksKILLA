@@ -183,6 +183,25 @@ await page.waitForSelector("text=Ready to import 1 rows");
 await page.click('button.primary:has-text("Import")');
 await page.waitForSelector("text=Imported 1 rows");
 
+// Receive payment: from an open invoice, a cheque spread oldest first.
+await page.goto(`${base}/#/r/${realm}/list/Invoice`);
+await page.waitForSelector(".grid tbody tr[data-index]");
+await page.check("text=Open only");
+await page.waitForSelector(".grid tbody tr[data-index]");
+await page.dblclick(".grid tbody tr[data-index]");
+await page.click('a:has-text("Receive payment")');
+await page.waitForSelector("h1:has-text('Receive payment')");
+await page.waitForSelector('[aria-label^="Payment on invoice"]');
+await page.fill('[aria-label="Amount received"]', "10");
+await page.waitForFunction(() => document.querySelector(".facts")?.textContent.includes("Applied"));
+const applied = await page.$$eval('[aria-label^="Payment on invoice"]', (inputs) => inputs.map((i) => i.value).filter(Boolean));
+assert.deepEqual(applied, ["10.00"], "ten dollars goes on the oldest invoice");
+await page.getByLabel("Cheque or reference no.").fill("4417");
+await shot("receive-payment");
+await page.keyboard.press("Control+s");
+await page.waitForSelector(".document .banner");
+assert.match(await page.textContent(".lines tbody"), /Applied to invoice/);
+
 assert.deepEqual(errors, []);
 await browser.close();
 console.log("e2e-writes: ok");

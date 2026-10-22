@@ -324,3 +324,17 @@ than an optimisation, which fixes the one-transaction-per-entity cost flagged in
 - **Import is preview, then commit, all or nothing.** Every row is checked and every
   problem reported by line before anything is written; the commit runs inside one
   savepoint, so a file never lands half in.
+
+### D14 addendum — receiving payments (22 Oct 2026)
+
+- **A payment is spread oldest due first** unless a person types the split; nothing goes
+  past an invoice's balance or past the amount received. What is left over stays on the
+  customer as a credit, shown before saving.
+- **No deposit account is named.** QuickBooks puts the payment in Undeposited Funds, as its
+  own Receive Payment screen does by default; grouping into a bank deposit stays in
+  QuickBooks until deposits are built here.
+- **Queued payments count against open balances.** An invoice already being paid by a
+  payment on its way is shown with that amount netted off, so the same cheque cannot be
+  applied twice before the first lands.
+- **Only invoices QuickBooks already holds can be paid.** A queued invoice has no tax yet,
+  so its balance is not known until it lands.

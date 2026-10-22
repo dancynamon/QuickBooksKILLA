@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Aging, api, ApiError, BuildRow, Component, ContactType, CostBasis, ImportKind, ImportResult, ProductStockRow, StockMove, StockRow, Customer, DocType, Document, DocumentDetail, Draft, DraftLine, Hit, Item, MaterialRow, ReceiptRow, Realm, SalesRow, SearchResult, SheetDetail, SheetSummary, Status, Write } from "./api";
+import { Aging, api, ApiError, BuildRow, Component, ContactType, CostBasis, ImportKind, ImportResult, OpenInvoice, PaymentDraft, PaymentPlan, ProductStockRow, StockMove, StockRow, Customer, DocType, Document, DocumentDetail, Draft, DraftLine, Hit, Item, MaterialRow, ReceiptRow, Realm, SalesRow, SearchResult, SheetDetail, SheetSummary, Status, Write } from "./api";
 import { createContext, useContext } from "react";
 import { ago, DOC_LABELS, DOC_PLURALS, formatDate, formatDecimal, formatMoney, formatPerBf, formatQty, formatRate, lineAmountMinor } from "./format";
 
@@ -23,6 +23,7 @@ type Route =
   | { view: "sheet"; itemId: string }
   | { view: "builds" }
   | { view: "import" }
+  | { view: "pay"; customerId: string | null }
   | { view: "doc"; qboId: string }
   | { view: "contact"; contactType: ContactType; contactId: string };
 
@@ -43,6 +44,7 @@ function parseRoute(hash: string): { realm: string | null; route: Route } {
   if (parts[2] === "sheet" && parts[3]) return { realm, route: { view: "sheet", itemId: parts[3] } };
   if (parts[2] === "builds") return { realm, route: { view: "builds" } };
   if (parts[2] === "import") return { realm, route: { view: "import" } };
+  if (parts[2] === "pay") return { realm, route: { view: "pay", customerId: parts[3] ? decodeURIComponent(parts[3]) : null } };
   if (parts[2] === "new" && EDITABLE.includes(parts[3] as DocType)) return { realm, route: { view: "new", docType: parts[3] as DocType } };
   if (parts[2] === "edit" && parts[3]) return { realm, route: { view: "edit", qboId: parts[3] } };
   if (parts[2] === "item" && parts[3]) return { realm, route: { view: "item", itemId: parts[3] } };
@@ -81,6 +83,8 @@ function href(realm: string, route: Route): string {
       return `#/r/${realm}/builds`;
     case "import":
       return `#/r/${realm}/import`;
+    case "pay":
+      return route.customerId ? `#/r/${realm}/pay/${encodeURIComponent(route.customerId)}` : `#/r/${realm}/pay`;
   }
 }
 
@@ -351,6 +355,7 @@ export function App() {
         {route.view === "sheet" && <SheetView key={`${realm}:${route.itemId}`} realm={realm} itemId={route.itemId} />}
         {route.view === "builds" && <BuildsView key={realm} realm={realm} />}
         {route.view === "import" && <ImportView key={realm} realm={realm} />}
+        {route.view === "pay" && <ReceivePayment key={`${realm}:${route.customerId ?? ""}`} realm={realm} customerId={route.customerId} go={go} />}
         {route.view === "contact" && (
           <ContactView key={`${realm}:${route.contactId}`} realm={realm} contactType={route.contactType} contactId={route.contactId} go={go} />
         )}
@@ -530,6 +535,7 @@ function Register({ realm, docType, go }: { realm: string; docType: DocType; go:
         )}
         <span className="spacer" />
         {EDITABLE.includes(docType) && <NewButton realm={realm} docType={docType} />}
+        {docType === "Payment" && <PayButton realm={realm} customerId={null} primary />}
         {elapsed !== null && rows && (
           <span className="muted num">
             {visible.length.toLocaleString()} of {rows.length.toLocaleString()} · {elapsed.toFixed(0)} ms
@@ -662,6 +668,9 @@ function DocumentView({ realm, qboId, go }: { realm: string; qboId: string; go: 
         </h1>
         <Badge doc={d} />
         <span className="spacer" />
+        {d.docType === "Invoice" && !d.pendingWrite && (d.balanceMinor ?? 0) > 0 && d.contactId && writes.enabled && (
+          <PayButton realm={realm} customerId={d.contactId} />
+        )}
         {EDITABLE.includes(d.docType) && !d.pendingWrite && writes.enabled ? (
           <a className="button" href={href(realm, { view: "edit", qboId: d.qboId })}>Edit</a>
         ) : (
@@ -842,6 +851,7 @@ function ContactView({
         <span className="badge">{contactType}</span>
         <span className="spacer" />
         <span className="num">Open {formatMoney(open)}</span>
+        {contactType === "Customer" && open > 0 && <PayButton realm={realm} customerId={contactId} />}
       </div>
       {aging && (
         <dl className="facts aging-strip" aria-label="Open balance by days past due">
@@ -2572,6 +2582,199 @@ function ImportView({ realm }: { realm: string }) {
           </div>
         </>
       )}
+    </section>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Receive payment: a cheque against a customer's open invoices
+// ---------------------------------------------------------------------------
+
+function PayButton({ realm, customerId, primary }: { realm: string; customerId: string | null; primary?: boolean }) {
+  const writes = useContext(Writes);
+  if (!writes.enabled) {
+    return primary ? <span className="button disabled" title="Writes are off for this company. They are turned on after the read-only period.">Receive payment</span> : null;
+  }
+  return <a className={primary ? "button primary" : "button"} href={href(realm, { view: "pay", customerId })}>Receive payment</a>;
+}
+
+/** Minor units as plain text an input accepts: 123456 → "1234.56". */
+const plainMoney = (minor: number) => `${minor < 0 ? "-" : ""}${Math.trunc(Math.abs(minor) / 100)}.${String(Math.abs(minor) % 100).padStart(2, "0")}`;
+
+function ReceivePayment({ realm, customerId, go }: { realm: string; customerId: string | null; go: (r: Route) => void }) {
+  const writes = useContext(Writes);
+  const [customers, setCustomers] = useState<Customer[]>([]);
+  const [customer, setCustomer] = useState<string>(customerId ?? "");
+  const [customerText, setCustomerText] = useState("");
+  const [open, setOpen] = useState<OpenInvoice[] | null>(null);
+  const [txnDate, setTxnDate] = useState(todayIso);
+  const [amount, setAmount] = useState("");
+  const [reference, setReference] = useState("");
+  const [note, setNote] = useState("");
+  // null: oldest first; otherwise what the person typed against each invoice.
+  const [manual, setManual] = useState<Record<string, string> | null>(null);
+  const [plan, setPlan] = useState<PaymentPlan | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    api.customers(realm).then((all) => {
+      const real = all.filter((c) => !c.pending);
+      setCustomers(real);
+      if (customerId) setCustomerText(real.find((c) => c.qboId === customerId)?.displayName ?? "");
+    }, (e: ApiError) => setError(e.message));
+  }, [realm, customerId]);
+  useEffect(() => {
+    setOpen(null);
+    setManual(null);
+    if (!customer) return;
+    api.openInvoices(realm, customer).then(setOpen, (e: ApiError) => setError(e.message));
+  }, [realm, customer]);
+
+  const draft = (): PaymentDraft => ({
+    customerId: customer,
+    txnDate,
+    amount,
+    reference: reference || null,
+    privateNote: note || null,
+    applications: manual ? Object.entries(manual).filter(([, a]) => a.trim() !== "").map(([invoiceId, a]) => ({ invoiceId, amount: a })) : undefined,
+  });
+
+  // Where the money goes is the server's call, asked on every change.
+  useEffect(() => {
+    setPlan(null);
+    if (!customer || !amount.trim()) return;
+    let current = true;
+    api.paymentPreview(realm, draft()).then(
+      (p) => { if (current) { setPlan(p); setError(null); } },
+      (e: ApiError) => { if (current) setError(e.message); },
+    );
+    return () => { current = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [realm, customer, amount, txnDate, manual]);
+
+  if (!writes.enabled) {
+    return <div className="pad">Writes are off for this company. They are turned on with <code>qbo-local writes --enable</code> after the read-only period.</div>;
+  }
+
+  const chooseCustomer = (text: string) => {
+    setCustomerText(text);
+    setCustomer(customers.find((c) => c.displayName === text)?.qboId ?? "");
+  };
+  const appliedTo = (id: string) => plan?.applied.find((a) => a.invoiceId === id)?.amountMinor ?? 0;
+  const owed = (open ?? []).reduce((s, i) => s + i.balanceMinor, 0);
+
+  const save = async () => {
+    setError(null);
+    if (!customer) return setError("Choose a customer from the list.");
+    if (!plan) return setError("Enter the amount received.");
+    setSaving(true);
+    try {
+      const result = await api.receivePayment(realm, draft());
+      writes.refresh();
+      go({ view: "doc", qboId: result.entityId });
+    } catch (e) {
+      setError((e as Error).message);
+      setSaving(false);
+    }
+  };
+
+  return (
+    <section className="document editor" onKeyDown={(e) => { if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "s") { e.preventDefault(); void save(); } }}>
+      <div className="toolbar">
+        <a className="back" href={href(realm, { view: "list", docType: "Payment" })}>← Payments</a>
+        <h1>Receive payment</h1>
+        <span className="spacer" />
+        {writes.environment === "sandbox" && <span className="pill">Sandbox</span>}
+        <button className="button primary" onClick={() => void save()} disabled={saving || !plan}>
+          {saving ? "Saving…" : "Save"} <kbd>{navigator.platform.includes("Mac") ? "⌘S" : "Ctrl S"}</kbd>
+        </button>
+      </div>
+      {error && <div className="error">{error}</div>}
+      <div className="form-grid">
+        <label className="field wide">
+          <span>Customer</span>
+          <input list="bb-pay-customers" value={customerText} onChange={(e) => chooseCustomer(e.target.value)} placeholder="Start typing a name" autoFocus={!customerId} />
+          <datalist id="bb-pay-customers">
+            {customers.map((c) => <option key={c.qboId} value={c.displayName}>{c.companyName ?? ""}</option>)}
+          </datalist>
+        </label>
+        <label className="field">
+          <span>Date</span>
+          <input type="date" value={txnDate} onChange={(e) => setTxnDate(e.target.value)} />
+        </label>
+        <label className="field">
+          <span>Amount received</span>
+          <input className="num r" inputMode="decimal" value={amount} onChange={(e) => setAmount(e.target.value)} autoFocus={!!customerId} aria-label="Amount received" />
+        </label>
+        <label className="field">
+          <span>Cheque or reference no.</span>
+          <input value={reference} onChange={(e) => setReference(e.target.value)} />
+        </label>
+      </div>
+      {customer && open && open.length === 0 && <p className="muted pad">No open invoices. A payment saved now stays on the customer as a credit.</p>}
+      {open && open.length > 0 && (
+        <div className="grid-wrap">
+          <table className="grid lines">
+            <thead>
+              <tr>
+                <th>Invoice</th>
+                <th>Date</th>
+                <th>Due</th>
+                <th className="r">Open</th>
+                <th className="r">Payment</th>
+              </tr>
+            </thead>
+            <tbody>
+              {open.map((i) => (
+                <tr key={i.qboId}>
+                  <td className="num"><a href={href(realm, { view: "doc", qboId: i.qboId })}>{i.docNumber ?? `#${i.qboId}`}</a></td>
+                  <td className="num">{formatDate(i.txnDate)}</td>
+                  <td className="num">{i.dueDate ? formatDate(i.dueDate) : ""}</td>
+                  <td className="num r">
+                    {formatMoney(i.balanceMinor)}
+                    {i.queuedMinor > 0 && <div className="muted">{formatMoney(i.queuedMinor)} on its way</div>}
+                  </td>
+                  <td className="r">
+                    <input
+                      className="num r"
+                      inputMode="decimal"
+                      aria-label={`Payment on invoice ${i.docNumber ?? i.qboId}`}
+                      value={manual ? manual[i.qboId] ?? "" : appliedTo(i.qboId) ? plainMoney(appliedTo(i.qboId)) : ""}
+                      onChange={(e) => {
+                        const base = manual ?? Object.fromEntries((plan?.applied ?? []).map((a) => [a.invoiceId, plainMoney(a.amountMinor)]));
+                        setManual({ ...base, [i.qboId]: e.target.value });
+                      }}
+                    />
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+            <tfoot>
+              <tr>
+                <td colSpan={2}>{manual && <button className="link" onClick={() => setManual(null)}>Pay oldest first</button>}</td>
+                <td className="r">Owed</td>
+                <td className="num r">{formatMoney(owed)}</td>
+                <td className="num r">{plan ? formatMoney(plan.totalMinor - plan.unappliedMinor) : ""}</td>
+              </tr>
+            </tfoot>
+          </table>
+        </div>
+      )}
+      {plan && (
+        <dl className="facts">
+          <div><dt>Received</dt><dd className="num">{formatMoney(plan.totalMinor)}</dd></div>
+          <div><dt>Applied</dt><dd className="num">{formatMoney(plan.totalMinor - plan.unappliedMinor)}</dd></div>
+          <div><dt>Left as credit</dt><dd className={plan.unappliedMinor ? "num warn-text" : "num"}>{formatMoney(plan.unappliedMinor)}</dd></div>
+          <div><dt>Deposit to</dt><dd>Undeposited Funds</dd></div>
+        </dl>
+      )}
+      <div className="form-grid">
+        <label className="field wide">
+          <span>Internal note</span>
+          <textarea rows={2} value={note} onChange={(e) => setNote(e.target.value)} />
+        </label>
+      </div>
     </section>
   );
 }

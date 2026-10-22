@@ -351,6 +351,32 @@ async function call<T>(command: string, args: Record<string, unknown> = {}): Pro
   return body as T;
 }
 
+export type OpenInvoice = {
+  qboId: string;
+  docNumber: string | null;
+  txnDate: string;
+  dueDate: string | null;
+  balanceMinor: number;
+  /// Already on its way to QuickBooks in a queued payment.
+  queuedMinor: number;
+};
+
+export type PaymentDraft = {
+  customerId: string;
+  txnDate: string;
+  amount: string;
+  reference: string | null;
+  privateNote: string | null;
+  /// Absent: spread oldest-first.
+  applications?: { invoiceId: string; amount: string }[];
+};
+
+export type PaymentPlan = {
+  totalMinor: number;
+  unappliedMinor: number;
+  applied: { invoiceId: string; docNumber: string | null; amountMinor: number }[];
+};
+
 export const api = {
   realms: () => call<Realm[]>("realms"),
   status: (realm: string) => call<Status>("status", { realm }),
@@ -363,6 +389,10 @@ export const api = {
   vendors: (realm: string) => call<Customer[]>("vendors", { realm }),
   documentDraft: (realm: string, qboId: string) =>
     call<{ draft: Draft; contactName: string | null; openWrites: number }>("documentDraft", { realm, qboId }),
+  openInvoices: (realm: string, customerId: string) => call<OpenInvoice[]>("openInvoices", { realm, customerId }),
+  paymentPreview: (realm: string, draft: PaymentDraft) => call<PaymentPlan>("paymentPreview", { realm, draft }),
+  receivePayment: (realm: string, draft: PaymentDraft) =>
+    call<PaymentPlan & { outboxId: string; entityId: string }>("receivePayment", { realm, draft }),
   saveDocument: (realm: string, draft: Draft, qboId?: string) =>
     call<{ outboxId: string; entityId: string; state: string }>("saveDocument", { realm, draft, qboId }),
   createCustomer: (realm: string, displayName: string, companyName?: string, email?: string) =>

@@ -185,6 +185,7 @@ kbd { font-family: var(--mono); font-size: .85em; border: 1px solid var(--line);
 
 .filter.date { width: auto; }
 .crit-text { color: var(--crit); }
+.warn-text { color: var(--warn); }
 .bar-col { width: 30%; }
 .inline-bar { display: block; height: 8px; border-radius: 4px; background: var(--accent); opacity: .75; }
 .grid tr.inactive td { color: var(--ink-3); }
