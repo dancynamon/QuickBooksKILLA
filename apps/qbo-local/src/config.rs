@@ -28,11 +28,27 @@ pub enum ConfigError {
     },
     #[error("realm: {0}")]
     Realm(#[from] DomainError),
+    /// The config file still names an Intuit app. The one it named was the
+    /// app the QuickBooks MCPs use, and qbo-local's polling spent that app's
+    /// monthly quota for all of them (23 Oct 2026). Refused outright rather
+    /// than ignored, so an old config cannot quietly put it back.
     #[error(
-        "no client secret configured: set the QBO_CLIENT_SECRET environment variable, or \
-         [intuit].client_secret in the config file (HANDOFF.md §0: prefer the environment)"
+        "{path}: [intuit].client_id / client_secret are no longer read — remove both lines. \
+         BunzBooks uses its own Intuit app, never one shared with the QuickBooks MCPs: \
+         store it in the login keychain (service {service}, accounts client_id and \
+         client_secret) or set {ENV_CLIENT_ID} and {ENV_CLIENT_SECRET}"
     )]
-    MissingClientSecret,
+    AppInConfigFile { path: PathBuf, service: String },
+    #[error(
+        "no BunzBooks Intuit app credentials: store them in the login keychain (service \
+         {service}, accounts client_id and client_secret), or set {ENV_CLIENT_ID} and \
+         {ENV_CLIENT_SECRET}. Never the QuickBooks MCPs' app: its quota is theirs"
+    )]
+    MissingCredentials { service: String },
+    #[error("{ENV_CLIENT_ID} and {ENV_CLIENT_SECRET} must be set together")]
+    PartialEnvironment,
+    #[error("reading the keychain (service {service}): {detail}")]
+    Keychain { service: String, detail: String },
     #[error("realm {0:?} is not listed under [[realms]] in the config file")]
     UnknownRealm(String),
 }
@@ -53,6 +69,68 @@ fn default_rotation_log() -> PathBuf {
     PathBuf::from(".local/rotation-log.jsonl")
 }
 
+/// Keychain service holding BunzBooks' own Intuit app: accounts `client_id`
+/// and `client_secret`. No other tool on the Mac reads it.
+pub const APP_KEYCHAIN_SERVICE: &str = "bunzbooks-intuit-app";
+
+/// The environment override for [`APP_KEYCHAIN_SERVICE`]. Deliberately not
+/// `QBO_CLIENT_ID` / `QBO_CLIENT_SECRET`, which other tools set for theirs.
+pub const ENV_CLIENT_ID: &str = "BUNZBOOKS_QBO_CLIENT_ID";
+pub const ENV_CLIENT_SECRET: &str = "BUNZBOOKS_QBO_CLIENT_SECRET";
+
+fn default_app_keychain_service() -> String {
+    APP_KEYCHAIN_SERVICE.to_string()
+}
+
+fn default_token_keychain_service() -> String {
+    crate::keychain::DEFAULT_SERVICE.to_string()
+}
+
+fn default_daily_calls() -> u32 {
+    crate::budget::DEFAULT_DAILY_CALLS
+}
+
+fn default_budget_ledger() -> PathBuf {
+    PathBuf::from(".local/call-budget.json")
+}
+
+/// `[budget]` — the daily ceiling on Intuit calls ([`crate::budget`]).
+#[derive(Debug, Clone, Deserialize)]
+pub struct BudgetConfig {
+    #[serde(default = "default_daily_calls")]
+    pub daily_calls: u32,
+    #[serde(default = "default_budget_ledger")]
+    pub ledger: PathBuf,
+}
+
+impl Default for BudgetConfig {
+    fn default() -> Self {
+        BudgetConfig {
+            daily_calls: default_daily_calls(),
+            ledger: default_budget_ledger(),
+        }
+    }
+}
+
+/// BunzBooks' Intuit app. The secret never reaches `Debug`.
+#[derive(Clone)]
+pub struct AppCredentials {
+    pub client_id: String,
+    pub client_secret: String,
+    /// Where they came from, for the line a live command prints at start.
+    pub source: String,
+}
+
+impl std::fmt::Debug for AppCredentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AppCredentials")
+            .field("client_id", &self.client_id)
+            .field("client_secret", &"<redacted>")
+            .field("source", &self.source)
+            .finish()
+    }
+}
+
 /// Which [`crate::auth::TokenStore`] backend `--live` and `auth` use.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -66,12 +144,20 @@ pub enum TokenStoreKind {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct IntuitConfig {
-    pub client_id: String,
-    /// Prefer the `QBO_CLIENT_SECRET` environment variable
-    /// ([`LocalConfig::client_secret`]) over writing the secret into a file
-    /// at all, even a gitignored one.
+    /// Read only to be refused ([`ConfigError::AppInConfigFile`]); the app
+    /// comes from [`LocalConfig::credentials`].
+    #[serde(default)]
+    pub client_id: Option<String>,
     #[serde(default)]
     pub client_secret: Option<String>,
+    /// Where [`LocalConfig::credentials`] looks for the app.
+    #[serde(default = "default_app_keychain_service")]
+    pub app_keychain_service: String,
+    /// Where the keychain token store keeps tokens. Separate from every
+    /// other tool's, and from qbo-local's own pre-October service, whose
+    /// tokens belong to the shared app.
+    #[serde(default = "default_token_keychain_service")]
+    pub token_keychain_service: String,
     #[serde(default = "default_environment")]
     pub environment: String,
     #[serde(default = "default_redirect_port")]
@@ -97,6 +183,11 @@ pub struct LocalConfig {
     pub tokens_dir: PathBuf,
     #[serde(default = "default_rotation_log")]
     pub rotation_log: PathBuf,
+    #[serde(default)]
+    pub budget: BudgetConfig,
+    /// The file this was loaded from, for messages.
+    #[serde(skip)]
+    pub path: PathBuf,
 }
 
 impl LocalConfig {
@@ -105,25 +196,31 @@ impl LocalConfig {
             path: path.to_path_buf(),
             source,
         })?;
-        toml::from_str(&text).map_err(|source| ConfigError::Toml {
-            path: path.to_path_buf(),
-            source: Box::new(source),
-        })
+        let mut config: LocalConfig =
+            toml::from_str(&text).map_err(|source| ConfigError::Toml {
+                path: path.to_path_buf(),
+                source: Box::new(source),
+            })?;
+        config.path = path.to_path_buf();
+        Ok(config)
     }
 
-    /// `QBO_CLIENT_SECRET` wins when set, so the secret need never sit in a
-    /// file at all — the config file only has to carry the client id.
-    pub fn client_secret(&self) -> Result<String, ConfigError> {
-        std::env::var("QBO_CLIENT_SECRET")
-            .ok()
-            .filter(|value| !value.is_empty())
-            .or_else(|| {
-                self.intuit
-                    .client_secret
-                    .clone()
-                    .filter(|value| !value.is_empty())
-            })
-            .ok_or(ConfigError::MissingClientSecret)
+    /// BunzBooks' own Intuit app: [`ENV_CLIENT_ID`] / [`ENV_CLIENT_SECRET`]
+    /// when both are set, otherwise the login keychain under
+    /// `[intuit].app_keychain_service`. Never the config file, and never the
+    /// `QBO_CLIENT_*` names other tools use.
+    pub fn credentials(&self) -> Result<AppCredentials, ConfigError> {
+        let service = &self.intuit.app_keychain_service;
+        resolve_credentials(
+            self,
+            std::env::var(ENV_CLIENT_ID).ok(),
+            std::env::var(ENV_CLIENT_SECRET).ok(),
+            |account| read_keychain(service, account),
+        )
+    }
+
+    pub fn call_budget(&self) -> crate::budget::CallBudget {
+        crate::budget::CallBudget::persistent(&self.budget.ledger, self.budget.daily_calls)
     }
 
     pub fn token_store_kind(&self) -> TokenStoreKind {
@@ -152,6 +249,74 @@ impl LocalConfig {
     }
 }
 
+fn non_empty(value: Option<String>) -> Option<String> {
+    value.filter(|value| !value.trim().is_empty())
+}
+
+/// [`LocalConfig::credentials`] with the environment and keychain passed in,
+/// so the precedence is testable without either.
+fn resolve_credentials(
+    config: &LocalConfig,
+    env_id: Option<String>,
+    env_secret: Option<String>,
+    keychain: impl Fn(&str) -> Result<Option<String>, String>,
+) -> Result<AppCredentials, ConfigError> {
+    let service = config.intuit.app_keychain_service.clone();
+    if non_empty(config.intuit.client_id.clone()).is_some()
+        || non_empty(config.intuit.client_secret.clone()).is_some()
+    {
+        return Err(ConfigError::AppInConfigFile {
+            path: config.path.clone(),
+            service,
+        });
+    }
+    match (non_empty(env_id), non_empty(env_secret)) {
+        (Some(client_id), Some(client_secret)) => {
+            return Ok(AppCredentials {
+                client_id,
+                client_secret,
+                source: format!("environment ({ENV_CLIENT_ID})"),
+            })
+        }
+        (None, None) => {}
+        _ => return Err(ConfigError::PartialEnvironment),
+    }
+    let read = |account: &str| {
+        keychain(account).map_err(|detail| ConfigError::Keychain {
+            service: service.clone(),
+            detail,
+        })
+    };
+    match (
+        non_empty(read("client_id")?),
+        non_empty(read("client_secret")?),
+    ) {
+        (Some(client_id), Some(client_secret)) => Ok(AppCredentials {
+            client_id,
+            client_secret,
+            source: format!("login keychain ({service})"),
+        }),
+        _ => Err(ConfigError::MissingCredentials { service }),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn read_keychain(service: &str, account: &str) -> Result<Option<String>, String> {
+    const ERR_SEC_ITEM_NOT_FOUND: i32 = -25300;
+    match security_framework::passwords::get_generic_password(service, account) {
+        Ok(bytes) => String::from_utf8(bytes)
+            .map(|value| Some(value.trim().to_string()))
+            .map_err(|_| format!("item {account} is not UTF-8")),
+        Err(error) if error.code() == ERR_SEC_ITEM_NOT_FOUND => Ok(None),
+        Err(error) => Err(format!("{error} (OSStatus {})", error.code())),
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn read_keychain(_service: &str, _account: &str) -> Result<Option<String>, String> {
+    Ok(None)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -178,7 +343,6 @@ mod tests {
         );
 
         let config = LocalConfig::load(&path).unwrap();
-        assert_eq!(config.intuit.client_id, "abc123");
         assert_eq!(config.intuit.environment, "production");
         assert_eq!(config.intuit.redirect_port, 8765);
         assert_eq!(config.tokens_dir, PathBuf::from(".local/tokens"));
@@ -221,44 +385,113 @@ mod tests {
         ));
     }
 
-    /// `QBO_CLIENT_SECRET` is process-global state, and `cargo test` runs
-    /// this file's tests in parallel threads of one process — so both halves
-    /// of this behaviour (env wins; neither source means an error) live in
-    /// one test rather than two that could race on the same variable.
+    fn bare(directory: &Path) -> LocalConfig {
+        let path = write(
+            directory,
+            "[intuit]\n[[realms]]\nid = \"1\"\nname = \"A\"\n",
+        );
+        LocalConfig::load(&path).unwrap()
+    }
+
+    fn keychain(
+        id: Option<&'static str>,
+        secret: Option<&'static str>,
+    ) -> impl Fn(&str) -> Result<Option<String>, String> {
+        move |account| {
+            Ok(match account {
+                "client_id" => id.map(str::to_string),
+                "client_secret" => secret.map(str::to_string),
+                other => panic!("unexpected account {other}"),
+            })
+        }
+    }
+
     #[test]
-    fn client_secret_prefers_the_environment_then_reports_when_neither_is_set() {
+    fn an_app_in_the_config_file_is_refused_even_with_the_keychain_set() {
         let directory = tempfile::tempdir().unwrap();
-        let with_file_secret = write(
-            directory.path(),
-            r#"
-                [intuit]
-                client_id = "abc123"
-                client_secret = "from-file"
-            "#,
-        );
-        let without_file_secret = {
-            let path = directory.path().join("no-secret.toml");
-            fs::write(&path, "[intuit]\nclient_id = \"abc123\"\n").unwrap();
-            path
-        };
-        let with_secret = LocalConfig::load(&with_file_secret).unwrap();
-        let without_secret = LocalConfig::load(&without_file_secret).unwrap();
+        let path = write(directory.path(), "[intuit]\nclient_id = \"shared\"\n");
+        let config = LocalConfig::load(&path).unwrap();
+        let outcome = resolve_credentials(&config, None, None, keychain(Some("own"), Some("s")));
+        assert!(matches!(outcome, Err(ConfigError::AppInConfigFile { .. })));
 
-        std::env::remove_var("QBO_CLIENT_SECRET");
-        assert_eq!(with_secret.client_secret().unwrap(), "from-file");
+        let path = write(directory.path(), "[intuit]\nclient_secret = \"shared\"\n");
+        let config = LocalConfig::load(&path).unwrap();
+        let outcome = resolve_credentials(&config, None, None, keychain(Some("own"), Some("s")));
+        assert!(matches!(outcome, Err(ConfigError::AppInConfigFile { .. })));
+    }
+
+    #[test]
+    fn credentials_come_from_the_environment_then_the_keychain() {
+        let directory = tempfile::tempdir().unwrap();
+        let config = bare(directory.path());
+
+        let from_env = resolve_credentials(
+            &config,
+            Some("env-id".into()),
+            Some("env-secret".into()),
+            keychain(Some("kc-id"), Some("kc-secret")),
+        )
+        .unwrap();
+        assert_eq!(from_env.client_id, "env-id");
+        assert_eq!(from_env.client_secret, "env-secret");
+
+        let from_keychain = resolve_credentials(
+            &config,
+            None,
+            None,
+            keychain(Some("kc-id"), Some("kc-secret")),
+        )
+        .unwrap();
+        assert_eq!(from_keychain.client_id, "kc-id");
+        assert!(from_keychain.source.contains(APP_KEYCHAIN_SERVICE));
+        assert!(!format!("{from_keychain:?}").contains("kc-secret"));
+    }
+
+    #[test]
+    fn half_a_set_of_credentials_is_an_error_not_a_fallback() {
+        let directory = tempfile::tempdir().unwrap();
+        let config = bare(directory.path());
         assert!(matches!(
-            without_secret.client_secret(),
-            Err(ConfigError::MissingClientSecret)
+            resolve_credentials(
+                &config,
+                Some("id".into()),
+                None,
+                keychain(Some("a"), Some("b"))
+            ),
+            Err(ConfigError::PartialEnvironment)
         ));
+        assert!(matches!(
+            resolve_credentials(&config, None, None, keychain(Some("a"), None)),
+            Err(ConfigError::MissingCredentials { .. })
+        ));
+    }
 
-        std::env::set_var("QBO_CLIENT_SECRET", "from-env");
-        assert_eq!(
-            with_secret.client_secret().unwrap(),
-            "from-env",
-            "environment should win over the file"
+    #[test]
+    fn the_tracked_example_names_no_intuit_app() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = write(
+            directory.path(),
+            include_str!("../../../.local/config.example.toml"),
         );
-        assert_eq!(without_secret.client_secret().unwrap(), "from-env");
-        std::env::remove_var("QBO_CLIENT_SECRET");
+        let config = LocalConfig::load(&path).unwrap();
+        assert!(config.intuit.client_id.is_none());
+        assert!(config.intuit.client_secret.is_none());
+        assert_eq!(config.intuit.app_keychain_service, APP_KEYCHAIN_SERVICE);
+    }
+
+    #[test]
+    fn the_budget_defaults_to_fifteen_thousand_a_day() {
+        let directory = tempfile::tempdir().unwrap();
+        let config = bare(directory.path());
+        assert_eq!(config.budget.daily_calls, 15_000);
+        assert_eq!(
+            config.budget.ledger,
+            PathBuf::from(".local/call-budget.json")
+        );
+        assert_eq!(
+            config.intuit.token_keychain_service,
+            crate::keychain::DEFAULT_SERVICE
+        );
     }
 
     #[test]

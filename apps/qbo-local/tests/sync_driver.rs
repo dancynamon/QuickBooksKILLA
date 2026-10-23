@@ -27,7 +27,9 @@ fn at(hours: i64) -> DateTime<Utc> {
 
 fn store() -> Store {
     let store = Store::open_in_memory().unwrap();
-    store.register_realm(&realm(), "Test Company", at(0)).unwrap();
+    store
+        .register_realm(&realm(), "Test Company", at(0))
+        .unwrap();
     store
 }
 
@@ -101,13 +103,19 @@ fn a_first_sync_sweeps_and_lands_a_usable_replica() {
     assert_eq!(report.quarantined(), 0);
     assert!(matches!(
         report.entities[0].path,
-        SyncPath::FullSweep { reason: SweepReason::NoCursor, .. }
+        SyncPath::FullSweep {
+            reason: SweepReason::NoCursor,
+            ..
+        }
     ));
 
     // Mirrored, projected, and findable — the whole point of the exercise.
     let invoice = store.get_document(&realm(), "418").unwrap().unwrap();
     assert_eq!(invoice.doc_number.as_deref(), Some("1088"));
-    assert_eq!(invoice.contact_name.as_deref(), Some("Blue Harbor Swim Club"));
+    assert_eq!(
+        invoice.contact_name.as_deref(),
+        Some("Blue Harbor Swim Club")
+    );
     assert!(!store.search(&realm(), "1088", 5).unwrap().is_empty());
 }
 
@@ -139,7 +147,12 @@ fn a_sweep_pages_until_it_runs_out() {
     for index in 0..25 {
         qbo.seed(
             &realm(),
-            invoice(&format!("{index}"), &format!("{}", 2000 + index), 100.0, at(1)),
+            invoice(
+                &format!("{index}"),
+                &format!("{}", 2000 + index),
+                100.0,
+                at(1),
+            ),
         );
     }
 
@@ -156,7 +169,9 @@ fn a_sweep_pages_until_it_runs_out() {
         other => panic!("expected a sweep, got {other:?}"),
     }
     assert_eq!(
-        store.count_projected(&realm(), ProjectedTable::Documents).unwrap(),
+        store
+            .count_projected(&realm(), ProjectedTable::Documents)
+            .unwrap(),
         25
     );
 }
@@ -169,7 +184,12 @@ fn a_sweep_whose_record_count_is_an_exact_multiple_of_the_page_still_terminates(
     for index in 0..20 {
         qbo.seed(
             &realm(),
-            invoice(&format!("{index}"), &format!("{}", 3000 + index), 100.0, at(1)),
+            invoice(
+                &format!("{index}"),
+                &format!("{}", 3000 + index),
+                100.0,
+                at(1),
+            ),
         );
     }
 
@@ -181,7 +201,9 @@ fn a_sweep_whose_record_count_is_an_exact_multiple_of_the_page_still_terminates(
 
     assert_eq!(report.mirrored, 20);
     match report.path {
-        SyncPath::FullSweep { pages, .. } => assert_eq!(pages, 3, "two full pages then an empty one"),
+        SyncPath::FullSweep { pages, .. } => {
+            assert_eq!(pages, 3, "two full pages then an empty one")
+        }
         other => panic!("expected a sweep, got {other:?}"),
     }
 }
@@ -210,9 +232,15 @@ fn a_second_sync_polls_instead_of_sweeping() {
         .unwrap();
 
     assert!(matches!(report.path, SyncPath::Cdc { .. }));
-    assert_eq!(report.mirrored, 1, "only the new invoice, not the whole book");
     assert_eq!(
-        store.list_documents(&realm(), DocumentType::Invoice, 50).unwrap().len(),
+        report.mirrored, 1,
+        "only the new invoice, not the whole book"
+    );
+    assert_eq!(
+        store
+            .list_documents(&realm(), DocumentType::Invoice, 50)
+            .unwrap()
+            .len(),
         2
     );
 }
@@ -238,7 +266,9 @@ fn an_edit_in_qbo_replaces_the_local_copy_rather_than_duplicating_it() {
     let invoice = store.get_document(&realm(), "418").unwrap().unwrap();
     assert_eq!(invoice.total, ledger_core::Money::from_minor(99_900));
     assert_eq!(
-        store.count_projected(&realm(), ProjectedTable::Documents).unwrap(),
+        store
+            .count_projected(&realm(), ProjectedTable::Documents)
+            .unwrap(),
         1
     );
 }
@@ -314,7 +344,12 @@ fn a_truncated_poll_is_backfilled_through_bounded_windows() {
     for index in 2..=5 {
         driver.client_mut().seed(
             &realm(),
-            invoice(&index.to_string(), &format!("400{index}"), 100.0, at(2 + index)),
+            invoice(
+                &index.to_string(),
+                &format!("400{index}"),
+                100.0,
+                at(2 + index),
+            ),
         );
     }
     driver.client_mut().set_cdc_cap(2);
@@ -330,7 +365,10 @@ fn a_truncated_poll_is_backfilled_through_bounded_windows() {
 
     // The point of the exercise: nothing was lost to truncation.
     assert_eq!(
-        store.list_documents(&realm(), DocumentType::Invoice, 50).unwrap().len(),
+        store
+            .list_documents(&realm(), DocumentType::Invoice, 50)
+            .unwrap()
+            .len(),
         5,
         "every changed invoice should have landed"
     );
@@ -357,7 +395,12 @@ fn a_truncated_poll_does_not_advance_the_cursor_past_what_it_proved() {
     for index in 2..=5 {
         driver.client_mut().seed(
             &realm(),
-            invoice(&index.to_string(), &format!("400{index}"), 100.0, at(2 + index)),
+            invoice(
+                &index.to_string(),
+                &format!("400{index}"),
+                100.0,
+                at(2 + index),
+            ),
         );
     }
 
@@ -374,13 +417,19 @@ fn a_truncated_poll_does_not_advance_the_cursor_past_what_it_proved() {
     // Everything in the truncated window landed, and a poll from the new cursor
     // finds nothing left over.
     assert_eq!(
-        store.list_documents(&realm(), DocumentType::Invoice, 50).unwrap().len(),
+        store
+            .list_documents(&realm(), DocumentType::Invoice, 50)
+            .unwrap()
+            .len(),
         5
     );
     let report = driver
         .sync_entity_type(&store, &realm(), EntityType::Invoice, at(21))
         .unwrap();
-    assert_eq!(report.mirrored, 0, "nothing was skipped, so nothing is left");
+    assert_eq!(
+        report.mirrored, 0,
+        "nothing was skipped, so nothing is left"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -393,7 +442,12 @@ fn the_cursor_moves_only_when_the_entities_it_covers_are_written() {
     for index in 0..15 {
         qbo.seed(
             &realm(),
-            invoice(&format!("{index}"), &format!("{}", 5000 + index), 100.0, at(1)),
+            invoice(
+                &format!("{index}"),
+                &format!("{}", 5000 + index),
+                100.0,
+                at(1),
+            ),
         );
     }
 
@@ -413,13 +467,15 @@ fn the_cursor_moves_only_when_the_entities_it_covers_are_written() {
         "a partial sweep must not leave a cursor behind, or the rest is never fetched"
     );
 
-    // Retrying picks up the whole type, not the remainder of a lost sweep.
+    // Retrying finishes the type: nothing was checkpointed, so from page one.
     let report = driver
         .sync_entity_type(&store, &realm(), EntityType::Invoice, at(3))
         .unwrap();
     assert!(matches!(report.path, SyncPath::FullSweep { .. }));
     assert_eq!(
-        store.count_projected(&realm(), ProjectedTable::Documents).unwrap(),
+        store
+            .count_projected(&realm(), ProjectedTable::Documents)
+            .unwrap(),
         15
     );
 }
@@ -441,7 +497,10 @@ fn a_payload_that_will_not_project_is_still_mirrored() {
     assert_eq!(report.mirrored, 1);
     assert_eq!(report.quarantined, 1);
     assert!(store.get_document(&realm(), "418").unwrap().is_none());
-    assert!(store.get_entity(&realm(), EntityType::Invoice, "418").unwrap().is_some());
+    assert!(store
+        .get_entity(&realm(), EntityType::Invoice, "418")
+        .unwrap()
+        .is_some());
     assert_eq!(store.quarantined(&realm()).unwrap().len(), 1);
 }
 
@@ -451,7 +510,12 @@ fn sync_refuses_rather_than_burning_through_the_rate_budget() {
     for index in 0..50 {
         qbo.seed(
             &realm(),
-            invoice(&format!("{index}"), &format!("{}", 6000 + index), 100.0, at(1)),
+            invoice(
+                &format!("{index}"),
+                &format!("{}", 6000 + index),
+                100.0,
+                at(1),
+            ),
         );
     }
 
@@ -518,7 +582,12 @@ fn a_backfill_pages_through_a_window_bigger_than_one_page() {
     for index in 2..=9 {
         driver.client_mut().seed(
             &realm(),
-            invoice(&index.to_string(), &format!("700{index}"), 100.0, at(2 + index)),
+            invoice(
+                &index.to_string(),
+                &format!("700{index}"),
+                100.0,
+                at(2 + index),
+            ),
         );
     }
 
@@ -533,7 +602,155 @@ fn a_backfill_pages_through_a_window_bigger_than_one_page() {
         other => panic!("expected a paged backfill, got {other:?}"),
     }
     assert_eq!(
-        store.list_documents(&realm(), DocumentType::Invoice, 50).unwrap().len(),
+        store
+            .list_documents(&realm(), DocumentType::Invoice, 50)
+            .unwrap()
+            .len(),
         9
     );
+}
+
+#[test]
+fn an_interrupted_full_sweep_resumes_from_its_checkpoint() {
+    // The pull that spent the October quota restarted big types from page
+    // one each time it was cut off. It must pick up where it stopped.
+    let mut qbo = MockQbo::new(at(0));
+    for index in 0..35 {
+        qbo.seed(
+            &realm(),
+            invoice(
+                &format!("{index:03}"),
+                &format!("{}", 7000 + index),
+                100.0,
+                at(1),
+            ),
+        );
+    }
+
+    let store = store();
+    let mut driver = SyncDriver::new(
+        qbo,
+        SyncOptions {
+            page_size: 10,
+            limits: RealmLimits {
+                general: qbo_local::ratelimit::BucketBudget::per_minute(3.0),
+                ..RealmLimits::default()
+            },
+            ..SyncOptions::default()
+        },
+        at(2),
+    );
+
+    // Three pages fit the budget; the fourth is refused.
+    let outcome = driver.sync_entity_type(&store, &realm(), EntityType::Invoice, at(2));
+    assert!(matches!(
+        outcome,
+        Err(SyncError::RateBudgetExhausted { .. })
+    ));
+    assert_eq!(
+        store
+            .count_projected(&realm(), ProjectedTable::Documents)
+            .unwrap(),
+        30
+    );
+    let checkpoint = store
+        .load_sweep_checkpoint(&realm(), EntityType::Invoice)
+        .unwrap()
+        .expect("a checkpoint after a partial sweep");
+    assert_eq!(checkpoint.next_start, 30);
+    assert_eq!(checkpoint.started_at, at(2));
+
+    // An hour later: one page of overlap, then the remainder — not all four.
+    let before = driver.client_mut().query_calls;
+    let report = driver
+        .sync_entity_type(&store, &realm(), EntityType::Invoice, at(3))
+        .unwrap();
+    assert_eq!(driver.client_mut().query_calls - before, 2);
+    assert!(matches!(report.path, SyncPath::FullSweep { pages: 2, .. }));
+    assert_eq!(
+        store
+            .count_projected(&realm(), ProjectedTable::Documents)
+            .unwrap(),
+        35
+    );
+
+    // The checkpoint is gone, and the cursor is the sweep's start, so the
+    // next poll covers anything changed while it was paused.
+    assert!(store
+        .load_sweep_checkpoint(&realm(), EntityType::Invoice)
+        .unwrap()
+        .is_none());
+    let cursor = store.load_cursor(&realm(), EntityType::Invoice).unwrap();
+    assert_eq!(cursor.last_full_sweep, Some(at(2)));
+    assert_eq!(cursor.last_cdc_cursor, Some(at(2)));
+}
+
+#[test]
+fn a_checkpoint_older_than_cdc_can_reach_starts_the_sweep_over() {
+    let seeded = || {
+        let mut qbo = MockQbo::new(at(0));
+        for index in 0..15 {
+            qbo.seed(
+                &realm(),
+                invoice(
+                    &format!("{index:03}"),
+                    &format!("{}", 7100 + index),
+                    100.0,
+                    at(1),
+                ),
+            );
+        }
+        qbo
+    };
+    let store = store();
+    let mut stingy = SyncDriver::new(
+        seeded(),
+        SyncOptions {
+            page_size: 10,
+            limits: RealmLimits {
+                general: qbo_local::ratelimit::BucketBudget::per_minute(1.0),
+                ..RealmLimits::default()
+            },
+            ..SyncOptions::default()
+        },
+        at(2),
+    );
+    assert!(stingy
+        .sync_entity_type(&store, &realm(), EntityType::Invoice, at(2))
+        .is_err());
+    assert!(store
+        .load_sweep_checkpoint(&realm(), EntityType::Invoice)
+        .unwrap()
+        .is_some());
+
+    // Forty days on, CDC cannot reach back to the sweep's start, so the
+    // checkpoint cannot anchor a cursor: both pages again, from the top.
+    let much_later = at(2) + Duration::days(40);
+    let mut driver = driver(seeded(), options(10));
+    driver
+        .sync_entity_type(&store, &realm(), EntityType::Invoice, much_later)
+        .unwrap();
+    assert_eq!(driver.client_mut().query_calls, 2);
+    let cursor = store.load_cursor(&realm(), EntityType::Invoice).unwrap();
+    assert_eq!(cursor.last_full_sweep, Some(much_later));
+}
+
+#[test]
+fn records_re_mirrored_by_a_sweep_are_not_changes() {
+    // TaxCode and TaxRate are swept every tick for want of CDC coverage. The
+    // daemon must not read their re-mirrored rows as activity.
+    let mut qbo = MockQbo::new(at(0));
+    qbo.seed(&realm(), customer("31", "Blue Harbor Swim Club", at(1)));
+    let store = store();
+    let mut driver = driver(qbo, options(100));
+    let first = driver
+        .sync_realm(&store, &realm(), &[EntityType::Customer], at(2))
+        .unwrap();
+    assert_eq!(first.mirrored(), 1);
+    assert_eq!(first.changed(), 0, "a sweep is not a change");
+
+    let idle = driver
+        .sync_realm(&store, &realm(), &[EntityType::Customer], at(3))
+        .unwrap();
+    assert_eq!(idle.changed(), 0);
 }

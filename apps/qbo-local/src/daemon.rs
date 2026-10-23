@@ -18,7 +18,7 @@ use std::time::Duration;
 
 use chrono::{DateTime, NaiveDate, Timelike, Utc};
 
-use crate::client::QboClient;
+use crate::client::{QboClient, QboError};
 use crate::clock::Clock;
 use crate::domain::{EntityType, RealmId};
 use crate::driver::{SyncDriver, SyncError, SyncOptions, SyncReport};
@@ -200,11 +200,20 @@ impl<C: QboClient, K: Clock> Daemon<C, K> {
             Ok(report) => {
                 self.consecutive_failures = 0;
                 let focused = self.focus.load(Ordering::Relaxed);
-                if focused || report.mirrored() > 0 {
+                if focused || report.changed() > 0 {
                     self.options.cadence.focused
                 } else {
                     self.options.cadence.idle
                 }
+            }
+            // Nothing will be allowed out before the reset, so sleep to it
+            // rather than wake every few minutes to be refused again.
+            Err(SyncError::Qbo(QboError::DailyBudgetExhausted(exhausted))) => {
+                self.consecutive_failures = 0;
+                (exhausted.resets_at() - now)
+                    .to_std()
+                    .unwrap_or(Duration::ZERO)
+                    + Duration::from_secs(60)
             }
             Err(SyncError::RateBudgetExhausted { .. }) => self.backoff(now),
             Err(SyncError::Qbo(qbo_error)) if qbo_error.is_transient() => self.backoff(now),

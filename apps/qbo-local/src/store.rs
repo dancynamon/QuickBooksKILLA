@@ -444,7 +444,34 @@ CREATE TABLE sales_order_snapshots (
 ) STRICT;
 "#,
     },
+    Migration {
+        version: 4,
+        name: "full-sweep checkpoints, so an interrupted pull resumes",
+        sql: r#"
+-- One row per entity type with a full sweep in progress: where the next page
+-- starts, and when the sweep began. Written in the same transaction as the
+-- page it follows, deleted in the one that writes the final page's cursor.
+CREATE TABLE sweep_checkpoints (
+    realm_id     TEXT NOT NULL REFERENCES realms(realm_id),
+    entity_type  TEXT NOT NULL,
+    next_start   INTEGER NOT NULL,
+    started_at   TEXT NOT NULL,
+    PRIMARY KEY (realm_id, entity_type)
+) STRICT;
+"#,
+    },
 ];
+
+/// How far an interrupted full sweep of one entity type got.
+/// `crate::driver::SyncDriver` resumes from here instead of page one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SweepCheckpoint {
+    /// Zero-based position of the first record not yet mirrored.
+    pub next_start: usize,
+    /// When the sweep began — what its cursor will say once it finishes, so
+    /// anything changed while it was paused is picked up by the next poll.
+    pub started_at: DateTime<Utc>,
+}
 
 pub fn latest_version() -> i64 {
     MIGRATIONS.iter().map(|m| m.version).max().unwrap_or(0)
@@ -750,41 +777,75 @@ impl Store {
         now: DateTime<Utc>,
     ) -> Result<BatchReport, StoreError> {
         let transaction = self.connection.unchecked_transaction()?;
-        let mut report = BatchReport::default();
-
-        for incoming in entities {
-            let Some(entity) = &with_last_known_payload(&transaction, realm, incoming)? else {
-                // A deletion of something never mirrored: keep the tombstone,
-                // there is nothing to project or un-project.
-                upsert_entity_in(&transaction, realm, incoming, now)?;
-                clear_quarantine_in(&transaction, realm, incoming)?;
-                report.not_projected += 1;
-                report.mirrored += 1;
-                continue;
-            };
-            upsert_entity_in(&transaction, realm, entity, now)?;
-
-            match crate::project::parse(entity) {
-                Projection::Parsed(parsed) => {
-                    write_parsed(&transaction, realm, &parsed, now)?;
-                    clear_quarantine_in(&transaction, realm, entity)?;
-                    report.projected += 1;
-                }
-                Projection::NotProjected => report.not_projected += 1,
-                Projection::Quarantine(reason) => {
-                    quarantine_in(&transaction, realm, entity, &reason, now)?;
-                    report.quarantined += 1;
-                }
-            }
-            report.mirrored += 1;
-        }
-
-        if let Some(cursor) = cursor {
-            save_cursor_in(&transaction, cursor)?;
-        }
-
+        let report = apply_batch_in(&transaction, realm, entities, cursor, now)?;
         transaction.commit()?;
         Ok(report)
+    }
+
+    /// [`Store::apply_batch`] for one page of a full sweep, recording in the
+    /// same transaction where the sweep has got to. `Some(checkpoint)` means
+    /// more pages follow; `None` means this was the last one, so the
+    /// checkpoint goes and `cursor` takes over. Either way a crash leaves the
+    /// page and the checkpoint that covers it together, or neither.
+    pub fn apply_sweep_page(
+        &self,
+        realm: &RealmId,
+        entity_type: EntityType,
+        entities: &[MirroredEntity],
+        checkpoint: Option<&SweepCheckpoint>,
+        cursor: Option<&SyncCursor>,
+        now: DateTime<Utc>,
+    ) -> Result<BatchReport, StoreError> {
+        let transaction = self.connection.unchecked_transaction()?;
+        let report = apply_batch_in(&transaction, realm, entities, cursor, now)?;
+        match checkpoint {
+            Some(checkpoint) => {
+                transaction.execute(
+                    "INSERT INTO sweep_checkpoints (realm_id, entity_type, next_start, started_at)
+                     VALUES (?1, ?2, ?3, ?4)
+                     ON CONFLICT(realm_id, entity_type) DO UPDATE SET
+                         next_start = excluded.next_start,
+                         started_at = excluded.started_at",
+                    params![
+                        realm.as_str(),
+                        entity_type.as_str(),
+                        checkpoint.next_start as i64,
+                        checkpoint.started_at.to_rfc3339(),
+                    ],
+                )?;
+            }
+            None => {
+                transaction.execute(
+                    "DELETE FROM sweep_checkpoints WHERE realm_id = ?1 AND entity_type = ?2",
+                    params![realm.as_str(), entity_type.as_str()],
+                )?;
+            }
+        }
+        transaction.commit()?;
+        Ok(report)
+    }
+
+    pub fn load_sweep_checkpoint(
+        &self,
+        realm: &RealmId,
+        entity_type: EntityType,
+    ) -> Result<Option<SweepCheckpoint>, StoreError> {
+        let row = self
+            .connection
+            .query_row(
+                "SELECT next_start, started_at FROM sweep_checkpoints
+                 WHERE realm_id = ?1 AND entity_type = ?2",
+                params![realm.as_str(), entity_type.as_str()],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()?;
+        // An unreadable start time cannot anchor a cursor; start over.
+        Ok(row.and_then(|(next_start, started_at)| {
+            Some(SweepCheckpoint {
+                next_start: usize::try_from(next_start).ok()?,
+                started_at: parse_optional_timestamp(&started_at)?,
+            })
+        }))
     }
 
     pub fn load_cursor(
@@ -1508,6 +1569,49 @@ fn quarantine_in(
         ],
     )?;
     Ok(())
+}
+
+/// The body of [`Store::apply_batch`], inside a caller's transaction.
+fn apply_batch_in(
+    transaction: &rusqlite::Transaction,
+    realm: &RealmId,
+    entities: &[MirroredEntity],
+    cursor: Option<&SyncCursor>,
+    now: DateTime<Utc>,
+) -> Result<BatchReport, StoreError> {
+    let mut report = BatchReport::default();
+
+    for incoming in entities {
+        let Some(entity) = &with_last_known_payload(transaction, realm, incoming)? else {
+            // A deletion of something never mirrored: keep the tombstone,
+            // there is nothing to project or un-project.
+            upsert_entity_in(transaction, realm, incoming, now)?;
+            clear_quarantine_in(transaction, realm, incoming)?;
+            report.not_projected += 1;
+            report.mirrored += 1;
+            continue;
+        };
+        upsert_entity_in(transaction, realm, entity, now)?;
+
+        match crate::project::parse(entity) {
+            Projection::Parsed(parsed) => {
+                write_parsed(transaction, realm, &parsed, now)?;
+                clear_quarantine_in(transaction, realm, entity)?;
+                report.projected += 1;
+            }
+            Projection::NotProjected => report.not_projected += 1,
+            Projection::Quarantine(reason) => {
+                quarantine_in(transaction, realm, entity, &reason, now)?;
+                report.quarantined += 1;
+            }
+        }
+        report.mirrored += 1;
+    }
+
+    if let Some(cursor) = cursor {
+        save_cursor_in(transaction, cursor)?;
+    }
+    Ok(report)
 }
 
 fn save_cursor_in(

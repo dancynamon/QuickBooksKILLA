@@ -34,6 +34,7 @@
 //!   slice of the replica, recorded as fixtures for the scrubber
 
 pub mod auth;
+pub mod budget;
 pub mod client;
 pub mod clock;
 pub mod config;

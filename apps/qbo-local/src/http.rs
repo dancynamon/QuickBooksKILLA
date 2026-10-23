@@ -76,6 +76,7 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use crate::auth::{AuthError, RotationLogEntry, TokenGenerations, TokenSet, TokenStore};
+use crate::budget::{CallBudget, SpendError};
 use crate::client::{
     unique_name_field, EntityPayload, IndexEntry, QboClient, QboError, ReportName, ReportParams,
     UpdatedRange,
@@ -205,6 +206,8 @@ pub struct HttpQboClient {
     /// such page flips this off and every later page goes straight to the
     /// full-page index — one wasted call per client, not one per page.
     index_projection: bool,
+    /// Every request that goes on the wire spends from this first.
+    budget: CallBudget,
 }
 
 impl HttpQboClient {
@@ -226,7 +229,15 @@ impl HttpQboClient {
             minor_version: DEFAULT_MINOR_VERSION,
             rotation_log: rotation_log.into(),
             index_projection: true,
+            budget: CallBudget::unlimited(),
         }
+    }
+
+    /// Cap the calls this client may make per UTC day ([`crate::budget`]).
+    /// Every live path sets one; [`Self::new`] alone is unlimited.
+    pub fn with_call_budget(mut self, budget: CallBudget) -> Self {
+        self.budget = budget;
+        self
     }
 
     pub fn with_minor_version(mut self, minor_version: u32) -> Self {
@@ -338,13 +349,26 @@ impl HttpQboClient {
     }
 
     fn attempt(
-        &self,
+        &mut self,
         method: Method,
         path: &str,
         query: &[(String, String)],
         body: Option<&Value>,
         token: &str,
     ) -> Result<Value, AttemptError> {
+        // Counted here, per attempt, so the 401 retry pays too: Intuit
+        // counts it.
+        match self.budget.spend(Utc::now()) {
+            Ok(_) => {}
+            Err(SpendError::Exhausted(exhausted)) => {
+                return Err(AttemptError::BudgetExhausted(exhausted))
+            }
+            Err(SpendError::Ledger(error)) => {
+                return Err(AttemptError::Network(format!(
+                    "call budget ledger: {error}"
+                )))
+            }
+        }
         let url = format!("{}{}", self.base, path);
         let mut request = match method {
             Method::Get => self.agent.get(&url),
@@ -392,6 +416,7 @@ enum AttemptError {
     StaleSyncToken,
     Validation(String),
     Network(String),
+    BudgetExhausted(crate::budget::BudgetExhausted),
 }
 
 impl AttemptError {
@@ -408,6 +433,7 @@ impl AttemptError {
             AttemptError::StaleSyncToken => QboError::StaleSyncToken,
             AttemptError::Validation(detail) => QboError::Validation(detail),
             AttemptError::Network(detail) => QboError::Network(detail),
+            AttemptError::BudgetExhausted(exhausted) => QboError::DailyBudgetExhausted(exhausted),
         }
     }
 }

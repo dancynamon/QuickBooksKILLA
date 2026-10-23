@@ -101,6 +101,11 @@ pub enum QboError {
     Network(String),
     #[error("not found")]
     NotFound,
+    /// The day's Intuit call ceiling is spent ([`crate::budget`]). Refused
+    /// locally, before any request goes out. Not transient: retrying before
+    /// the next UTC day gets the same answer.
+    #[error("{0}")]
+    DailyBudgetExhausted(crate::budget::BudgetExhausted),
 }
 
 impl QboError {

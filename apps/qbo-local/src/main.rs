@@ -126,6 +126,10 @@ enum Command {
         config: Option<PathBuf>,
         force: bool,
     },
+    Whoami {
+        realm: RealmId,
+        config: Option<PathBuf>,
+    },
     Daemon {
         db: PathBuf,
         realm: RealmId,
@@ -243,6 +247,7 @@ USAGE:
     qbo-local init --db PATH --realm ID --name \"Display Name\"
     qbo-local auth --realm ID [--port N] [--config PATH]
     qbo-local import-token --realm ID [--config PATH] [--force] < refresh-token
+    qbo-local whoami --realm ID [--config PATH]
     qbo-local daemon --db PATH --realm ID [--focused-secs N] [--idle-secs N]
                       [--snapshot-dir DIR --keep N] [--snapshot-hour-utc H]
                       [--once] (--live [--config PATH] | --mock)
@@ -421,6 +426,7 @@ fn parse(args: &[String]) -> Result<Command, UsageError> {
         "init" => parse_init(args),
         "auth" => parse_auth(args),
         "import-token" => parse_import_token(args),
+        "whoami" => parse_whoami(args),
         "daemon" => parse_daemon(args),
         "sweep" => parse_sweep(args),
         "snapshot" => parse_snapshot(args),
@@ -505,6 +511,22 @@ fn parse_import_token(mut args: Args<'_>) -> Result<Command, UsageError> {
         realm: realm.ok_or_else(|| UsageError::missing_flag("--realm"))?,
         config,
         force,
+    })
+}
+
+fn parse_whoami(mut args: Args<'_>) -> Result<Command, UsageError> {
+    let mut realm = None;
+    let mut config = None;
+    while let Some(flag) = args.next() {
+        match flag.as_str() {
+            "--realm" => realm = Some(parse_realm(&next_value(&mut args, "--realm")?)?),
+            "--config" => config = Some(PathBuf::from(next_value(&mut args, "--config")?)),
+            other => return Err(UsageError::unknown_flag(other)),
+        }
+    }
+    Ok(Command::Whoami {
+        realm: realm.ok_or_else(|| UsageError::missing_flag("--realm"))?,
+        config,
     })
 }
 
@@ -924,6 +946,7 @@ fn execute(command: Command) -> Result<(), CommandError> {
             config,
             force,
         } => run_import_token(&realm, config.as_deref(), force),
+        Command::Whoami { realm, config } => run_whoami(&realm, config.as_deref()),
         Command::Daemon {
             db,
             realm,
@@ -1029,16 +1052,25 @@ fn build_http_client(
     // Validates that `realm` is one this config file actually lists, so a
     // typo'd --realm fails loudly here rather than as a confusing empty sync.
     config.realm(realm.as_str()).map_err(runtime)?;
-    let secret = config.client_secret().map_err(runtime)?;
+    let app = config.credentials().map_err(runtime)?;
+    let budget = config.call_budget();
+    // On stderr, so it lands at the top of the daemon log: which app this
+    // process spends, and how much of today's ceiling is already gone.
+    eprintln!(
+        "qbo-local: Intuit app {} (from the {}); {}/{} calls used today (UTC)",
+        app.client_id,
+        app.source,
+        budget.used(Utc::now()).map_err(runtime)?,
+        budget.limit()
+    );
     let redirect_uri = format!("http://localhost:{}/callback", config.intuit.redirect_port);
-    let oauth_config = OAuthConfig::intuit(config.intuit.client_id.clone(), secret, redirect_uri);
+    let oauth_config = OAuthConfig::intuit(app.client_id, app.client_secret, redirect_uri);
     let (token_store, _) = open_token_store(&config)?;
     let tokens = TokenSource::new(token_store, oauth_config, realm.clone());
-    Ok(HttpQboClient::new(
-        config.base_url(),
-        tokens,
-        config.rotation_log.clone(),
-    ))
+    Ok(
+        HttpQboClient::new(config.base_url(), tokens, config.rotation_log.clone())
+            .with_call_budget(budget),
+    )
 }
 
 /// The token store `config` selects (`token_store`, defaulting to the
@@ -1053,7 +1085,9 @@ fn open_token_store(config: &LocalConfig) -> Result<(Box<dyn TokenStore>, String
         )),
         #[cfg(target_os = "macos")]
         TokenStoreKind::Keychain => {
-            let store = qbo_local::keychain::KeychainTokenStore::new();
+            let store = qbo_local::keychain::KeychainTokenStore::with_service(
+                &config.intuit.token_keychain_service,
+            );
             let description = format!("macOS keychain, service {}", store.service());
             Ok((Box::new(store), description))
         }
@@ -1270,10 +1304,11 @@ fn run_auth(
 ) -> Result<(), CommandError> {
     let path = config_path.unwrap_or(Path::new(DEFAULT_CONFIG_PATH));
     let config = LocalConfig::load(path).map_err(runtime)?;
-    let secret = config.client_secret().map_err(runtime)?;
+    let app = config.credentials().map_err(runtime)?;
     let port = port.unwrap_or(config.intuit.redirect_port);
     let redirect_uri = format!("http://localhost:{port}/callback");
-    let oauth_config = OAuthConfig::intuit(config.intuit.client_id.clone(), secret, redirect_uri);
+    println!("Intuit app {} (from the {})", app.client_id, app.source);
+    let oauth_config = OAuthConfig::intuit(app.client_id, app.client_secret, redirect_uri);
 
     let state = Uuid::now_v7().to_string();
     println!("Open this URL to authorize qbo-local for realm {realm}:\n");
@@ -1348,9 +1383,9 @@ fn run_import_token(
         ));
     }
 
-    let secret = config.client_secret().map_err(runtime)?;
+    let app = config.credentials().map_err(runtime)?;
     let redirect_uri = format!("http://localhost:{}/callback", config.intuit.redirect_port);
-    let oauth_config = OAuthConfig::intuit(config.intuit.client_id.clone(), secret, redirect_uri);
+    let oauth_config = OAuthConfig::intuit(app.client_id, app.client_secret, redirect_uri);
     let agent = ureq::AgentBuilder::new().build();
     let token_set = oauth::refresh(&oauth_config, refresh_token, &agent).map_err(runtime)?;
 
@@ -1361,6 +1396,22 @@ fn run_import_token(
         generations.current.fingerprint(),
         generations.current.refresh_expires_at().to_rfc3339()
     );
+    Ok(())
+}
+
+// -- whoami -----------------------------------------------------------------
+
+/// One `CompanyInfo` read, through the same client every live path builds:
+/// proves the stored tokens work for this app and this company, for the
+/// price of one call against the budget.
+fn run_whoami(realm: &RealmId, config: Option<&Path>) -> Result<(), CommandError> {
+    let mut client = build_http_client(config, realm)?;
+    let info = client
+        .fetch(realm, EntityType::CompanyInfo, realm.as_str())
+        .map_err(runtime)?
+        .ok_or_else(|| CommandError::Runtime(format!("no CompanyInfo for realm {realm}")))?;
+    let name = info.raw_json["CompanyName"].as_str().unwrap_or("?");
+    println!("realm {realm}: {name} (CompanyInfo read with the app above)");
     Ok(())
 }
 

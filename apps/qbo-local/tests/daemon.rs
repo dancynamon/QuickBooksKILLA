@@ -76,17 +76,62 @@ fn daemon_at(qbo: MockQbo, clock: FakeClock, sync: SyncOptions) -> Daemon<MockQb
 // ---------------------------------------------------------------------------
 
 #[test]
-fn a_tick_that_mirrors_something_polls_again_on_the_focused_cadence() {
+fn a_tick_that_finds_a_change_polls_again_on_the_focused_cadence() {
     let mut qbo = MockQbo::new(day_start(1, 0));
     qbo.seed(&realm(), invoice("1", day_start(1, 0)));
 
     let store = store();
-    let clock = FakeClock::new(day_start(1, 0));
+    let clock = FakeClock::new(day_start(1, 1));
+    let mut daemon = daemon_at(qbo, clock.clone(), generous_sync_options());
+    daemon.tick(&store, &realm());
+
+    // A new invoice after the first sweep reaches the replica through CDC.
+    clock.advance(Duration::from_secs(300));
+    daemon.client_mut().advance(day_start(1, 2));
+    daemon.client_mut().seed(
+        &realm(),
+        invoice("2", day_start(1, 1) + chrono::Duration::minutes(2)),
+    );
+
+    let tick = daemon.tick(&store, &realm());
+    assert!(tick.report.as_ref().unwrap().changed() > 0);
+    assert_eq!(tick.next_delay, Cadence::default().focused);
+}
+
+#[test]
+fn a_tick_of_sweeps_alone_is_not_activity() {
+    // October 2026: re-mirrored sweep rows read as activity held the daemon
+    // at fifteen seconds for days, about 125,000 calls a day.
+    let mut qbo = MockQbo::new(day_start(1, 0));
+    qbo.seed(&realm(), invoice("1", day_start(1, 0)));
+
+    let store = store();
+    let clock = FakeClock::new(day_start(1, 1));
     let mut daemon = daemon_at(qbo, clock, generous_sync_options());
 
     let tick = daemon.tick(&store, &realm());
     assert!(tick.report.as_ref().unwrap().mirrored() > 0);
-    assert_eq!(tick.next_delay, Cadence::default().focused);
+    assert_eq!(tick.report.as_ref().unwrap().changed(), 0);
+    assert_eq!(tick.next_delay, Cadence::default().idle);
+}
+
+#[test]
+fn a_spent_daily_budget_sleeps_until_the_utc_reset() {
+    let mut qbo = MockQbo::new(day_start(1, 0));
+    qbo.fail_next(QboError::DailyBudgetExhausted(
+        qbo_local::budget::BudgetExhausted {
+            day: day_start(1, 0).date_naive(),
+            used: 15_000,
+            limit: 15_000,
+        },
+    ));
+    let store = store();
+    let clock = FakeClock::new(day_start(1, 18));
+    let mut daemon = daemon_at(qbo, clock, generous_sync_options());
+
+    let tick = daemon.tick(&store, &realm());
+    assert!(tick.report.is_err());
+    assert_eq!(tick.next_delay, Duration::from_secs(6 * 3600 + 60));
 }
 
 #[test]

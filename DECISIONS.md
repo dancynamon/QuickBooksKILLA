@@ -1691,3 +1691,43 @@ backup loop walks `EntityType::ALL` against v3, which answers 400 for it.
   kept in the raw feed but not carried into the ledger; Aquamentor puts
   shipping on an item line. An order with either needs a look at conversion.
 - The desktop app has no sales-order screen yet; the parent session adds it.
+
+## D43 — BunzBooks has its own Intuit app, a daily call ceiling, and resumable sweeps
+
+**Why.** On 23 Oct 2026 the Intuit app qbo-local shared with the QuickBooks
+MCPs hit its monthly 500,000 CorePlus calls (429, ThrottleExceeded 003001),
+which took every QBO API path on the Mac down with it. The spender was
+`qbo-local daemon --live`: `apply_batch` counts every re-mirrored row, TaxCode
+and TaxRate are full-swept on every tick for want of CDC coverage, so
+`report.mirrored() > 0` was true on every tick and the daemon never left the
+15-second focused cadence — about 24 calls a tick, roughly 125,000 a day.
+
+**What.**
+
+1. *Its own app.* `LocalConfig::credentials` reads BunzBooks' app from the
+   login keychain (service `bunzbooks-intuit-app`, accounts `client_id`,
+   `client_secret`) or from `BUNZBOOKS_QBO_CLIENT_ID` /
+   `BUNZBOOKS_QBO_CLIENT_SECRET`. A config file that still sets
+   `[intuit].client_id` or `client_secret` is refused, so an old config
+   cannot quietly put the shared app back; `QBO_CLIENT_*`, which other tools
+   use, is not read. Tokens move to keychain service `bunzbooks-qbo-tokens`;
+   `com.aquamentor.qbo-local.tokens` holds the shared app's and is left
+   alone.
+2. *A ceiling.* `budget::CallBudget` counts every request that goes on the
+   wire (the 401 retry included) in `.local/call-budget.json`, per UTC day,
+   re-read before each call so concurrent processes share it. At
+   `[budget].daily_calls` (default 15,000) calls are refused locally with
+   `QboError::DailyBudgetExhausted`, a `STOP` line goes to stderr once, and
+   the daemon sleeps to midnight UTC. A warning line at 80%.
+3. *Cadence on change, not on mirroring.* The daemon goes focused on
+   `SyncReport::changed()`, which leaves out full-sweep rows.
+4. *Resumable sweeps.* A full sweep writes `sweep_checkpoints` (migration 4)
+   in the same transaction as each page and resumes from it, backing up one
+   page so a deletion during the pause cannot slide a record past the
+   boundary. It keeps its original start time for the cursor it finally
+   writes, so changes made while paused reach the next poll. A checkpoint
+   older than `cdc_max_age` is dropped and the sweep starts over.
+
+*Rejected: a smaller per-minute bucket instead of a daily ceiling.* The
+per-minute limiter was never the problem — 90 calls a minute is well under
+it. Only a figure that adds up across days protects a monthly quota.

@@ -14,7 +14,7 @@ use thiserror::Error;
 use crate::client::{EntityPayload, QboClient, QboError, UpdatedRange};
 use crate::domain::{EntityType, RealmId};
 use crate::ratelimit::{BucketClass, RealmLimiter, RealmLimits};
-use crate::store::{MirroredEntity, Store, StoreError};
+use crate::store::{MirroredEntity, Store, StoreError, SweepCheckpoint};
 use crate::sync::{
     cdc_coverage_confirmed, classify_response_with_cap, plan_sync, CdcOutcome, SweepReason,
     SyncCursor, SyncStrategy, CDC_RESPONSE_CAP, DEFAULT_CDC_MAX_AGE_DAYS,
@@ -102,6 +102,19 @@ impl SyncReport {
 
     pub fn requests(&self) -> usize {
         self.entities.iter().map(|report| report.requests).sum()
+    }
+
+    /// Records that came back because they changed: everything mirrored
+    /// except by a full sweep, which re-mirrors every record whether it
+    /// changed or not. The daemon's cadence keys off this, not
+    /// [`Self::mirrored`] — keyed off that, the types swept every tick for
+    /// want of CDC coverage held it at the focused cadence forever.
+    pub fn changed(&self) -> usize {
+        self.entities
+            .iter()
+            .filter(|report| !matches!(report.path, SyncPath::FullSweep { .. }))
+            .map(|report| report.mirrored)
+            .sum()
     }
 }
 
@@ -197,7 +210,23 @@ impl<C: QboClient> SyncDriver<C> {
             requests: 0,
         };
 
-        let mut start = 0usize;
+        // An interrupted sweep — out of budget, throttled, killed — resumes
+        // where it stopped rather than from page one. It keeps its original
+        // start time, so the cursor it finally writes still covers anything
+        // changed while it was paused. A checkpoint older than CDC can reach
+        // back is no use for that, so it is dropped and the sweep starts over.
+        let resumed = store
+            .load_sweep_checkpoint(realm, entity_type)?
+            .filter(|checkpoint| now - checkpoint.started_at < self.options.cdc_max_age);
+        let started_at = resumed
+            .as_ref()
+            .map_or(now, |checkpoint| checkpoint.started_at);
+        // Back up one page: pages are ordered by Id, so a record deleted
+        // during the pause shifts every later one down a position, and an
+        // exact resume would skip whichever record slid across the boundary.
+        let mut start = resumed.map_or(0, |checkpoint| {
+            checkpoint.next_start.saturating_sub(self.options.page_size)
+        });
         let mut pages = 0usize;
 
         loop {
@@ -213,11 +242,26 @@ impl<C: QboClient> SyncDriver<C> {
             let cursor = final_page.then(|| SyncCursor {
                 realm_id: realm.clone(),
                 entity_type,
-                last_cdc_cursor: Some(now),
-                last_full_sweep: Some(now),
+                last_cdc_cursor: Some(started_at),
+                last_full_sweep: Some(started_at),
+            });
+            let checkpoint = (!final_page).then(|| SweepCheckpoint {
+                next_start: start + returned,
+                started_at,
             });
 
-            self.apply(store, realm, &page, cursor.as_ref(), now, &mut report)?;
+            let entities: Vec<MirroredEntity> = page.into_iter().map(mirrored).collect();
+            let applied = store.apply_sweep_page(
+                realm,
+                entity_type,
+                &entities,
+                checkpoint.as_ref(),
+                cursor.as_ref(),
+                now,
+            )?;
+            report.mirrored += applied.mirrored;
+            report.projected += applied.projected;
+            report.quarantined += applied.quarantined;
 
             if final_page {
                 break;
