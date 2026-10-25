@@ -404,7 +404,7 @@ pub fn dispatch_at(store: &Store, command: &str, args: Value, now: chrono::DateT
         ),
         "status" => {
             let args: RealmArgs = parse(args)?;
-            let status = store.sync_status(&realm(&args.realm)?)?;
+            let status = store.replica_sync_status(&realm(&args.realm)?)?;
             let last_synced = status
                 .entity_types
                 .iter()

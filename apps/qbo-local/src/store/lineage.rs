@@ -18,7 +18,7 @@ use crate::domain::RealmId;
 /// wire — `BillPaymentCheck`, `Check`, `ReimburseCharge` and others appear here
 /// and map to no single entity endpoint. Narrowing it would mean either
 /// dropping edges or inventing a mapping; the payload's own word is kept.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct DocumentLink {
     pub from_qbo_id: String,
     pub from_type: String,
@@ -30,7 +30,7 @@ pub struct DocumentLink {
 }
 
 /// The connected component around one document.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct Lineage {
     pub root: String,
     /// Every reachable document this replica actually holds, root included.

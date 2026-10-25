@@ -6,19 +6,19 @@ description = "Local SQLite replica of QuickBooks Online with an outbox write qu
 
 [dependencies]
 ledger-core = { path = "../../crates/ledger-core" }
+mcp-stdio = { workspace = true }
 chrono = { workspace = true }
 rusqlite = { workspace = true }
 rust_decimal = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+toml = { workspace = true }
+ureq = { workspace = true }
 uuid = { workspace = true }
-ureq = { version = "2.12", optional = true }
 
-[features]
-# The real HTTP transport. Off by default so `cargo test` has no way to reach
-# Intuit and compiles no TLS stack.
-live = ["dep:ureq"]
+[target.'cfg(target_os = "macos")'.dependencies]
+security-framework = "3"
 
 [dev-dependencies]
 rust_decimal_macros = { workspace = true }
@@ -32,3 +32,11 @@ path = "src/lib.rs"
 [[bin]]
 name = "qbo-local"
 path = "src/main.rs"
+
+[[bin]]
+name = "qbo-local-mcp"
+path = "src/bin/qbo-local-mcp.rs"
+
+[[bin]]
+name = "chaos-child"
+path = "src/bin/chaos-child.rs"

@@ -118,7 +118,16 @@ impl OutboxState {
     }
 }
 
+#[derive(Copy, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum Operation {
+    Create,
+    Update,
+    // No delete or void in v1 — destructive changes happen in QBO's web UI
+    // where the confirmation dialogs live (DESIGN.md §8).
+}
+
 impl Operation {
+    /// The value stored in the `outbox.operation` column.
     pub const fn as_str(self) -> &'static str {
         match self {
             Operation::Create => "create",
@@ -133,14 +142,6 @@ impl Operation {
             _ => None,
         }
     }
-}
-
-#[derive(Copy, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
-pub enum Operation {
-    Create,
-    Update,
-    // No delete or void in v1 — destructive changes happen in QBO's web UI
-    // where the confirmation dialogs live (DESIGN.md §8).
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -283,6 +284,20 @@ impl OutboxRecord {
         self.transition(next, now)
     }
 
+    /// Recover a record found `in_flight` at process start (`DESIGN.md` §6.1):
+    /// whatever process owned that attempt is gone, and nobody knows whether
+    /// its request reached QBO before it died. This returns the record to
+    /// `pending` rather than either assuming success or blindly resending —
+    /// the resend safety comes from the guards that already run on *every*
+    /// attempt, recovery included: `RequestId` reuse (`§6.2`) replays a
+    /// completed create or update instead of repeating it, and Customer/Item
+    /// creates query for an existing match before creating (§6.5). Recovery's
+    /// job is only to stop the record being permanently stuck in a state nothing
+    /// drains.
+    pub fn recover_in_flight(&mut self, now: DateTime<Utc>) -> Result<(), OutboxError> {
+        self.transition(OutboxState::Pending, now)
+    }
+
     /// Re-queue a record after human resolution in the failure inbox.
     pub fn resolve(&mut self, now: DateTime<Utc>) -> Result<(), OutboxError> {
         self.attempts = 0;
@@ -293,19 +308,6 @@ impl OutboxRecord {
     /// A person chose to drop a failed write (§6.6). Never automatic.
     pub fn discard(&mut self, now: DateTime<Utc>) -> Result<(), OutboxError> {
         self.transition(OutboxState::Discarded, now)
-    }
-
-    /// Recovery at startup for a record a crash left `in_flight` (§6.1).
-    ///
-    /// Back to `pending`, and the next drain resends it with the **same**
-    /// `RequestId`, which Intuit replays rather than repeats. Customer and Item
-    /// are not covered by that replay, and for them the drain path queries by
-    /// name before any create, so the resend adopts instead of duplicating.
-    pub fn recover_in_flight(&mut self, now: DateTime<Utc>) -> Result<(), OutboxError> {
-        if self.state != OutboxState::InFlight {
-            return Ok(());
-        }
-        self.transition(OutboxState::Pending, now)
     }
 
     /// Whether a create of this record must query QBO for an existing match
@@ -417,10 +419,15 @@ mod tests {
     fn a_stale_sync_token_always_conflicts_and_never_overwrites() {
         let mut record = record(EntityType::Invoice, Operation::Update);
         record.begin_attempt(true, now()).unwrap();
-        record.mark_failed(DrainFailure::StaleSyncToken, now()).unwrap();
+        record
+            .mark_failed(DrainFailure::StaleSyncToken, now())
+            .unwrap();
         assert_eq!(record.state, OutboxState::Conflicted);
         assert!(record.state.needs_attention());
-        assert!(!record.is_eligible(true), "must not silently retry over the edit");
+        assert!(
+            !record.is_eligible(true),
+            "must not silently retry over the edit"
+        );
     }
 
     #[test]
@@ -429,7 +436,9 @@ mod tests {
         // name, so it must not be subject to the transient retry budget.
         let mut record = record(EntityType::Invoice, Operation::Update);
         record.begin_attempt(true, now()).unwrap();
-        record.mark_failed(DrainFailure::StaleSyncToken, now()).unwrap();
+        record
+            .mark_failed(DrainFailure::StaleSyncToken, now())
+            .unwrap();
         assert_eq!(record.attempts, 1);
         assert_eq!(record.state, OutboxState::Conflicted);
     }
@@ -438,7 +447,9 @@ mod tests {
     fn resolution_requeues_and_clears_the_retry_budget() {
         let mut record = record(EntityType::Invoice, Operation::Update);
         record.begin_attempt(true, now()).unwrap();
-        record.mark_failed(DrainFailure::StaleSyncToken, now()).unwrap();
+        record
+            .mark_failed(DrainFailure::StaleSyncToken, now())
+            .unwrap();
         record.resolve(now()).unwrap();
         assert_eq!(record.state, OutboxState::Pending);
         assert_eq!(record.attempts, 0);
@@ -450,16 +461,21 @@ mod tests {
     fn a_dependent_record_waits_for_its_parent() {
         // The canonical case: create a customer, immediately invoice them.
         let customer = record(EntityType::Customer, Operation::Create);
-        let mut invoice =
-            record(EntityType::Invoice, Operation::Create).depending_on(customer.id);
+        let mut invoice = record(EntityType::Invoice, Operation::Create).depending_on(customer.id);
 
-        assert!(!invoice.is_eligible(false), "must not drain before the customer");
+        assert!(
+            !invoice.is_eligible(false),
+            "must not drain before the customer"
+        );
         assert_eq!(
             invoice.begin_attempt(false, now()),
             Err(OutboxError::DependencyNotSatisfied(invoice.id))
         );
         assert_eq!(invoice.state, OutboxState::Pending);
-        assert_eq!(invoice.attempts, 0, "a blocked record burns no retry budget");
+        assert_eq!(
+            invoice.attempts, 0,
+            "a blocked record burns no retry budget"
+        );
 
         assert!(invoice.is_eligible(true));
         invoice.begin_attempt(true, now()).unwrap();
@@ -478,6 +494,43 @@ mod tests {
     }
 
     #[test]
+    fn operation_and_state_strings_round_trip() {
+        for op in [Operation::Create, Operation::Update] {
+            assert_eq!(Operation::parse(op.as_str()), Some(op));
+        }
+        assert_eq!(Operation::parse("delete"), None);
+
+        for state in ALL_STATES {
+            assert_eq!(OutboxState::parse(state.as_str()), Some(state));
+        }
+        assert_eq!(OutboxState::parse("bogus"), None);
+    }
+
+    #[test]
+    fn recovering_an_in_flight_record_returns_it_to_the_queue() {
+        // The chaos test's crash window: a process died between the remote
+        // call and the local commit. Recovery must not leave the record stuck
+        // in_flight, and must not mark it applied on a guess either.
+        let mut record = record(EntityType::Invoice, Operation::Create);
+        record.begin_attempt(true, now()).unwrap();
+        assert_eq!(record.state, OutboxState::InFlight);
+
+        record.recover_in_flight(now()).unwrap();
+        assert_eq!(record.state, OutboxState::Pending);
+        assert!(record.is_eligible(true));
+        assert_eq!(record.attempts, 1, "the burned attempt is not refunded");
+    }
+
+    #[test]
+    fn recovery_only_applies_to_in_flight_records() {
+        let mut record = record(EntityType::Invoice, Operation::Create);
+        assert!(matches!(
+            record.recover_in_flight(now()),
+            Err(OutboxError::IllegalTransition { .. })
+        ));
+    }
+
+    #[test]
     fn illegal_transitions_are_refused() {
         let mut record = record(EntityType::Invoice, Operation::Create);
         // Cannot apply a record that was never in flight.
@@ -485,7 +538,11 @@ mod tests {
             record.mark_applied(now()),
             Err(OutboxError::IllegalTransition { .. })
         ));
-        assert_eq!(record.state, OutboxState::Pending, "state unchanged on refusal");
+        assert_eq!(
+            record.state,
+            OutboxState::Pending,
+            "state unchanged on refusal"
+        );
 
         // Cannot begin an attempt on a record already in flight.
         record.begin_attempt(true, now()).unwrap();

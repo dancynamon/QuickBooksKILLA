@@ -13,7 +13,7 @@ use chrono::{DateTime, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::client::{EntityPayload, QboClient, QboError, UpdatedRange};
+use crate::client::{EntityPayload, IndexEntry, QboClient, QboError, ReportName, ReportParams, UpdatedRange};
 use crate::domain::{EntityType, RealmId};
 use crate::store::{Store, StoreError};
 
@@ -194,6 +194,34 @@ impl<C: QboClient> QboClient for AuditedClient<C> {
     ) -> Result<Option<EntityPayload>, QboError> {
         self.inner.find_by_name(realm, entity_type, name)
     }
+
+    fn index(
+        &mut self,
+        realm: &RealmId,
+        entity_type: EntityType,
+        start_position: usize,
+        max_results: usize,
+    ) -> Result<Vec<IndexEntry>, QboError> {
+        self.inner.index(realm, entity_type, start_position, max_results)
+    }
+
+    fn fetch(
+        &mut self,
+        realm: &RealmId,
+        entity_type: EntityType,
+        qbo_id: &str,
+    ) -> Result<Option<EntityPayload>, QboError> {
+        self.inner.fetch(realm, entity_type, qbo_id)
+    }
+
+    fn report(
+        &mut self,
+        realm: &RealmId,
+        name: ReportName,
+        params: &ReportParams,
+    ) -> Result<serde_json::Value, QboError> {
+        self.inner.report(realm, name, params)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -238,7 +266,7 @@ pub fn snapshot_and_rotate(
     let written = if today.exists() {
         None
     } else {
-        store.snapshot_to(&today)?;
+        store.vacuum_into(&today)?;
         Some(today)
     };
 

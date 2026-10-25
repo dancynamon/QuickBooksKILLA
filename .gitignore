@@ -2,6 +2,8 @@
 /target
 crates/*/target
 apps/*/target
+apps/desktop/src-tauri/target
+apps/desktop/src-tauri/gen
 
 # Node
 node_modules/
@@ -9,6 +11,10 @@ dist/
 
 # Tauri's generated capability schemas
 apps/qbo-local-desktop/gen/
+
+# Python — tools/*.py are test-covered scripts, not a package
+__pycache__/
+*.pyc
 
 # SQLite — the replica and its sidecars never belong in git
 *.db
@@ -35,7 +41,14 @@ rotation-*.jsonl
 # Snapshots carry customer names, balances and purchase-order numbers; a
 # private repo is still permanent and may later be shared with a contractor.
 # One ignored directory beats a list of filenames someone will forget to add to.
-.local/
+#
+# The one exception is the example config template — no real values, meant to
+# be copied to .local/config.toml and filled in locally.
+.local/*
+!.local/config.example.toml
 
 # OS
 .DS_Store
+
+# Agent worktrees created by Claude Code sessions
+.claude/worktrees/

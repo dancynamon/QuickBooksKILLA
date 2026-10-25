@@ -102,7 +102,7 @@ impl<C: QboClient> SyncDriver<C> {
             start += returned;
         }
 
-        let local = store.entity_index(realm, entity_type)?;
+        let local = store.indexed_entities(realm, entity_type)?;
         let local_by_id: HashMap<&str, _> =
             local.iter().map(|row| (row.qbo_id.as_str(), row)).collect();
 
@@ -189,7 +189,7 @@ impl<C: QboClient> SyncDriver<C> {
         for entity_type in ordered {
             reports.push(self.reconcile_entity_type(store, realm, entity_type, now)?);
         }
-        Ok((reports, store.orphaned_lines(realm)?))
+        Ok((reports, store.orphaned_line_count(realm)?))
     }
 }
 

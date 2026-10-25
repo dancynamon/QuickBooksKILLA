@@ -164,12 +164,11 @@ pub struct ParsedLink {
 pub fn parse(entity: &MirroredEntity) -> Projection {
     let raw = &entity.raw_json;
     let result = match entity.entity_type {
-        EntityType::Customer => parse_contact(raw, entity, ContactType::Customer).map(|c| {
-            Some(ParsedEntity::Contact(c))
-        }),
-        EntityType::Vendor => parse_contact(raw, entity, ContactType::Vendor).map(|c| {
-            Some(ParsedEntity::Contact(c))
-        }),
+        EntityType::Customer => parse_contact(raw, entity, ContactType::Customer)
+            .map(|c| Some(ParsedEntity::Contact(c))),
+        EntityType::Vendor => {
+            parse_contact(raw, entity, ContactType::Vendor).map(|c| Some(ParsedEntity::Contact(c)))
+        }
         EntityType::Item => parse_item(raw, entity).map(|i| Some(ParsedEntity::Item(i))),
         EntityType::Account => parse_account(raw, entity).map(|a| Some(ParsedEntity::Account(a))),
         EntityType::Class => parse_class(raw, entity).map(|c| Some(ParsedEntity::Class(c))),
@@ -267,7 +266,16 @@ fn parse_document(
     // A total we could not read is not zero. Refusing here sends the row to
     // quarantine with its raw JSON intact, which is recoverable; writing a
     // wrong number into the projection is not.
-    let total = required_money(raw, "TotalAmt", entity)?;
+    let total = match doc_type {
+        // D37: these two state their one amount as `Amount`, not `TotalAmt`.
+        DocumentType::Transfer | DocumentType::CreditCardPayment => {
+            required_money(raw, "Amount", entity)?
+        }
+        // An inventory adjustment states quantities only; QBO values it
+        // itself and puts no amount anywhere on the payload.
+        DocumentType::InventoryAdjustment => Money::ZERO,
+        _ => required_money(raw, "TotalAmt", entity)?,
+    };
 
     let lines = parse_lines(raw)?;
     let links = parse_links(raw);
@@ -298,7 +306,8 @@ fn parse_document(
 ///
 /// `Purchase` is the awkward one: its `EntityRef` may be a vendor, a customer
 /// or an employee, so the payload's own `type` decides rather than the document
-/// type. `Deposit` and `JournalEntry` face nobody.
+/// type. `Deposit`, `JournalEntry`, `Transfer` and `InventoryAdjustment` face
+/// nobody; a `CreditCardPayment` may name the card's vendor.
 fn contact_of(raw: &Value, doc_type: DocumentType) -> (Option<ContactType>, Option<String>) {
     use DocumentType as D;
     match doc_type {
@@ -308,7 +317,7 @@ fn contact_of(raw: &Value, doc_type: DocumentType) -> (Option<ContactType>, Opti
         | D::CreditMemo
         | D::RefundReceipt
         | D::Payment => (Some(ContactType::Customer), reference(raw, "CustomerRef")),
-        D::PurchaseOrder | D::Bill | D::BillPayment | D::VendorCredit => {
+        D::PurchaseOrder | D::Bill | D::BillPayment | D::VendorCredit | D::CreditCardPayment => {
             (Some(ContactType::Vendor), reference(raw, "VendorRef"))
         }
         D::Purchase => {
@@ -321,7 +330,7 @@ fn contact_of(raw: &Value, doc_type: DocumentType) -> (Option<ContactType>, Opti
                 None => (None, None),
             }
         }
-        D::Deposit | D::JournalEntry => (None, None),
+        D::Deposit | D::JournalEntry | D::Transfer | D::InventoryAdjustment => (None, None),
     }
 }
 
@@ -345,7 +354,11 @@ fn parse_lines(raw: &Value) -> Result<Vec<ParsedLine>, ProjectError> {
             line_no: line_number(line, index),
             item_id: detail.and_then(|d| reference(d, "ItemRef")),
             description: text(line, "Description"),
-            qty: detail.map(|d| optional_decimal(d, "Qty")).transpose()?.flatten(),
+            // An inventory adjustment line's quantity is its signed `QtyDiff`.
+            qty: match detail {
+                Some(d) => optional_decimal(d, "Qty")?.or(optional_decimal(d, "QtyDiff")?),
+                None => None,
+            },
             unit_price: detail
                 .map(|d| optional_decimal(d, "UnitPrice"))
                 .transpose()?
@@ -657,7 +670,12 @@ mod tests {
         let document = document_of(&entity(EntityType::Invoice, "418", invoice_payload()));
         assert_eq!(document.po_number.as_deref(), Some("BH-99214"));
 
-        for name in ["PO Number", "ponumber", "P.O. NUMBER", "Purchase Order Number"] {
+        for name in [
+            "PO Number",
+            "ponumber",
+            "P.O. NUMBER",
+            "Purchase Order Number",
+        ] {
             let mut payload = invoice_payload();
             payload["CustomField"][0]["Name"] = json!(name);
             let document = document_of(&entity(EntityType::Invoice, "418", payload));
@@ -740,8 +758,16 @@ mod tests {
         assert_eq!(
             document.links,
             vec![
-                ParsedLink { to_qbo_id: "801".into(), to_type: "Bill".into(), line_no: Some(1) },
-                ParsedLink { to_qbo_id: "812".into(), to_type: "Bill".into(), line_no: Some(2) },
+                ParsedLink {
+                    to_qbo_id: "801".into(),
+                    to_type: "Bill".into(),
+                    line_no: Some(1)
+                },
+                ParsedLink {
+                    to_qbo_id: "812".into(),
+                    to_type: "Bill".into(),
+                    line_no: Some(2)
+                },
             ]
         );
     }
@@ -756,7 +782,10 @@ mod tests {
         });
         let document = document_of(&entity(EntityType::Invoice, "5", payload));
         assert_eq!(document.lines[0].amount, Money::ZERO);
-        assert_eq!(document.lines[0].description.as_deref(), Some("See attached drawing"));
+        assert_eq!(
+            document.lines[0].description.as_deref(),
+            Some("See attached drawing")
+        );
     }
 
     #[test]
@@ -894,7 +923,11 @@ mod tests {
 
     #[test]
     fn entities_with_no_projected_form_say_so() {
-        for entity_type in [EntityType::CompanyInfo, EntityType::Preferences, EntityType::TaxCode] {
+        for entity_type in [
+            EntityType::CompanyInfo,
+            EntityType::Preferences,
+            EntityType::TaxCode,
+        ] {
             assert_eq!(
                 parse(&entity(entity_type, "1", json!({ "Id": "1" }))),
                 Projection::NotProjected,

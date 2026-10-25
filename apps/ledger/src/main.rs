@@ -1,4 +1,4646 @@
-//! ledger: standalone double-entry GL. Stub only — do not build yet.
-fn main() {
-    println!("ledger: stub, not yet built");
+//! `ledger` — the subcommand binary. `LEDGER-DESIGN.md`, `apps/ledger/src/pipeline.rs`.
+//!
+//! No `clap`: `std::env::args` and a hand-rolled [`parse`], matching
+//! `apps/qbo-local/src/main.rs`'s no-new-dependencies discipline and its
+//! usage-error/exit-code shape.
+
+use std::env;
+use std::fs;
+use std::path::PathBuf;
+use std::process::ExitCode;
+use std::str::FromStr;
+
+use chrono::{NaiveDate, Utc};
+use rust_decimal::Decimal;
+
+use ledger::accountant::{self, AdjustmentRequest, AuditRow, GlDetail};
+use ledger::authnet::{self, link, AuthnetConfig};
+use ledger::bank::{self, MatchRules, NewStatement};
+use ledger::handoff;
+use ledger::import::ImportOptions;
+use ledger::item_classes;
+use ledger::mfg::build::{self as mfg_build, NewAdjustment, NewBuild};
+use ledger::mfg::landed::{self, RawMaterialReceipt};
+use ledger::mfg::report::{self as mfg_report};
+use ledger::mfg::sheet::{self as mfg_sheet, NewBuildSheet};
+use ledger::mfg::NewMaterial;
+use ledger::nightly;
+use ledger::payroll::{self, PayrollConfig};
+use ledger::pipeline;
+use ledger::report::{self, BalanceSheet, Pnl, QboTbRow, SalesTaxLines, TierRules, TrialBalance};
+use ledger::slim;
+use ledger::store::{AdjustmentState, Ledger, LedgerError};
+use ledger::types::{AccountId, ClassId, JournalLine, Side};
+use ledger::verify;
+use ledger_core::Money;
+use qbo_local::domain::RealmId;
+use qbo_local::store::Store;
+
+const SNAPSHOT_PREFIX: &str = "tb-";
+const SNAPSHOT_SUFFIX: &str = ".csv";
+
+fn main() -> ExitCode {
+    let args: Vec<String> = env::args().skip(1).collect();
+    let command = match parse(&args) {
+        Ok(command) => command,
+        Err(usage_error) => {
+            eprint!("{usage_error}");
+            return ExitCode::from(2);
+        }
+    };
+
+    match execute(command) {
+        Ok(code) => code,
+        Err(CommandError::Runtime(message)) => {
+            eprintln!("{message}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Command line
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Debug, PartialEq)]
+enum Command {
+    Init {
+        db: PathBuf,
+        company: String,
+        name: String,
+        realm: Option<String>,
+    },
+    Import {
+        db: PathBuf,
+        company: String,
+        replica: PathBuf,
+        realm: RealmId,
+        from: Option<NaiveDate>,
+        to: Option<NaiveDate>,
+    },
+    ImportSlim {
+        db: Option<PathBuf>,
+        company: String,
+        replica: PathBuf,
+        realm: RealmId,
+        as_of: NaiveDate,
+        qbo_csv: PathBuf,
+        qbo_ar: Option<PathBuf>,
+        qbo_ap: Option<PathBuf>,
+        dry_run: bool,
+        scratch: Option<PathBuf>,
+    },
+    Tb {
+        db: PathBuf,
+        company: String,
+        as_of: NaiveDate,
+    },
+    Pnl {
+        db: PathBuf,
+        company: String,
+        from: NaiveDate,
+        to: NaiveDate,
+    },
+    Bs {
+        db: PathBuf,
+        company: String,
+        as_of: NaiveDate,
+    },
+    Tax {
+        db: PathBuf,
+        company: String,
+        year: i32,
+        quarter: u32,
+        rate: Decimal,
+    },
+    Close {
+        db: PathBuf,
+        company: String,
+        period_end: NaiveDate,
+        note: String,
+    },
+    Reopen {
+        db: PathBuf,
+        company: String,
+        period_end: NaiveDate,
+        note: String,
+    },
+    TbDiff {
+        db: PathBuf,
+        company: String,
+        as_of: NaiveDate,
+        qbo_csv: PathBuf,
+    },
+    Opening {
+        db: PathBuf,
+        company: String,
+        as_of: NaiveDate,
+        qbo_csv: PathBuf,
+    },
+    Boundary {
+        db: PathBuf,
+        company: String,
+        replica: PathBuf,
+        realm: RealmId,
+        snapshots: PathBuf,
+    },
+    Gl {
+        db: PathBuf,
+        company: String,
+        from: NaiveDate,
+        to: NaiveDate,
+        account: Option<String>,
+    },
+    Audit {
+        db: PathBuf,
+        company: String,
+        since: Option<NaiveDate>,
+    },
+    Export {
+        db: PathBuf,
+        company: String,
+        as_of: NaiveDate,
+        dir: PathBuf,
+    },
+    AccountantPack {
+        db: PathBuf,
+        company: String,
+        as_of: NaiveDate,
+        out: PathBuf,
+    },
+    AccountantOpen {
+        pack: PathBuf,
+    },
+    AdjustPropose {
+        db: PathBuf,
+        company: String,
+        by: String,
+        desc: String,
+        lines: Vec<JournalLine>,
+    },
+    AdjustList {
+        db: PathBuf,
+        company: String,
+        state: Option<String>,
+    },
+    AdjustDecide {
+        db: PathBuf,
+        company: String,
+        id: String,
+        by: String,
+        note: String,
+        approve: bool,
+    },
+    Reclass {
+        db: PathBuf,
+        company: String,
+        entry: String,
+        line_no: i64,
+        account: String,
+        class: Option<String>,
+        by: String,
+    },
+    BankImport {
+        db: PathBuf,
+        company: String,
+        account: String,
+        file: PathBuf,
+        format: BankFormat,
+        profile: BankProfileName,
+        opening: Money,
+        closing: Money,
+        from: NaiveDate,
+        to: NaiveDate,
+    },
+    BankMatch {
+        db: PathBuf,
+        company: String,
+        statement: String,
+    },
+    BankConfirm {
+        db: PathBuf,
+        company: String,
+        line: String,
+        account: String,
+        class: Option<String>,
+    },
+    BankClose {
+        db: PathBuf,
+        company: String,
+        statement: String,
+    },
+    BankStatus {
+        db: PathBuf,
+        company: String,
+        statement: String,
+    },
+    PayrollImport {
+        db: PathBuf,
+        company: String,
+        file: PathBuf,
+        config: Option<PathBuf>,
+        dry_run: bool,
+    },
+    AuthnetImport {
+        db: PathBuf,
+        company: String,
+        file: PathBuf,
+        clearing: String,
+        fees: String,
+        undeposited: String,
+        refund_class: String,
+        fee_class: String,
+    },
+    AuthnetLink {
+        db: PathBuf,
+        company: String,
+        document: String,
+        config: Option<PathBuf>,
+        out: Option<PathBuf>,
+    },
+    AuthnetCredentials {
+        environment: String,
+    },
+    RenderDocument {
+        db: PathBuf,
+        company: String,
+        document: String,
+        out: Option<PathBuf>,
+        config: Option<PathBuf>,
+        pay_link: bool,
+    },
+    RenderStatement {
+        db: PathBuf,
+        company: String,
+        customer: String,
+        as_of: NaiveDate,
+        out: Option<PathBuf>,
+        config: Option<PathBuf>,
+    },
+    Verify {
+        db: PathBuf,
+        company: String,
+    },
+    Nightly {
+        db: PathBuf,
+        company: String,
+        replica: PathBuf,
+        realm: RealmId,
+        qbo_csv: PathBuf,
+        out: PathBuf,
+        from: Option<NaiveDate>,
+        as_of: Option<NaiveDate>,
+        plist: bool,
+    },
+    Mfg(MfgCommand),
+    ClassesSuggest {
+        replica: PathBuf,
+        realm: Option<RealmId>,
+        company: String,
+        out: PathBuf,
+        rules: Option<PathBuf>,
+        as_of: Option<NaiveDate>,
+    },
+    ClassesApply {
+        db: PathBuf,
+        company: String,
+        csv: PathBuf,
+    },
+}
+
+/// `ledger mfg ...` (§11). One JSON file per write, same shape as its
+/// `mfg` submodule's request struct — see `docs/MFG.md`.
+#[derive(Clone, Debug, PartialEq)]
+enum MfgCommand {
+    MaterialAdd {
+        db: PathBuf,
+        company: String,
+        file: PathBuf,
+    },
+    MaterialList {
+        db: PathBuf,
+        company: String,
+    },
+    Receive {
+        db: PathBuf,
+        company: String,
+        file: PathBuf,
+    },
+    SheetAdd {
+        db: PathBuf,
+        company: String,
+        file: PathBuf,
+    },
+    SheetList {
+        db: PathBuf,
+        company: String,
+    },
+    SheetCost {
+        db: PathBuf,
+        company: String,
+        sheet: String,
+        price: Option<Money>,
+    },
+    Build {
+        db: PathBuf,
+        company: String,
+        file: PathBuf,
+    },
+    Adjust {
+        db: PathBuf,
+        company: String,
+        account: String,
+        amount: Money,
+        class: String,
+        date: NaiveDate,
+        reason: String,
+    },
+    Variance {
+        db: PathBuf,
+        company: String,
+        from: NaiveDate,
+        to: NaiveDate,
+    },
+    Onhand {
+        db: PathBuf,
+        company: String,
+    },
+}
+
+/// `ledger bank import --format`. §10: the files the bank and Chase already
+/// generate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BankFormat {
+    Csv,
+    Ofx,
+}
+
+/// `ledger bank import --profile`, csv only.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BankProfileName {
+    Chase,
+    Generic,
+}
+
+const DEFAULT_TAX_RATE: &str = "0.06625";
+
+const USAGE: &str = "\
+ledger — the double-entry book that replaces QuickBooks
+
+USAGE:
+    ledger init    --db PATH --company ID --name \"Display Name\" [--realm ID]
+    ledger import  --db PATH --company ID --replica PATH --realm ID
+                   [--from YYYY-MM-DD] [--to YYYY-MM-DD]
+    ledger import-slim --db PATH --company ID --replica PATH --realm ID
+                   --as-of YYYY-MM-DD --qbo-csv PATH [--qbo-ar PATH] [--qbo-ap PATH]
+    ledger import-slim --dry-run [--db PATH] [--scratch PATH] --company ID
+                   --replica PATH --realm ID --as-of YYYY-MM-DD --qbo-csv PATH
+                   [--qbo-ar PATH] [--qbo-ap PATH]
+    ledger tb      --db PATH --company ID --as-of YYYY-MM-DD
+    ledger pnl     --db PATH --company ID --from YYYY-MM-DD --to YYYY-MM-DD
+    ledger bs      --db PATH --company ID --as-of YYYY-MM-DD
+    ledger tax     --db PATH --company ID --year YYYY --quarter 1..4 [--rate R]
+    ledger close   --db PATH --company ID --period-end YYYY-MM-DD --note \"...\"
+    ledger reopen  --db PATH --company ID --period-end YYYY-MM-DD --note \"...\"
+    ledger tbdiff  --db PATH --company ID --as-of YYYY-MM-DD --qbo-csv PATH
+    ledger gl      --db PATH --company ID --from YYYY-MM-DD --to YYYY-MM-DD
+                   [--account NUMBER]
+    ledger audit   --db PATH --company ID [--since YYYY-MM-DD]
+    ledger export  --db PATH --company ID --as-of YYYY-MM-DD --dir PATH
+    ledger accountant pack --db PATH --company ID --as-of YYYY-MM-DD --out DIR
+    ledger accountant open --pack DIR
+    ledger adjust propose --db PATH --company ID --by NAME --desc \"...\"
+                   --line ACCOUNT:dr|cr:AMOUNT[:CLASS] [--line ...]
+    ledger adjust list    --db PATH --company ID [--state STATE]
+    ledger adjust approve --db PATH --company ID --id ID --by NAME --note \"...\"
+    ledger adjust reject  --db PATH --company ID --id ID --by NAME --note \"...\"
+    ledger reclass --db PATH --company ID --entry ID --line N --account NUMBER
+                   [--class CLASS] --by NAME
+    ledger bank import  --db PATH --company ID --account NUM --file PATH
+                        [--format csv|ofx] [--profile chase|generic]
+                        --opening X --closing Y --from YYYY-MM-DD --to YYYY-MM-DD
+    ledger bank match   --db PATH --company ID --statement ID
+    ledger bank confirm --db PATH --company ID --line ID --account NUM [--class ID]
+    ledger bank close   --db PATH --company ID --statement ID
+    ledger bank status  --db PATH --company ID --statement ID
+    ledger authnet import --db PATH --company ID --file PATH
+                   [--clearing NUM] [--fees NUM] [--undeposited NUM]
+                   [--refund-class CLASS] [--fee-class CLASS]
+    ledger authnet link --db PATH --company ID --document ID
+                   [--config PATH] [--out FILE.html]
+    ledger authnet credentials --environment sandbox|production
+    ledger payroll import --db PATH --company ID FILE
+                   [--config PATH] [--dry-run]
+    ledger render document  --db PATH --company ID --document ID
+                   [--out DIR] [--config PATH] [--no-pay-link]
+    ledger render statement --db PATH --company ID --customer ID
+                   --as-of YYYY-MM-DD [--out DIR] [--config PATH]
+    ledger opening --db PATH --company ID --as-of YYYY-MM-DD --qbo-csv PATH
+    ledger boundary --db PATH --company ID --replica PATH --realm ID
+                   --snapshots DIR
+    ledger verify  --db PATH --company ID
+    ledger nightly --db PATH --company ID --replica PATH --realm ID
+                   --qbo-csv PATH --out DIR [--from YYYY-MM-DD]
+                   [--as-of YYYY-MM-DD]
+    ledger nightly --plist --db PATH --company ID --replica PATH --realm ID
+                   --qbo-csv PATH --out DIR [--from YYYY-MM-DD]
+    ledger mfg material add  --db PATH --company ID --file material.json
+    ledger mfg material list --db PATH --company ID
+    ledger mfg receive       --db PATH --company ID --file receipt.json
+    ledger mfg sheet add     --db PATH --company ID --file sheet.json
+    ledger mfg sheet list    --db PATH --company ID
+    ledger mfg sheet cost    --db PATH --company ID --sheet ID [--price X]
+    ledger mfg build         --db PATH --company ID --file build.json
+    ledger mfg adjust        --db PATH --company ID --account NUM --amount X
+                             --class ID --date YYYY-MM-DD --reason \"...\"
+    ledger mfg variance      --db PATH --company ID --from YYYY-MM-DD --to YYYY-MM-DD
+    ledger mfg onhand        --db PATH --company ID
+    ledger classes suggest --replica PATH --out FILE.csv [--realm ID]
+                   [--company ID] [--rules FILE.toml] [--as-of YYYY-MM-DD]
+    ledger classes apply   --db PATH --company ID --csv FILE.csv
+    ledger --help
+
+SUBCOMMANDS:
+    init      Open (creating if absent) a ledger file and seed one company's
+              chart and classes (§2, §3). Idempotent: re-running it for the
+              same company id updates the display name and realm and leaves
+              every already-seeded account and class alone.
+    import    Import a qbo-local replica through post() into this ledger
+              (§6), printing the pipeline report.
+    import-slim  D28's slim cutover import (docs/CUTOVER.md): QBO's masters,
+              one opening entry from --qbo-csv (QBO's trial balance as of
+              --as-of), and the documents open on that date, then the checks:
+              no 3950 plug, AR/AP open items tie to 1200/2000, AR and AP aging
+              by contact equal QBO's (--qbo-ar/--qbo-ap, the CSVs `qbo-local
+              report --name ar-aging|ap-aging` writes; without them, the
+              documents' Balance fields), and the trial balance equals QBO's
+              on every must-tier line. Always rehearses on a scratch copy of
+              --db first and writes to --db only if every check passed.
+              --dry-run stops after the rehearsal; --scratch keeps the
+              scratch book at PATH for inspection. Exits 1 on a failed check.
+    tb        Print the trial balance as of a date (§7).
+    pnl       Print income, COGS and expense between two dates (§1, §9 A).
+    bs        Print the balance sheet as of a date (§7), current-year net
+              income folded into equity.
+    tax       Print the §9 Sales Tax Liability Report for one quarter, plus
+              the ST-50 line mapping.
+    close     Close a period through the given date (§5). Never quiet.
+    reopen    Reopen a closed period (§5). Never quiet; always logged.
+    tbdiff    Diff this ledger's trial balance against a QBO trial balance
+              CSV (qbo_account_id,name,balance; first line is a header) and
+              print the §7 report.
+    gl        Print GL detail between two dates, one section per account
+              with a running balance, or one account with --account (§8).
+    audit     Print every posting since the last close, or since --since
+              (§8), flagged entries first, with actor and timestamp.
+    export    Write the year end handoff pack (trial balance, P&L, balance
+              sheet, GL, close history) as CSV into --dir (§8).
+    accountant pack  W24's handoff to the CPA (docs/ACCOUNTANT.md): writes
+              DIR/<company>-<as-of>/ with a read-only SQLite snapshot of the
+              whole file (book.sqlite), every export CSV rendered from that
+              snapshot plus P&L by class, the audit trail since the last
+              close, the adjustment queue, AR and AP aging by contact and the
+              §9 tax lines for each ended quarter of the year, then
+              manifest.json and SHA256SUMS. Every file is left mode 0444.
+              Refuses if the folder already exists.
+    accountant open  Verify a pack (every SHA-256 against its manifest, the
+              snapshot's trial balance against the manifest's totals), open
+              the snapshot read-only and print a summary. tb, pnl, bs, tax,
+              gl, audit and adjust list accept --db DIR/book.sqlite and open
+              a write-protected file read-only; every write refuses.
+    adjust    Manage the adjusting-entry request queue (§8):
+              propose  — validate and queue a request (rejected immediately
+                         if unbalanced or a line breaks the §3 class rule).
+              list     — list requests, optionally filtered by --state
+                         (proposed, approved, rejected, posted).
+              approve  — post the request's lines as a flagged journal entry.
+              reject   — record the decision; nothing posts.
+    reclass   Propose an adjusting entry that reclassifies one posted line
+              to a different account/class (§8 \"Reclassify tool\"). Always a
+              proposal — it never touches the original entry.
+    bank import   Read a CSV or OFX/QFX statement export into `bank_lines`
+                  (§10). A line whose (account, external_id) is already on
+                  file is skipped, never duplicated.
+    bank match    Run the §10 match rules over a statement's unmatched
+                  lines: exact, then settlement, then a proposal.
+    bank confirm  Post a confirmed proposal as a `BankLine` document to the
+                  given account (and optional class), and mark the line
+                  matched.
+    bank close    The per-statement close (§10): opening plus matched lines
+                  must equal closing, with nothing left unmatched.
+    bank status   Print a statement's lines: matched, and open proposals.
+    authnet import  Read an Authorize.net Merchant Interface settlement CSV
+                    (D15, `docs/AUTHNET.md`), build one Settlement per batch
+                    plus a Payment per settled sale (applied to the invoice
+                    its Invoice Number resolves to, else parked unapplied in
+                    2300) and a RefundReceipt per settled refund, and post
+                    them all. Re-running the same file posts nothing new: a
+                    document whose id was already saved is skipped.
+    authnet link    Ask Authorize.net for a hosted payment page for one
+                    open invoice: its own number as invoiceNumber, its open
+                    balance as the amount, so `authnet import` applies the
+                    payment back to it. Refuses a non-invoice, a voided or
+                    a fully paid invoice. Prints the form URL, amount and
+                    expiry (the token lasts 15 minutes); --out writes a page
+                    that POSTs the token on open. Sandbox unless [authnet]
+                    in --config (default .local/config.toml) enables
+                    production. Moves no money.
+    authnet credentials  Read the API Login ID and Transaction Key from
+                    stdin (one per line) into the macOS login keychain for
+                    the given environment. Never written to a file.
+    payroll import  Journal SurePayroll pay runs from a pay-run lines CSV
+                    (§12, D38, `docs/PAYROLL.md`): one flagged entry per run
+                    on its check date, wages by class from [payroll] in
+                    --config (default $LEDGER_PAYROLL_CONFIG or
+                    .local/config.toml). Refuses the whole file on any
+                    unmapped employee, a net pay that does not tie, or a
+                    closed period. Re-running the same file posts nothing.
+                    --dry-run prints the entries and writes nothing.
+    render document  Write a PDF of one saved invoice, estimate, sales
+                    receipt, credit memo or purchase order (D39): company
+                    identity from [documents] in --config, bill-to/ship-to,
+                    terms, lines, totals, amount paid, balance due, memo;
+                    VOID across a voided one. An open invoice also gets an
+                    Authorize.net pay link when [authnet] and credentials
+                    are set up (its page is written beside the PDF), unless
+                    --no-pay-link. Prints the path and page count. Sends
+                    nothing.
+    render statement  Write a customer statement PDF as of a date: open
+                    invoices and credits, and the aging buckets that tie to
+                    `aging` for that customer.
+    opening   Apply (or idempotently skip/replace) the §6 opening balance
+              entry as of a date, from a QBO trial balance CSV of the same
+              shape tbdiff reads.
+    boundary  Walk the §6 boundary-year procedure against a directory of
+              QBO trial balance CSVs named tb-YYYY.csv, one per year, and
+              print the per-year agreement table and the boundary year.
+    verify    An invariants sweep over the ledger file (§4, §5), recomputed
+              in Rust rather than trusted from the schema's own triggers and
+              foreign keys. Prints a table of what failed and exits 1 on any
+              fatal finding; a needs_mapping account with a non-zero balance
+              is reported but never fails the run on its own.
+    nightly   The §E parallel run: import the replica (all of it, or the
+              documents dated --from on), diff the resulting trial balance
+              against --qbo-csv (produced by `qbo-local report --live` on the
+              Mac's cron), and write tbdiff-<as-of>.txt and .csv into --out.
+              --as-of defaults to yesterday (§7: \"as of the previous day\").
+              A book holding the slim import's opening entry (D28) refuses
+              to run without a --from after that entry's date; the cutover
+              book's nightly uses --from 2027-01-01 (D29). Exits 1 on any
+              must-tier failure or import rejection. With --plist, prints a
+              launchd plist that runs `qbo-local report --live` and then
+              this command (with the same --from) at 02:00 local, instead
+              of running anything.
+    classes suggest  D33's item -> class worksheet (docs/CUTOVER.md, \"Item
+              classes\"): one row per active QBO item with its SKU, name,
+              type, category, income account and last-12-month sales (to
+              --as-of, default today), sorted by sales, plus a suggested_class
+              and the rule that fired from --rules (default: the checked-in
+              apps/ledger/item-class-rules.toml), and an empty class column
+              for Dan. Opens the replica read-only. --company (default
+              aquamentor) picks the class list the rules are checked against.
+              Prints only aggregate counts; the CSV holds item names, so keep
+              it under .local/.
+    classes apply  Read the class column (never suggested_class) of a reviewed
+              worksheet and write the book's item -> class map, which
+              `import`, `nightly` and `import-slim` read. Refuses the whole
+              file, listing every problem, if any row has no class, a class
+              the book does not have, or the import-only fallback. Items not
+              in the file keep their mapped class.
+    mfg       Manufacturing costing (§11, docs/MFG.md for the JSON shapes):
+              material add/list — a raw material, at zero cost until received.
+              receive            — a raw material receipt: landed cost by
+                                   board foot, the moving average (W12).
+              sheet add/list     — a build sheet (recipe): yield, labour,
+                                   overhead, components.
+              sheet cost         — standard cost and, with --price, the
+                                   sensitivity table (foam ±5%, yield ±5
+                                   points, labour ±10%).
+              build              — complete a build: priced variance to 5100.
+              adjust             — a physical count against 1300 or 1310.
+              variance           — build variance by item over a date range.
+              onhand             — materials at average, next to 1300.
+
+FLAGS:
+    --db PATH            Path to the SQLite ledger file.
+    --company ID         Company id (\"aquamentor\" or \"waterline\").
+    --name \"Name\"         Company display name (init only).
+    --realm ID            QBO realm id (init: optional; import/boundary: required).
+    --replica PATH        Path to the qbo-local replica file (import, boundary).
+    --from YYYY-MM-DD     Start date (import: optional; pnl: required;
+                           nightly: required once the book holds the slim
+                           opening entry, and after its date).
+    --to YYYY-MM-DD       End date (import: optional; pnl: required).
+    --as-of YYYY-MM-DD    As-of date (tb, bs, tbdiff, opening).
+    --year YYYY           Calendar year (tax only).
+    --quarter 1..4        Calendar quarter (tax only).
+    --rate R              Sales tax rate as a decimal fraction, default
+                           0.06625 (tax only).
+    --period-end YYYY-MM-DD  The period's last day (close, reopen).
+    --note \"...\"          Required note (close, reopen).
+    --qbo-csv PATH        CSV of qbo_account_id,name,balance (tbdiff only).
+    --account NUMBER      Restrict GL detail to one account (gl only).
+    --since YYYY-MM-DD    Audit trail cutoff; default is the last close
+                           (audit only).
+    --dir PATH            Directory to write the export pack into (export
+                           only); created if it does not exist.
+    --by NAME              The accountant or Dan, whoever is acting (adjust,
+                           reclass).
+    --desc \"...\"          Adjustment description (adjust propose only).
+    --line SPEC            One journal line, ACCOUNT:dr|cr:AMOUNT[:CLASS];
+                           repeatable (adjust propose only).
+    --state STATE          Filter by state: proposed, approved, rejected,
+                           posted (adjust list only).
+    --id ID                Request id (adjust approve, adjust reject).
+    --note \"...\"          Decision note (adjust approve, adjust reject).
+    --entry ID             Posted entry id to reclassify from (reclass only).
+    --class CLASS          New class (reclass only; omit for a balance-sheet
+                           account).
+    --account NUM         Bank/card account number, e.g. 1100 (bank import,
+                          bank confirm).
+    --file PATH           Statement export to read (bank import), or a JSON
+                          request file (mfg material add, receive, sheet
+                          add, build — shapes in docs/MFG.md).
+    --format csv|ofx      Statement file format, default csv (bank import).
+    --profile chase|generic  CSV column layout, default chase (bank import).
+    --opening X           Statement opening balance (bank import only).
+    --closing Y           Statement closing balance (bank import only).
+    --statement ID        Bank statement id (bank match, close, status).
+    --line ID             Bank line id (bank confirm only).
+    --class ID            Class to post the confirmed line under (bank
+                          confirm; optional), or the required class on an
+                          inventory count (mfg adjust).
+    --qbo-csv PATH        CSV of qbo_account_id,name,balance (tbdiff, opening).
+    --qbo-ar PATH         QBO AR aging CSV as of --as-of (import-slim).
+    --qbo-ap PATH         QBO AP aging CSV as of --as-of (import-slim).
+    --dry-run             Rehearse only; never write --db (import-slim).
+    --scratch PATH        Keep the dry run's scratch book here; must not
+                           exist (import-slim --dry-run only).
+    --snapshots DIR       Directory of tb-YYYY.csv files, same CSV shape as
+                           --qbo-csv (boundary only).
+    --clearing NUM        Authorize.net clearing account, default 1160
+                           (authnet import only).
+    --fees NUM             Merchant fees account, default 6700 (authnet
+                           import only).
+    --undeposited NUM      Undeposited funds account, default 1150 (authnet
+                           import only; see `docs/AUTHNET.md` for what this
+                           is and is not used for).
+    --refund-class CLASS   Class an Authorize.net refund posts under, since
+                           the settlement export carries none; default
+                           \"drop\" (authnet import only).
+    --fee-class CLASS      Class a settlement's own 6700 fee leg carries, for
+                           the rare case one is supplied up front rather
+                           than discovered by `bank match`; default \"drop\"
+                           (authnet import only, and inert unless something
+                           has already set a batch's fee before this runs).
+    --document ID         The invoice's document_id (authnet link only).
+    --config PATH         Config file holding [authnet], default
+                           $LEDGER_AUTHNET_CONFIG or .local/config.toml
+                           (authnet link only).
+    --environment ENV     sandbox or production (authnet credentials only).
+    --document ID         render document: the document's document_id.
+    --customer ID         render statement: the customer's contact_id.
+    --out DIR             render: the directory to write into (default
+                           $LEDGER_DOCUMENTS_DIR, else [documents] output_dir,
+                           else ~/Documents/Ledger Documents, each plus
+                           /<company>). Refused inside a git work tree except
+                           its target/ or .local/.
+    --config PATH         render: the file holding [documents] (and
+                           [authnet] for the pay link), default
+                           $LEDGER_DOCUMENTS_CONFIG or .local/config.toml.
+    --no-pay-link         render document: never mint a pay link.
+    --out DIR             Directory tbdiff-<as-of>.txt/.csv are written into
+                           (nightly only); created if it does not exist.
+    --out FILE.html       authnet link: write the page that POSTs the
+                           token, instead of printing the token.
+    --plist               Print a launchd plist instead of running (nightly
+                           only).
+    --sheet ID            Build sheet id (mfg sheet cost only).
+    --price X             Sell price, for the margin and sensitivity table
+                           (mfg sheet cost only; omitted, only the standard
+                           cost prints).
+    --account NUM          \"1300\" or \"1310\" (mfg adjust only).
+    --amount X             Signed dollar amount, positive is a count up
+                           (mfg adjust only).
+    --date YYYY-MM-DD      The count's date (mfg adjust only).
+    --reason \"...\"        Required reason for the count (mfg adjust only).
+
+EXIT CODES:
+    0   ok
+    1   runtime error, tbdiff found a must-match failure (§7), a bank
+        statement does not close (§10), import-slim failed a check
+        (D28), verify found a fatal invariant
+        failure (§4), or nightly found a must-tier failure or an import
+        rejection (§7)
+    2   usage error (this message)
+";
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct UsageError {
+    reason: Option<String>,
+}
+
+impl UsageError {
+    fn usage() -> Self {
+        UsageError { reason: None }
+    }
+
+    fn new(reason: impl Into<String>) -> Self {
+        UsageError {
+            reason: Some(reason.into()),
+        }
+    }
+
+    fn missing_flag(flag: &str) -> Self {
+        Self::new(format!("missing required flag {flag}"))
+    }
+
+    fn missing_value(flag: &str) -> Self {
+        Self::new(format!("{flag} requires a value"))
+    }
+
+    fn unknown_flag(flag: &str) -> Self {
+        Self::new(format!("unknown flag {flag}"))
+    }
+
+    fn unknown_subcommand(name: &str) -> Self {
+        Self::new(format!("unknown subcommand {name:?}"))
+    }
+
+    fn invalid_value(flag: &str, value: &str) -> Self {
+        Self::new(format!("invalid value for {flag}: {value:?}"))
+    }
+}
+
+impl std::fmt::Display for UsageError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if let Some(reason) = &self.reason {
+            writeln!(f, "error: {reason}")?;
+            writeln!(f)?;
+        }
+        write!(f, "{USAGE}")
+    }
+}
+
+type Args<'a> = std::slice::Iter<'a, String>;
+
+fn next_value(args: &mut Args<'_>, flag: &str) -> Result<String, UsageError> {
+    args.next()
+        .cloned()
+        .ok_or_else(|| UsageError::missing_value(flag))
+}
+
+fn parse_date(raw: &str, flag: &str) -> Result<NaiveDate, UsageError> {
+    NaiveDate::parse_from_str(raw, "%Y-%m-%d").map_err(|_| UsageError::invalid_value(flag, raw))
+}
+
+fn parse_realm(raw: &str) -> Result<RealmId, UsageError> {
+    RealmId::parse(raw).map_err(|_| UsageError::invalid_value("--realm", raw))
+}
+
+fn parse_i32(raw: &str, flag: &str) -> Result<i32, UsageError> {
+    raw.parse()
+        .map_err(|_| UsageError::invalid_value(flag, raw))
+}
+
+fn parse_u32(raw: &str, flag: &str) -> Result<u32, UsageError> {
+    raw.parse()
+        .map_err(|_| UsageError::invalid_value(flag, raw))
+}
+
+fn parse_decimal(raw: &str, flag: &str) -> Result<Decimal, UsageError> {
+    Decimal::from_str(raw).map_err(|_| UsageError::invalid_value(flag, raw))
+}
+
+fn parse_money(raw: &str, flag: &str) -> Result<Money, UsageError> {
+    let decimal = parse_decimal(raw, flag)?;
+    ledger_core::round_money(decimal, ledger_core::RoundingPolicy::MirroredAmount)
+        .map_err(|_| UsageError::invalid_value(flag, raw))
+}
+
+fn parse_bank_format(raw: &str, flag: &str) -> Result<BankFormat, UsageError> {
+    match raw {
+        "csv" => Ok(BankFormat::Csv),
+        "ofx" => Ok(BankFormat::Ofx),
+        _ => Err(UsageError::invalid_value(flag, raw)),
+    }
+}
+
+fn parse_bank_profile(raw: &str, flag: &str) -> Result<BankProfileName, UsageError> {
+    match raw {
+        "chase" => Ok(BankProfileName::Chase),
+        "generic" => Ok(BankProfileName::Generic),
+        _ => Err(UsageError::invalid_value(flag, raw)),
+    }
+}
+
+fn parse(args: &[String]) -> Result<Command, UsageError> {
+    let mut args = args.iter();
+    let Some(subcommand) = args.next() else {
+        return Err(UsageError::usage());
+    };
+
+    match subcommand.as_str() {
+        "--help" | "-h" => Err(UsageError::usage()),
+        "init" => parse_init(args),
+        "import" => parse_import(args),
+        "import-slim" => parse_import_slim(args),
+        "tb" => parse_tb(args),
+        "pnl" => parse_pnl(args),
+        "bs" => parse_bs(args),
+        "tax" => parse_tax(args),
+        "close" => parse_close(args),
+        "reopen" => parse_reopen(args),
+        "tbdiff" => parse_tbdiff(args),
+        "gl" => parse_gl(args),
+        "audit" => parse_audit(args),
+        "export" => parse_export(args),
+        "accountant" => parse_accountant(args),
+        "adjust" => parse_adjust(args),
+        "reclass" => parse_reclass(args),
+        "bank" => parse_bank(args),
+        "authnet" => parse_authnet(args),
+        "payroll" => parse_payroll(args),
+        "render" => parse_render(args),
+        "opening" => parse_opening(args),
+        "boundary" => parse_boundary(args),
+        "verify" => parse_verify(args),
+        "nightly" => parse_nightly(args),
+        "mfg" => parse_mfg(args).map(Command::Mfg),
+        "classes" => parse_classes(args),
+        other => Err(UsageError::unknown_subcommand(other)),
+    }
+}
+
+fn parse_classes(mut args: Args<'_>) -> Result<Command, UsageError> {
+    let Some(sub) = args.next() else {
+        return Err(UsageError::new("classes requires suggest or apply"));
+    };
+    let mut db = None;
+    let mut company = None;
+    let mut replica = None;
+    let mut realm = None;
+    let mut out = None;
+    let mut rules = None;
+    let mut as_of = None;
+    let mut csv = None;
+    while let Some(flag) = args.next() {
+        match flag.as_str() {
+            "--db" => db = Some(PathBuf::from(next_value(&mut args, "--db")?)),
+            "--company" => company = Some(next_value(&mut args, "--company")?),
+            "--replica" => replica = Some(PathBuf::from(next_value(&mut args, "--replica")?)),
+            "--realm" => realm = Some(parse_realm(&next_value(&mut args, "--realm")?)?),
+            "--out" => out = Some(PathBuf::from(next_value(&mut args, "--out")?)),
+            "--rules" => rules = Some(PathBuf::from(next_value(&mut args, "--rules")?)),
+            "--as-of" => as_of = Some(parse_date(&next_value(&mut args, "--as-of")?, "--as-of")?),
+            "--csv" => csv = Some(PathBuf::from(next_value(&mut args, "--csv")?)),
+            other => return Err(UsageError::unknown_flag(other)),
+        }
+    }
+    match sub.as_str() {
+        "suggest" => Ok(Command::ClassesSuggest {
+            replica: replica.ok_or_else(|| UsageError::missing_flag("--replica"))?,
+            realm,
+            company: company.unwrap_or_else(|| "aquamentor".to_string()),
+            out: out.ok_or_else(|| UsageError::missing_flag("--out"))?,
+            rules,
+            as_of,
+        }),
+        "apply" => Ok(Command::ClassesApply {
+            db: db.ok_or_else(|| UsageError::missing_flag("--db"))?,
+            company: company.ok_or_else(|| UsageError::missing_flag("--company"))?,
+            csv: csv.ok_or_else(|| UsageError::missing_flag("--csv"))?,
+        }),
+        other => Err(UsageError::unknown_subcommand(&format!("classes {other}"))),
+    }
+}
+
+fn parse_mfg(mut args: Args<'_>) -> Result<MfgCommand, UsageError> {
+    let Some(sub) = args.next() else {
+        return Err(UsageError::new(
+            "mfg requires a subcommand (material, receive, sheet, build, adjust, variance, onhand)",
+        ));
+    };
+    match sub.as_str() {
+        "material" => parse_mfg_material(args),
+        "receive" => parse_mfg_receive(args),
+        "sheet" => parse_mfg_sheet(args),
+        "build" => parse_mfg_build(args),
+        "adjust" => parse_mfg_adjust(args),
+        "variance" => parse_mfg_variance(args),
+        "onhand" => parse_mfg_onhand(args),
+        other => Err(UsageError::unknown_subcommand(&format!("mfg {other}"))),
+    }
+}
+
+fn parse_mfg_material(mut args: Args<'_>) -> Result<MfgCommand, UsageError> {
+    let Some(sub) = args.next() else {
+        return Err(UsageError::new("mfg material requires add or list"));
+    };
+    let mut db = None;
+    let mut company = None;
+    let mut file = None;
+    while let Some(flag) = args.next() {
+        match flag.as_str() {
+            "--db" => db = Some(PathBuf::from(next_value(&mut args, "--db")?)),
+            "--company" => company = Some(next_value(&mut args, "--company")?),
+            "--file" => file = Some(PathBuf::from(next_value(&mut args, "--file")?)),
+            other => return Err(UsageError::unknown_flag(other)),
+        }
+    }
+    let db = db.ok_or_else(|| UsageError::missing_flag("--db"))?;
+    let company = company.ok_or_else(|| UsageError::missing_flag("--company"))?;
+    match sub.as_str() {
+        "add" => Ok(MfgCommand::MaterialAdd {
+            db,
+            company,
+            file: file.ok_or_else(|| UsageError::missing_flag("--file"))?,
+        }),
+        "list" => Ok(MfgCommand::MaterialList { db, company }),
+        other => Err(UsageError::unknown_subcommand(&format!(
+            "mfg material {other}"
+        ))),
+    }
+}
+
+fn parse_mfg_receive(mut args: Args<'_>) -> Result<MfgCommand, UsageError> {
+    let mut db = None;
+    let mut company = None;
+    let mut file = None;
+    while let Some(flag) = args.next() {
+        match flag.as_str() {
+            "--db" => db = Some(PathBuf::from(next_value(&mut args, "--db")?)),
+            "--company" => company = Some(next_value(&mut args, "--company")?),
+            "--file" => file = Some(PathBuf::from(next_value(&mut args, "--file")?)),
+            other => return Err(UsageError::unknown_flag(other)),
+        }
+    }
+    Ok(MfgCommand::Receive {
+        db: db.ok_or_else(|| UsageError::missing_flag("--db"))?,
+        company: company.ok_or_else(|| UsageError::missing_flag("--company"))?,
+        file: file.ok_or_else(|| UsageError::missing_flag("--file"))?,
+    })
+}
+
+fn parse_mfg_sheet(mut args: Args<'_>) -> Result<MfgCommand, UsageError> {
+    let Some(sub) = args.next() else {
+        return Err(UsageError::new("mfg sheet requires add, list or cost"));
+    };
+    let mut db = None;
+    let mut company = None;
+    let mut file = None;
+    let mut sheet = None;
+    let mut price = None;
+    while let Some(flag) = args.next() {
+        match flag.as_str() {
+            "--db" => db = Some(PathBuf::from(next_value(&mut args, "--db")?)),
+            "--company" => company = Some(next_value(&mut args, "--company")?),
+            "--file" => file = Some(PathBuf::from(next_value(&mut args, "--file")?)),
+            "--sheet" => sheet = Some(next_value(&mut args, "--sheet")?),
+            "--price" => price = Some(parse_money(&next_value(&mut args, "--price")?, "--price")?),
+            other => return Err(UsageError::unknown_flag(other)),
+        }
+    }
+    let db = db.ok_or_else(|| UsageError::missing_flag("--db"))?;
+    let company = company.ok_or_else(|| UsageError::missing_flag("--company"))?;
+    match sub.as_str() {
+        "add" => Ok(MfgCommand::SheetAdd {
+            db,
+            company,
+            file: file.ok_or_else(|| UsageError::missing_flag("--file"))?,
+        }),
+        "list" => Ok(MfgCommand::SheetList { db, company }),
+        "cost" => Ok(MfgCommand::SheetCost {
+            db,
+            company,
+            sheet: sheet.ok_or_else(|| UsageError::missing_flag("--sheet"))?,
+            price,
+        }),
+        other => Err(UsageError::unknown_subcommand(&format!(
+            "mfg sheet {other}"
+        ))),
+    }
+}
+
+fn parse_mfg_build(mut args: Args<'_>) -> Result<MfgCommand, UsageError> {
+    let mut db = None;
+    let mut company = None;
+    let mut file = None;
+    while let Some(flag) = args.next() {
+        match flag.as_str() {
+            "--db" => db = Some(PathBuf::from(next_value(&mut args, "--db")?)),
+            "--company" => company = Some(next_value(&mut args, "--company")?),
+            "--file" => file = Some(PathBuf::from(next_value(&mut args, "--file")?)),
+            other => return Err(UsageError::unknown_flag(other)),
+        }
+    }
+    Ok(MfgCommand::Build {
+        db: db.ok_or_else(|| UsageError::missing_flag("--db"))?,
+        company: company.ok_or_else(|| UsageError::missing_flag("--company"))?,
+        file: file.ok_or_else(|| UsageError::missing_flag("--file"))?,
+    })
+}
+
+fn parse_mfg_adjust(mut args: Args<'_>) -> Result<MfgCommand, UsageError> {
+    let mut db = None;
+    let mut company = None;
+    let mut account = None;
+    let mut amount = None;
+    let mut class = None;
+    let mut date = None;
+    let mut reason = None;
+    while let Some(flag) = args.next() {
+        match flag.as_str() {
+            "--db" => db = Some(PathBuf::from(next_value(&mut args, "--db")?)),
+            "--company" => company = Some(next_value(&mut args, "--company")?),
+            "--account" => account = Some(next_value(&mut args, "--account")?),
+            "--amount" => {
+                amount = Some(parse_money(
+                    &next_value(&mut args, "--amount")?,
+                    "--amount",
+                )?)
+            }
+            "--class" => class = Some(next_value(&mut args, "--class")?),
+            "--date" => date = Some(parse_date(&next_value(&mut args, "--date")?, "--date")?),
+            "--reason" => reason = Some(next_value(&mut args, "--reason")?),
+            other => return Err(UsageError::unknown_flag(other)),
+        }
+    }
+    Ok(MfgCommand::Adjust {
+        db: db.ok_or_else(|| UsageError::missing_flag("--db"))?,
+        company: company.ok_or_else(|| UsageError::missing_flag("--company"))?,
+        account: account.ok_or_else(|| UsageError::missing_flag("--account"))?,
+        amount: amount.ok_or_else(|| UsageError::missing_flag("--amount"))?,
+        class: class.ok_or_else(|| UsageError::missing_flag("--class"))?,
+        date: date.ok_or_else(|| UsageError::missing_flag("--date"))?,
+        reason: reason.ok_or_else(|| UsageError::missing_flag("--reason"))?,
+    })
+}
+
+fn parse_mfg_variance(mut args: Args<'_>) -> Result<MfgCommand, UsageError> {
+    let mut db = None;
+    let mut company = None;
+    let mut from = None;
+    let mut to = None;
+    while let Some(flag) = args.next() {
+        match flag.as_str() {
+            "--db" => db = Some(PathBuf::from(next_value(&mut args, "--db")?)),
+            "--company" => company = Some(next_value(&mut args, "--company")?),
+            "--from" => from = Some(parse_date(&next_value(&mut args, "--from")?, "--from")?),
+            "--to" => to = Some(parse_date(&next_value(&mut args, "--to")?, "--to")?),
+            other => return Err(UsageError::unknown_flag(other)),
+        }
+    }
+    Ok(MfgCommand::Variance {
+        db: db.ok_or_else(|| UsageError::missing_flag("--db"))?,
+        company: company.ok_or_else(|| UsageError::missing_flag("--company"))?,
+        from: from.ok_or_else(|| UsageError::missing_flag("--from"))?,
+        to: to.ok_or_else(|| UsageError::missing_flag("--to"))?,
+    })
+}
+
+fn parse_mfg_onhand(mut args: Args<'_>) -> Result<MfgCommand, UsageError> {
+    let mut db = None;
+    let mut company = None;
+    while let Some(flag) = args.next() {
+        match flag.as_str() {
+            "--db" => db = Some(PathBuf::from(next_value(&mut args, "--db")?)),
+            "--company" => company = Some(next_value(&mut args, "--company")?),
+            other => return Err(UsageError::unknown_flag(other)),
+        }
+    }
+    Ok(MfgCommand::Onhand {
+        db: db.ok_or_else(|| UsageError::missing_flag("--db"))?,
+        company: company.ok_or_else(|| UsageError::missing_flag("--company"))?,
+    })
+}
+
+fn parse_bank(mut args: Args<'_>) -> Result<Command, UsageError> {
+    let Some(sub) = args.next() else {
+        return Err(UsageError::new(
+            "bank requires a subcommand (import, match, confirm, close, status)",
+        ));
+    };
+    match sub.as_str() {
+        "import" => parse_bank_import(args),
+        "match" => parse_bank_match(args),
+        "confirm" => parse_bank_confirm(args),
+        "close" => parse_bank_close(args),
+        "status" => parse_bank_status(args),
+        other => Err(UsageError::unknown_subcommand(&format!("bank {other}"))),
+    }
+}
+
+#[allow(clippy::too_many_lines)]
+fn parse_bank_import(mut args: Args<'_>) -> Result<Command, UsageError> {
+    let mut db = None;
+    let mut company = None;
+    let mut account = None;
+    let mut file = None;
+    let mut format = None;
+    let mut profile = None;
+    let mut opening = None;
+    let mut closing = None;
+    let mut from = None;
+    let mut to = None;
+    while let Some(flag) = args.next() {
+        match flag.as_str() {
+            "--db" => db = Some(PathBuf::from(next_value(&mut args, "--db")?)),
+            "--company" => company = Some(next_value(&mut args, "--company")?),
+            "--account" => account = Some(next_value(&mut args, "--account")?),
+            "--file" => file = Some(PathBuf::from(next_value(&mut args, "--file")?)),
+            "--format" => {
+                format = Some(parse_bank_format(
+                    &next_value(&mut args, "--format")?,
+                    "--format",
+                )?)
+            }
+            "--profile" => {
+                profile = Some(parse_bank_profile(
+                    &next_value(&mut args, "--profile")?,
+                    "--profile",
+                )?)
+            }
+            "--opening" => {
+                opening = Some(parse_money(
+                    &next_value(&mut args, "--opening")?,
+                    "--opening",
+                )?)
+            }
+            "--closing" => {
+                closing = Some(parse_money(
+                    &next_value(&mut args, "--closing")?,
+                    "--closing",
+                )?)
+            }
+            "--from" => from = Some(parse_date(&next_value(&mut args, "--from")?, "--from")?),
+            "--to" => to = Some(parse_date(&next_value(&mut args, "--to")?, "--to")?),
+            other => return Err(UsageError::unknown_flag(other)),
+        }
+    }
+    Ok(Command::BankImport {
+        db: db.ok_or_else(|| UsageError::missing_flag("--db"))?,
+        company: company.ok_or_else(|| UsageError::missing_flag("--company"))?,
+        account: account.ok_or_else(|| UsageError::missing_flag("--account"))?,
+        file: file.ok_or_else(|| UsageError::missing_flag("--file"))?,
+        format: format.unwrap_or(BankFormat::Csv),
+        profile: profile.unwrap_or(BankProfileName::Chase),
+        opening: opening.ok_or_else(|| UsageError::missing_flag("--opening"))?,
+        closing: closing.ok_or_else(|| UsageError::missing_flag("--closing"))?,
+        from: from.ok_or_else(|| UsageError::missing_flag("--from"))?,
+        to: to.ok_or_else(|| UsageError::missing_flag("--to"))?,
+    })
+}
+
+fn parse_bank_match(mut args: Args<'_>) -> Result<Command, UsageError> {
+    let mut db = None;
+    let mut company = None;
+    let mut statement = None;
+    while let Some(flag) = args.next() {
+        match flag.as_str() {
+            "--db" => db = Some(PathBuf::from(next_value(&mut args, "--db")?)),
+            "--company" => company = Some(next_value(&mut args, "--company")?),
+            "--statement" => statement = Some(next_value(&mut args, "--statement")?),
+            other => return Err(UsageError::unknown_flag(other)),
+        }
+    }
+    Ok(Command::BankMatch {
+        db: db.ok_or_else(|| UsageError::missing_flag("--db"))?,
+        company: company.ok_or_else(|| UsageError::missing_flag("--company"))?,
+        statement: statement.ok_or_else(|| UsageError::missing_flag("--statement"))?,
+    })
+}
+
+fn parse_bank_confirm(mut args: Args<'_>) -> Result<Command, UsageError> {
+    let mut db = None;
+    let mut company = None;
+    let mut line = None;
+    let mut account = None;
+    let mut class = None;
+    while let Some(flag) = args.next() {
+        match flag.as_str() {
+            "--db" => db = Some(PathBuf::from(next_value(&mut args, "--db")?)),
+            "--company" => company = Some(next_value(&mut args, "--company")?),
+            "--line" => line = Some(next_value(&mut args, "--line")?),
+            "--account" => account = Some(next_value(&mut args, "--account")?),
+            "--class" => class = Some(next_value(&mut args, "--class")?),
+            other => return Err(UsageError::unknown_flag(other)),
+        }
+    }
+    Ok(Command::BankConfirm {
+        db: db.ok_or_else(|| UsageError::missing_flag("--db"))?,
+        company: company.ok_or_else(|| UsageError::missing_flag("--company"))?,
+        line: line.ok_or_else(|| UsageError::missing_flag("--line"))?,
+        account: account.ok_or_else(|| UsageError::missing_flag("--account"))?,
+        class,
+    })
+}
+
+fn parse_bank_close(mut args: Args<'_>) -> Result<Command, UsageError> {
+    let mut db = None;
+    let mut company = None;
+    let mut statement = None;
+    while let Some(flag) = args.next() {
+        match flag.as_str() {
+            "--db" => db = Some(PathBuf::from(next_value(&mut args, "--db")?)),
+            "--company" => company = Some(next_value(&mut args, "--company")?),
+            "--statement" => statement = Some(next_value(&mut args, "--statement")?),
+            other => return Err(UsageError::unknown_flag(other)),
+        }
+    }
+    Ok(Command::BankClose {
+        db: db.ok_or_else(|| UsageError::missing_flag("--db"))?,
+        company: company.ok_or_else(|| UsageError::missing_flag("--company"))?,
+        statement: statement.ok_or_else(|| UsageError::missing_flag("--statement"))?,
+    })
+}
+
+fn parse_bank_status(mut args: Args<'_>) -> Result<Command, UsageError> {
+    let mut db = None;
+    let mut company = None;
+    let mut statement = None;
+    while let Some(flag) = args.next() {
+        match flag.as_str() {
+            "--db" => db = Some(PathBuf::from(next_value(&mut args, "--db")?)),
+            "--company" => company = Some(next_value(&mut args, "--company")?),
+            "--statement" => statement = Some(next_value(&mut args, "--statement")?),
+            other => return Err(UsageError::unknown_flag(other)),
+        }
+    }
+    Ok(Command::BankStatus {
+        db: db.ok_or_else(|| UsageError::missing_flag("--db"))?,
+        company: company.ok_or_else(|| UsageError::missing_flag("--company"))?,
+        statement: statement.ok_or_else(|| UsageError::missing_flag("--statement"))?,
+    })
+}
+
+const DEFAULT_AUTHNET_CLEARING: &str = "1160";
+const DEFAULT_AUTHNET_FEES: &str = "6700";
+const DEFAULT_AUTHNET_UNDEPOSITED: &str = "1150";
+const DEFAULT_AUTHNET_REFUND_CLASS: &str = "drop";
+const DEFAULT_AUTHNET_FEE_CLASS: &str = "drop";
+
+fn parse_authnet(mut args: Args<'_>) -> Result<Command, UsageError> {
+    let Some(sub) = args.next() else {
+        return Err(UsageError::new(
+            "authnet requires a subcommand (import, link, credentials)",
+        ));
+    };
+    match sub.as_str() {
+        "import" => parse_authnet_import(args),
+        "link" => parse_authnet_link(args),
+        "credentials" => parse_authnet_credentials(args),
+        other => Err(UsageError::unknown_subcommand(&format!("authnet {other}"))),
+    }
+}
+
+#[allow(clippy::too_many_lines)]
+fn parse_authnet_import(mut args: Args<'_>) -> Result<Command, UsageError> {
+    let mut db = None;
+    let mut company = None;
+    let mut file = None;
+    let mut clearing = None;
+    let mut fees = None;
+    let mut undeposited = None;
+    let mut refund_class = None;
+    let mut fee_class = None;
+    while let Some(flag) = args.next() {
+        match flag.as_str() {
+            "--db" => db = Some(PathBuf::from(next_value(&mut args, "--db")?)),
+            "--company" => company = Some(next_value(&mut args, "--company")?),
+            "--file" => file = Some(PathBuf::from(next_value(&mut args, "--file")?)),
+            "--clearing" => clearing = Some(next_value(&mut args, "--clearing")?),
+            "--fees" => fees = Some(next_value(&mut args, "--fees")?),
+            "--undeposited" => undeposited = Some(next_value(&mut args, "--undeposited")?),
+            "--refund-class" => refund_class = Some(next_value(&mut args, "--refund-class")?),
+            "--fee-class" => fee_class = Some(next_value(&mut args, "--fee-class")?),
+            other => return Err(UsageError::unknown_flag(other)),
+        }
+    }
+    Ok(Command::AuthnetImport {
+        db: db.ok_or_else(|| UsageError::missing_flag("--db"))?,
+        company: company.ok_or_else(|| UsageError::missing_flag("--company"))?,
+        file: file.ok_or_else(|| UsageError::missing_flag("--file"))?,
+        clearing: clearing.unwrap_or_else(|| DEFAULT_AUTHNET_CLEARING.to_string()),
+        fees: fees.unwrap_or_else(|| DEFAULT_AUTHNET_FEES.to_string()),
+        undeposited: undeposited.unwrap_or_else(|| DEFAULT_AUTHNET_UNDEPOSITED.to_string()),
+        refund_class: refund_class.unwrap_or_else(|| DEFAULT_AUTHNET_REFUND_CLASS.to_string()),
+        fee_class: fee_class.unwrap_or_else(|| DEFAULT_AUTHNET_FEE_CLASS.to_string()),
+    })
+}
+
+fn parse_payroll(mut args: Args<'_>) -> Result<Command, UsageError> {
+    let Some(sub) = args.next() else {
+        return Err(UsageError::new("payroll requires a subcommand (import)"));
+    };
+    match sub.as_str() {
+        "import" => parse_payroll_import(args),
+        other => Err(UsageError::unknown_subcommand(&format!("payroll {other}"))),
+    }
+}
+
+fn parse_payroll_import(mut args: Args<'_>) -> Result<Command, UsageError> {
+    let mut db = None;
+    let mut company = None;
+    let mut file = None;
+    let mut config = None;
+    let mut dry_run = false;
+    while let Some(flag) = args.next() {
+        match flag.as_str() {
+            "--db" => db = Some(PathBuf::from(next_value(&mut args, "--db")?)),
+            "--company" => company = Some(next_value(&mut args, "--company")?),
+            "--file" => file = Some(PathBuf::from(next_value(&mut args, "--file")?)),
+            "--config" => config = Some(PathBuf::from(next_value(&mut args, "--config")?)),
+            "--dry-run" => dry_run = true,
+            other if !other.starts_with("--") && file.is_none() => {
+                file = Some(PathBuf::from(other));
+            }
+            other => return Err(UsageError::unknown_flag(other)),
+        }
+    }
+    Ok(Command::PayrollImport {
+        db: db.ok_or_else(|| UsageError::missing_flag("--db"))?,
+        company: company.ok_or_else(|| UsageError::missing_flag("--company"))?,
+        file: file.ok_or_else(|| UsageError::missing_flag("--file"))?,
+        config,
+        dry_run,
+    })
+}
+
+fn parse_authnet_link(mut args: Args<'_>) -> Result<Command, UsageError> {
+    let mut db = None;
+    let mut company = None;
+    let mut document = None;
+    let mut config = None;
+    let mut out = None;
+    while let Some(flag) = args.next() {
+        match flag.as_str() {
+            "--db" => db = Some(PathBuf::from(next_value(&mut args, "--db")?)),
+            "--company" => company = Some(next_value(&mut args, "--company")?),
+            "--document" => document = Some(next_value(&mut args, "--document")?),
+            "--config" => config = Some(PathBuf::from(next_value(&mut args, "--config")?)),
+            "--out" => out = Some(PathBuf::from(next_value(&mut args, "--out")?)),
+            other => return Err(UsageError::unknown_flag(other)),
+        }
+    }
+    Ok(Command::AuthnetLink {
+        db: db.ok_or_else(|| UsageError::missing_flag("--db"))?,
+        company: company.ok_or_else(|| UsageError::missing_flag("--company"))?,
+        document: document.ok_or_else(|| UsageError::missing_flag("--document"))?,
+        config,
+        out,
+    })
+}
+
+fn parse_render(mut args: Args<'_>) -> Result<Command, UsageError> {
+    let Some(sub) = args.next() else {
+        return Err(UsageError::new(
+            "render requires a subcommand (document, statement)",
+        ));
+    };
+    let mut db = None;
+    let mut company = None;
+    let mut document = None;
+    let mut customer = None;
+    let mut as_of = None;
+    let mut out = None;
+    let mut config = None;
+    let mut pay_link = true;
+    while let Some(flag) = args.next() {
+        match flag.as_str() {
+            "--db" => db = Some(PathBuf::from(next_value(&mut args, "--db")?)),
+            "--company" => company = Some(next_value(&mut args, "--company")?),
+            "--document" if sub == "document" => {
+                document = Some(next_value(&mut args, "--document")?)
+            }
+            "--customer" if sub == "statement" => {
+                customer = Some(next_value(&mut args, "--customer")?)
+            }
+            "--as-of" if sub == "statement" => {
+                as_of = Some(parse_date(&next_value(&mut args, "--as-of")?, "--as-of")?)
+            }
+            "--out" => out = Some(PathBuf::from(next_value(&mut args, "--out")?)),
+            "--config" => config = Some(PathBuf::from(next_value(&mut args, "--config")?)),
+            "--no-pay-link" if sub == "document" => pay_link = false,
+            other => return Err(UsageError::unknown_flag(other)),
+        }
+    }
+    let db = db.ok_or_else(|| UsageError::missing_flag("--db"))?;
+    let company = company.ok_or_else(|| UsageError::missing_flag("--company"))?;
+    match sub.as_str() {
+        "document" => Ok(Command::RenderDocument {
+            db,
+            company,
+            document: document.ok_or_else(|| UsageError::missing_flag("--document"))?,
+            out,
+            config,
+            pay_link,
+        }),
+        "statement" => Ok(Command::RenderStatement {
+            db,
+            company,
+            customer: customer.ok_or_else(|| UsageError::missing_flag("--customer"))?,
+            as_of: as_of.ok_or_else(|| UsageError::missing_flag("--as-of"))?,
+            out,
+            config,
+        }),
+        other => Err(UsageError::unknown_subcommand(&format!("render {other}"))),
+    }
+}
+
+fn parse_authnet_credentials(mut args: Args<'_>) -> Result<Command, UsageError> {
+    let mut environment = None;
+    while let Some(flag) = args.next() {
+        match flag.as_str() {
+            "--environment" => {
+                let raw = next_value(&mut args, "--environment")?;
+                if raw != "sandbox" && raw != "production" {
+                    return Err(UsageError::invalid_value("--environment", &raw));
+                }
+                environment = Some(raw);
+            }
+            other => return Err(UsageError::unknown_flag(other)),
+        }
+    }
+    Ok(Command::AuthnetCredentials {
+        environment: environment.ok_or_else(|| UsageError::missing_flag("--environment"))?,
+    })
+}
+
+fn parse_init(mut args: Args<'_>) -> Result<Command, UsageError> {
+    let mut db = None;
+    let mut company = None;
+    let mut name = None;
+    let mut realm = None;
+    while let Some(flag) = args.next() {
+        match flag.as_str() {
+            "--db" => db = Some(PathBuf::from(next_value(&mut args, "--db")?)),
+            "--company" => company = Some(next_value(&mut args, "--company")?),
+            "--name" => name = Some(next_value(&mut args, "--name")?),
+            "--realm" => realm = Some(next_value(&mut args, "--realm")?),
+            other => return Err(UsageError::unknown_flag(other)),
+        }
+    }
+    Ok(Command::Init {
+        db: db.ok_or_else(|| UsageError::missing_flag("--db"))?,
+        company: company.ok_or_else(|| UsageError::missing_flag("--company"))?,
+        name: name.ok_or_else(|| UsageError::missing_flag("--name"))?,
+        realm,
+    })
+}
+
+fn parse_import(mut args: Args<'_>) -> Result<Command, UsageError> {
+    let mut db = None;
+    let mut company = None;
+    let mut replica = None;
+    let mut realm = None;
+    let mut from = None;
+    let mut to = None;
+    while let Some(flag) = args.next() {
+        match flag.as_str() {
+            "--db" => db = Some(PathBuf::from(next_value(&mut args, "--db")?)),
+            "--company" => company = Some(next_value(&mut args, "--company")?),
+            "--replica" => replica = Some(PathBuf::from(next_value(&mut args, "--replica")?)),
+            "--realm" => realm = Some(parse_realm(&next_value(&mut args, "--realm")?)?),
+            "--from" => from = Some(parse_date(&next_value(&mut args, "--from")?, "--from")?),
+            "--to" => to = Some(parse_date(&next_value(&mut args, "--to")?, "--to")?),
+            other => return Err(UsageError::unknown_flag(other)),
+        }
+    }
+    Ok(Command::Import {
+        db: db.ok_or_else(|| UsageError::missing_flag("--db"))?,
+        company: company.ok_or_else(|| UsageError::missing_flag("--company"))?,
+        replica: replica.ok_or_else(|| UsageError::missing_flag("--replica"))?,
+        realm: realm.ok_or_else(|| UsageError::missing_flag("--realm"))?,
+        from,
+        to,
+    })
+}
+
+fn parse_import_slim(mut args: Args<'_>) -> Result<Command, UsageError> {
+    let mut db = None;
+    let mut company = None;
+    let mut replica = None;
+    let mut realm = None;
+    let mut as_of = None;
+    let mut qbo_csv = None;
+    let mut qbo_ar = None;
+    let mut qbo_ap = None;
+    let mut dry_run = false;
+    let mut scratch = None;
+    while let Some(flag) = args.next() {
+        match flag.as_str() {
+            "--db" => db = Some(PathBuf::from(next_value(&mut args, "--db")?)),
+            "--company" => company = Some(next_value(&mut args, "--company")?),
+            "--replica" => replica = Some(PathBuf::from(next_value(&mut args, "--replica")?)),
+            "--realm" => realm = Some(parse_realm(&next_value(&mut args, "--realm")?)?),
+            "--as-of" => as_of = Some(parse_date(&next_value(&mut args, "--as-of")?, "--as-of")?),
+            "--qbo-csv" => qbo_csv = Some(PathBuf::from(next_value(&mut args, "--qbo-csv")?)),
+            "--qbo-ar" => qbo_ar = Some(PathBuf::from(next_value(&mut args, "--qbo-ar")?)),
+            "--qbo-ap" => qbo_ap = Some(PathBuf::from(next_value(&mut args, "--qbo-ap")?)),
+            "--dry-run" => dry_run = true,
+            "--scratch" => scratch = Some(PathBuf::from(next_value(&mut args, "--scratch")?)),
+            other => return Err(UsageError::unknown_flag(other)),
+        }
+    }
+    if db.is_none() && !dry_run {
+        return Err(UsageError::missing_flag("--db"));
+    }
+    if scratch.is_some() && !dry_run {
+        return Err(UsageError::new("--scratch is for --dry-run only"));
+    }
+    Ok(Command::ImportSlim {
+        db,
+        company: company.ok_or_else(|| UsageError::missing_flag("--company"))?,
+        replica: replica.ok_or_else(|| UsageError::missing_flag("--replica"))?,
+        realm: realm.ok_or_else(|| UsageError::missing_flag("--realm"))?,
+        as_of: as_of.ok_or_else(|| UsageError::missing_flag("--as-of"))?,
+        qbo_csv: qbo_csv.ok_or_else(|| UsageError::missing_flag("--qbo-csv"))?,
+        qbo_ar,
+        qbo_ap,
+        dry_run,
+        scratch,
+    })
+}
+
+fn parse_tb(mut args: Args<'_>) -> Result<Command, UsageError> {
+    let mut db = None;
+    let mut company = None;
+    let mut as_of = None;
+    while let Some(flag) = args.next() {
+        match flag.as_str() {
+            "--db" => db = Some(PathBuf::from(next_value(&mut args, "--db")?)),
+            "--company" => company = Some(next_value(&mut args, "--company")?),
+            "--as-of" => as_of = Some(parse_date(&next_value(&mut args, "--as-of")?, "--as-of")?),
+            other => return Err(UsageError::unknown_flag(other)),
+        }
+    }
+    Ok(Command::Tb {
+        db: db.ok_or_else(|| UsageError::missing_flag("--db"))?,
+        company: company.ok_or_else(|| UsageError::missing_flag("--company"))?,
+        as_of: as_of.ok_or_else(|| UsageError::missing_flag("--as-of"))?,
+    })
+}
+
+fn parse_pnl(mut args: Args<'_>) -> Result<Command, UsageError> {
+    let mut db = None;
+    let mut company = None;
+    let mut from = None;
+    let mut to = None;
+    while let Some(flag) = args.next() {
+        match flag.as_str() {
+            "--db" => db = Some(PathBuf::from(next_value(&mut args, "--db")?)),
+            "--company" => company = Some(next_value(&mut args, "--company")?),
+            "--from" => from = Some(parse_date(&next_value(&mut args, "--from")?, "--from")?),
+            "--to" => to = Some(parse_date(&next_value(&mut args, "--to")?, "--to")?),
+            other => return Err(UsageError::unknown_flag(other)),
+        }
+    }
+    Ok(Command::Pnl {
+        db: db.ok_or_else(|| UsageError::missing_flag("--db"))?,
+        company: company.ok_or_else(|| UsageError::missing_flag("--company"))?,
+        from: from.ok_or_else(|| UsageError::missing_flag("--from"))?,
+        to: to.ok_or_else(|| UsageError::missing_flag("--to"))?,
+    })
+}
+
+fn parse_bs(mut args: Args<'_>) -> Result<Command, UsageError> {
+    let mut db = None;
+    let mut company = None;
+    let mut as_of = None;
+    while let Some(flag) = args.next() {
+        match flag.as_str() {
+            "--db" => db = Some(PathBuf::from(next_value(&mut args, "--db")?)),
+            "--company" => company = Some(next_value(&mut args, "--company")?),
+            "--as-of" => as_of = Some(parse_date(&next_value(&mut args, "--as-of")?, "--as-of")?),
+            other => return Err(UsageError::unknown_flag(other)),
+        }
+    }
+    Ok(Command::Bs {
+        db: db.ok_or_else(|| UsageError::missing_flag("--db"))?,
+        company: company.ok_or_else(|| UsageError::missing_flag("--company"))?,
+        as_of: as_of.ok_or_else(|| UsageError::missing_flag("--as-of"))?,
+    })
+}
+
+fn parse_tax(mut args: Args<'_>) -> Result<Command, UsageError> {
+    let mut db = None;
+    let mut company = None;
+    let mut year = None;
+    let mut quarter = None;
+    let mut rate = None;
+    while let Some(flag) = args.next() {
+        match flag.as_str() {
+            "--db" => db = Some(PathBuf::from(next_value(&mut args, "--db")?)),
+            "--company" => company = Some(next_value(&mut args, "--company")?),
+            "--year" => year = Some(parse_i32(&next_value(&mut args, "--year")?, "--year")?),
+            "--quarter" => {
+                quarter = Some(parse_u32(
+                    &next_value(&mut args, "--quarter")?,
+                    "--quarter",
+                )?)
+            }
+            "--rate" => rate = Some(parse_decimal(&next_value(&mut args, "--rate")?, "--rate")?),
+            other => return Err(UsageError::unknown_flag(other)),
+        }
+    }
+    let quarter = quarter.ok_or_else(|| UsageError::missing_flag("--quarter"))?;
+    if !(1..=4).contains(&quarter) {
+        return Err(UsageError::invalid_value("--quarter", &quarter.to_string()));
+    }
+    Ok(Command::Tax {
+        db: db.ok_or_else(|| UsageError::missing_flag("--db"))?,
+        company: company.ok_or_else(|| UsageError::missing_flag("--company"))?,
+        year: year.ok_or_else(|| UsageError::missing_flag("--year"))?,
+        quarter,
+        rate: rate.unwrap_or_else(|| Decimal::from_str(DEFAULT_TAX_RATE).expect("valid literal")),
+    })
+}
+
+fn parse_close(mut args: Args<'_>) -> Result<Command, UsageError> {
+    let mut db = None;
+    let mut company = None;
+    let mut period_end = None;
+    let mut note = None;
+    while let Some(flag) = args.next() {
+        match flag.as_str() {
+            "--db" => db = Some(PathBuf::from(next_value(&mut args, "--db")?)),
+            "--company" => company = Some(next_value(&mut args, "--company")?),
+            "--period-end" => {
+                period_end = Some(parse_date(
+                    &next_value(&mut args, "--period-end")?,
+                    "--period-end",
+                )?)
+            }
+            "--note" => note = Some(next_value(&mut args, "--note")?),
+            other => return Err(UsageError::unknown_flag(other)),
+        }
+    }
+    Ok(Command::Close {
+        db: db.ok_or_else(|| UsageError::missing_flag("--db"))?,
+        company: company.ok_or_else(|| UsageError::missing_flag("--company"))?,
+        period_end: period_end.ok_or_else(|| UsageError::missing_flag("--period-end"))?,
+        note: note.ok_or_else(|| UsageError::missing_flag("--note"))?,
+    })
+}
+
+fn parse_reopen(mut args: Args<'_>) -> Result<Command, UsageError> {
+    let mut db = None;
+    let mut company = None;
+    let mut period_end = None;
+    let mut note = None;
+    while let Some(flag) = args.next() {
+        match flag.as_str() {
+            "--db" => db = Some(PathBuf::from(next_value(&mut args, "--db")?)),
+            "--company" => company = Some(next_value(&mut args, "--company")?),
+            "--period-end" => {
+                period_end = Some(parse_date(
+                    &next_value(&mut args, "--period-end")?,
+                    "--period-end",
+                )?)
+            }
+            "--note" => note = Some(next_value(&mut args, "--note")?),
+            other => return Err(UsageError::unknown_flag(other)),
+        }
+    }
+    Ok(Command::Reopen {
+        db: db.ok_or_else(|| UsageError::missing_flag("--db"))?,
+        company: company.ok_or_else(|| UsageError::missing_flag("--company"))?,
+        period_end: period_end.ok_or_else(|| UsageError::missing_flag("--period-end"))?,
+        note: note.ok_or_else(|| UsageError::missing_flag("--note"))?,
+    })
+}
+
+fn parse_tbdiff(mut args: Args<'_>) -> Result<Command, UsageError> {
+    let mut db = None;
+    let mut company = None;
+    let mut as_of = None;
+    let mut qbo_csv = None;
+    while let Some(flag) = args.next() {
+        match flag.as_str() {
+            "--db" => db = Some(PathBuf::from(next_value(&mut args, "--db")?)),
+            "--company" => company = Some(next_value(&mut args, "--company")?),
+            "--as-of" => as_of = Some(parse_date(&next_value(&mut args, "--as-of")?, "--as-of")?),
+            "--qbo-csv" => qbo_csv = Some(PathBuf::from(next_value(&mut args, "--qbo-csv")?)),
+            other => return Err(UsageError::unknown_flag(other)),
+        }
+    }
+    Ok(Command::TbDiff {
+        db: db.ok_or_else(|| UsageError::missing_flag("--db"))?,
+        company: company.ok_or_else(|| UsageError::missing_flag("--company"))?,
+        as_of: as_of.ok_or_else(|| UsageError::missing_flag("--as-of"))?,
+        qbo_csv: qbo_csv.ok_or_else(|| UsageError::missing_flag("--qbo-csv"))?,
+    })
+}
+
+fn parse_gl(mut args: Args<'_>) -> Result<Command, UsageError> {
+    let mut db = None;
+    let mut company = None;
+    let mut from = None;
+    let mut to = None;
+    let mut account = None;
+    while let Some(flag) = args.next() {
+        match flag.as_str() {
+            "--db" => db = Some(PathBuf::from(next_value(&mut args, "--db")?)),
+            "--company" => company = Some(next_value(&mut args, "--company")?),
+            "--from" => from = Some(parse_date(&next_value(&mut args, "--from")?, "--from")?),
+            "--to" => to = Some(parse_date(&next_value(&mut args, "--to")?, "--to")?),
+            "--account" => account = Some(next_value(&mut args, "--account")?),
+            other => return Err(UsageError::unknown_flag(other)),
+        }
+    }
+    Ok(Command::Gl {
+        db: db.ok_or_else(|| UsageError::missing_flag("--db"))?,
+        company: company.ok_or_else(|| UsageError::missing_flag("--company"))?,
+        from: from.ok_or_else(|| UsageError::missing_flag("--from"))?,
+        to: to.ok_or_else(|| UsageError::missing_flag("--to"))?,
+        account,
+    })
+}
+
+fn parse_audit(mut args: Args<'_>) -> Result<Command, UsageError> {
+    let mut db = None;
+    let mut company = None;
+    let mut since = None;
+    while let Some(flag) = args.next() {
+        match flag.as_str() {
+            "--db" => db = Some(PathBuf::from(next_value(&mut args, "--db")?)),
+            "--company" => company = Some(next_value(&mut args, "--company")?),
+            "--since" => since = Some(parse_date(&next_value(&mut args, "--since")?, "--since")?),
+            other => return Err(UsageError::unknown_flag(other)),
+        }
+    }
+    Ok(Command::Audit {
+        db: db.ok_or_else(|| UsageError::missing_flag("--db"))?,
+        company: company.ok_or_else(|| UsageError::missing_flag("--company"))?,
+        since,
+    })
+}
+
+fn parse_export(mut args: Args<'_>) -> Result<Command, UsageError> {
+    let mut db = None;
+    let mut company = None;
+    let mut as_of = None;
+    let mut dir = None;
+    while let Some(flag) = args.next() {
+        match flag.as_str() {
+            "--db" => db = Some(PathBuf::from(next_value(&mut args, "--db")?)),
+            "--company" => company = Some(next_value(&mut args, "--company")?),
+            "--as-of" => as_of = Some(parse_date(&next_value(&mut args, "--as-of")?, "--as-of")?),
+            "--dir" => dir = Some(PathBuf::from(next_value(&mut args, "--dir")?)),
+            other => return Err(UsageError::unknown_flag(other)),
+        }
+    }
+    Ok(Command::Export {
+        db: db.ok_or_else(|| UsageError::missing_flag("--db"))?,
+        company: company.ok_or_else(|| UsageError::missing_flag("--company"))?,
+        as_of: as_of.ok_or_else(|| UsageError::missing_flag("--as-of"))?,
+        dir: dir.ok_or_else(|| UsageError::missing_flag("--dir"))?,
+    })
+}
+
+fn parse_accountant(mut args: Args<'_>) -> Result<Command, UsageError> {
+    let Some(sub) = args.next() else {
+        return Err(UsageError::new("accountant requires pack or open"));
+    };
+    let mut db = None;
+    let mut company = None;
+    let mut as_of = None;
+    let mut out = None;
+    let mut pack = None;
+    while let Some(flag) = args.next() {
+        match flag.as_str() {
+            "--db" => db = Some(PathBuf::from(next_value(&mut args, "--db")?)),
+            "--company" => company = Some(next_value(&mut args, "--company")?),
+            "--as-of" => as_of = Some(parse_date(&next_value(&mut args, "--as-of")?, "--as-of")?),
+            "--out" => out = Some(PathBuf::from(next_value(&mut args, "--out")?)),
+            "--pack" => pack = Some(PathBuf::from(next_value(&mut args, "--pack")?)),
+            other => return Err(UsageError::unknown_flag(other)),
+        }
+    }
+    match sub.as_str() {
+        "pack" => Ok(Command::AccountantPack {
+            db: db.ok_or_else(|| UsageError::missing_flag("--db"))?,
+            company: company.ok_or_else(|| UsageError::missing_flag("--company"))?,
+            as_of: as_of.ok_or_else(|| UsageError::missing_flag("--as-of"))?,
+            out: out.ok_or_else(|| UsageError::missing_flag("--out"))?,
+        }),
+        "open" => Ok(Command::AccountantOpen {
+            pack: pack.ok_or_else(|| UsageError::missing_flag("--pack"))?,
+        }),
+        other => Err(UsageError::unknown_subcommand(&format!(
+            "accountant {other}"
+        ))),
+    }
+}
+
+/// `ACCOUNT:dr|cr:AMOUNT[:CLASS]`, one journal line for `adjust propose`.
+fn parse_line_spec(raw: &str, line_no: i64) -> Result<JournalLine, UsageError> {
+    let parts: Vec<&str> = raw.split(':').collect();
+    let [account, side, amount, rest @ ..] = parts.as_slice() else {
+        return Err(UsageError::invalid_value("--line", raw));
+    };
+    if rest.len() > 1 {
+        return Err(UsageError::invalid_value("--line", raw));
+    }
+    let side = match side.to_ascii_lowercase().as_str() {
+        "dr" | "debit" => Side::Debit,
+        "cr" | "credit" => Side::Credit,
+        _ => return Err(UsageError::invalid_value("--line", raw)),
+    };
+    let decimal =
+        Decimal::from_str(amount).map_err(|_| UsageError::invalid_value("--line", raw))?;
+    let amount = ledger_core::round_money(decimal, ledger_core::RoundingPolicy::LineExtension)
+        .map_err(|_| UsageError::invalid_value("--line", raw))?;
+    let class = rest.first().map(|c| ClassId(c.to_string()));
+
+    let line = match side {
+        Side::Debit => JournalLine::debit(line_no, AccountId(account.to_string()), amount),
+        Side::Credit => JournalLine::credit(line_no, AccountId(account.to_string()), amount),
+    };
+    Ok(line.with_class(class))
+}
+
+fn parse_adjust(mut args: Args<'_>) -> Result<Command, UsageError> {
+    let Some(sub) = args.next() else {
+        return Err(UsageError::usage());
+    };
+    match sub.as_str() {
+        "propose" => parse_adjust_propose(args),
+        "list" => parse_adjust_list(args),
+        "approve" => parse_adjust_decide(args, true),
+        "reject" => parse_adjust_decide(args, false),
+        other => Err(UsageError::unknown_subcommand(other)),
+    }
+}
+
+fn parse_adjust_propose(mut args: Args<'_>) -> Result<Command, UsageError> {
+    let mut db = None;
+    let mut company = None;
+    let mut by = None;
+    let mut desc = None;
+    let mut lines_raw: Vec<String> = Vec::new();
+    while let Some(flag) = args.next() {
+        match flag.as_str() {
+            "--db" => db = Some(PathBuf::from(next_value(&mut args, "--db")?)),
+            "--company" => company = Some(next_value(&mut args, "--company")?),
+            "--by" => by = Some(next_value(&mut args, "--by")?),
+            "--desc" => desc = Some(next_value(&mut args, "--desc")?),
+            "--line" => lines_raw.push(next_value(&mut args, "--line")?),
+            other => return Err(UsageError::unknown_flag(other)),
+        }
+    }
+    if lines_raw.is_empty() {
+        return Err(UsageError::missing_flag("--line"));
+    }
+    let lines = lines_raw
+        .iter()
+        .enumerate()
+        .map(|(i, raw)| parse_line_spec(raw, (i + 1) as i64))
+        .collect::<Result<Vec<_>, UsageError>>()?;
+    Ok(Command::AdjustPropose {
+        db: db.ok_or_else(|| UsageError::missing_flag("--db"))?,
+        company: company.ok_or_else(|| UsageError::missing_flag("--company"))?,
+        by: by.ok_or_else(|| UsageError::missing_flag("--by"))?,
+        desc: desc.ok_or_else(|| UsageError::missing_flag("--desc"))?,
+        lines,
+    })
+}
+
+fn parse_adjust_list(mut args: Args<'_>) -> Result<Command, UsageError> {
+    let mut db = None;
+    let mut company = None;
+    let mut state = None;
+    while let Some(flag) = args.next() {
+        match flag.as_str() {
+            "--db" => db = Some(PathBuf::from(next_value(&mut args, "--db")?)),
+            "--company" => company = Some(next_value(&mut args, "--company")?),
+            "--state" => state = Some(next_value(&mut args, "--state")?),
+            other => return Err(UsageError::unknown_flag(other)),
+        }
+    }
+    Ok(Command::AdjustList {
+        db: db.ok_or_else(|| UsageError::missing_flag("--db"))?,
+        company: company.ok_or_else(|| UsageError::missing_flag("--company"))?,
+        state,
+    })
+}
+
+fn parse_adjust_decide(mut args: Args<'_>, approve: bool) -> Result<Command, UsageError> {
+    let mut db = None;
+    let mut company = None;
+    let mut id = None;
+    let mut by = None;
+    let mut note = None;
+    while let Some(flag) = args.next() {
+        match flag.as_str() {
+            "--db" => db = Some(PathBuf::from(next_value(&mut args, "--db")?)),
+            "--company" => company = Some(next_value(&mut args, "--company")?),
+            "--id" => id = Some(next_value(&mut args, "--id")?),
+            "--by" => by = Some(next_value(&mut args, "--by")?),
+            "--note" => note = Some(next_value(&mut args, "--note")?),
+            other => return Err(UsageError::unknown_flag(other)),
+        }
+    }
+    Ok(Command::AdjustDecide {
+        db: db.ok_or_else(|| UsageError::missing_flag("--db"))?,
+        company: company.ok_or_else(|| UsageError::missing_flag("--company"))?,
+        id: id.ok_or_else(|| UsageError::missing_flag("--id"))?,
+        by: by.ok_or_else(|| UsageError::missing_flag("--by"))?,
+        note: note.ok_or_else(|| UsageError::missing_flag("--note"))?,
+        approve,
+    })
+}
+
+fn parse_reclass(mut args: Args<'_>) -> Result<Command, UsageError> {
+    let mut db = None;
+    let mut company = None;
+    let mut entry = None;
+    let mut line = None;
+    let mut account = None;
+    let mut class = None;
+    let mut by = None;
+    while let Some(flag) = args.next() {
+        match flag.as_str() {
+            "--db" => db = Some(PathBuf::from(next_value(&mut args, "--db")?)),
+            "--company" => company = Some(next_value(&mut args, "--company")?),
+            "--entry" => entry = Some(next_value(&mut args, "--entry")?),
+            "--line" => line = Some(next_value(&mut args, "--line")?),
+            "--account" => account = Some(next_value(&mut args, "--account")?),
+            "--class" => class = Some(next_value(&mut args, "--class")?),
+            "--by" => by = Some(next_value(&mut args, "--by")?),
+            other => return Err(UsageError::unknown_flag(other)),
+        }
+    }
+    let line = line.ok_or_else(|| UsageError::missing_flag("--line"))?;
+    let line_no = line
+        .parse::<i64>()
+        .map_err(|_| UsageError::invalid_value("--line", &line))?;
+    Ok(Command::Reclass {
+        db: db.ok_or_else(|| UsageError::missing_flag("--db"))?,
+        company: company.ok_or_else(|| UsageError::missing_flag("--company"))?,
+        entry: entry.ok_or_else(|| UsageError::missing_flag("--entry"))?,
+        line_no,
+        account: account.ok_or_else(|| UsageError::missing_flag("--account"))?,
+        class,
+        by: by.ok_or_else(|| UsageError::missing_flag("--by"))?,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Execution
+// ---------------------------------------------------------------------------
+
+enum CommandError {
+    Runtime(String),
+}
+
+fn runtime<E: std::fmt::Display>(error: E) -> CommandError {
+    CommandError::Runtime(error.to_string())
+}
+
+fn ok((): ()) -> ExitCode {
+    ExitCode::SUCCESS
+}
+
+fn execute(command: Command) -> Result<ExitCode, CommandError> {
+    match command {
+        Command::Init {
+            db,
+            company,
+            name,
+            realm,
+        } => run_init(&db, &company, &name, realm.as_deref()).map(ok),
+        Command::Import {
+            db,
+            company,
+            replica,
+            realm,
+            from,
+            to,
+        } => run_import(&db, &company, &replica, &realm, from, to).map(ok),
+        Command::ImportSlim {
+            db,
+            company,
+            replica,
+            realm,
+            as_of,
+            qbo_csv,
+            qbo_ar,
+            qbo_ap,
+            dry_run,
+            scratch,
+        } => run_import_slim(
+            db.as_deref(),
+            &company,
+            &replica,
+            &realm,
+            as_of,
+            &qbo_csv,
+            qbo_ar.as_deref(),
+            qbo_ap.as_deref(),
+            dry_run,
+            scratch.as_deref(),
+        ),
+        Command::Tb { db, company, as_of } => run_tb(&db, &company, as_of).map(ok),
+        Command::Pnl {
+            db,
+            company,
+            from,
+            to,
+        } => run_pnl(&db, &company, from, to).map(ok),
+        Command::Bs { db, company, as_of } => run_bs(&db, &company, as_of).map(ok),
+        Command::Tax {
+            db,
+            company,
+            year,
+            quarter,
+            rate,
+        } => run_tax(&db, &company, year, quarter, rate).map(ok),
+        Command::Close {
+            db,
+            company,
+            period_end,
+            note,
+        } => run_close(&db, &company, period_end, &note).map(ok),
+        Command::Reopen {
+            db,
+            company,
+            period_end,
+            note,
+        } => run_reopen(&db, &company, period_end, &note).map(ok),
+        Command::TbDiff {
+            db,
+            company,
+            as_of,
+            qbo_csv,
+        } => run_tbdiff(&db, &company, as_of, &qbo_csv),
+        Command::Gl {
+            db,
+            company,
+            from,
+            to,
+            account,
+        } => run_gl(&db, &company, from, to, account).map(ok),
+        Command::Audit { db, company, since } => run_audit(&db, &company, since).map(ok),
+        Command::Export {
+            db,
+            company,
+            as_of,
+            dir,
+        } => run_export(&db, &company, as_of, &dir).map(ok),
+        Command::AccountantPack {
+            db,
+            company,
+            as_of,
+            out,
+        } => run_accountant_pack(&db, &company, as_of, &out).map(ok),
+        Command::AccountantOpen { pack } => run_accountant_open(&pack).map(ok),
+        Command::AdjustPropose {
+            db,
+            company,
+            by,
+            desc,
+            lines,
+        } => run_adjust_propose(&db, &company, &by, &desc, lines).map(ok),
+        Command::AdjustList { db, company, state } => {
+            run_adjust_list(&db, &company, state.as_deref()).map(ok)
+        }
+        Command::AdjustDecide {
+            db,
+            company,
+            id,
+            by,
+            note,
+            approve,
+        } => run_adjust_decide(&db, &company, &id, &by, &note, approve).map(ok),
+        Command::Reclass {
+            db,
+            company,
+            entry,
+            line_no,
+            account,
+            class,
+            by,
+        } => run_reclass(
+            &db,
+            &company,
+            &entry,
+            line_no,
+            &account,
+            class.as_deref(),
+            &by,
+        )
+        .map(ok),
+        Command::BankImport {
+            db,
+            company,
+            account,
+            file,
+            format,
+            profile,
+            opening,
+            closing,
+            from,
+            to,
+        } => run_bank_import(
+            &db, &company, &account, &file, format, profile, opening, closing, from, to,
+        )
+        .map(ok),
+        Command::BankMatch {
+            db,
+            company,
+            statement,
+        } => run_bank_match(&db, &company, &statement).map(ok),
+        Command::BankConfirm {
+            db,
+            company,
+            line,
+            account,
+            class,
+        } => run_bank_confirm(&db, &company, &line, &account, class.as_deref()).map(ok),
+        Command::BankClose {
+            db,
+            company,
+            statement,
+        } => run_bank_close(&db, &company, &statement),
+        Command::BankStatus {
+            db,
+            company,
+            statement,
+        } => run_bank_status(&db, &company, &statement).map(ok),
+        Command::AuthnetImport {
+            db,
+            company,
+            file,
+            clearing,
+            fees,
+            undeposited,
+            refund_class,
+            fee_class,
+        } => run_authnet_import(
+            &db,
+            &company,
+            &file,
+            &clearing,
+            &fees,
+            &undeposited,
+            &refund_class,
+            &fee_class,
+        )
+        .map(ok),
+        Command::PayrollImport {
+            db,
+            company,
+            file,
+            config,
+            dry_run,
+        } => run_payroll_import(&db, &company, &file, config, dry_run).map(ok),
+        Command::AuthnetLink {
+            db,
+            company,
+            document,
+            config,
+            out,
+        } => run_authnet_link(&db, &company, &document, config, out).map(ok),
+        Command::AuthnetCredentials { environment } => {
+            run_authnet_credentials(&environment).map(ok)
+        }
+        Command::RenderDocument {
+            db,
+            company,
+            document,
+            out,
+            config,
+            pay_link,
+        } => run_render_document(&db, &company, &document, out, config, pay_link).map(ok),
+        Command::RenderStatement {
+            db,
+            company,
+            customer,
+            as_of,
+            out,
+            config,
+        } => run_render_statement(&db, &company, &customer, as_of, out, config).map(ok),
+        Command::Opening {
+            db,
+            company,
+            as_of,
+            qbo_csv,
+        } => run_opening(&db, &company, as_of, &qbo_csv).map(ok),
+        Command::Boundary {
+            db,
+            company,
+            replica,
+            realm,
+            snapshots,
+        } => run_boundary(&db, &company, &replica, &realm, &snapshots).map(ok),
+        Command::Verify { db, company } => run_verify(&db, &company),
+        Command::Nightly {
+            db,
+            company,
+            replica,
+            realm,
+            qbo_csv,
+            out,
+            from,
+            as_of,
+            plist,
+        } => run_nightly(
+            &db, &company, &replica, &realm, &qbo_csv, &out, from, as_of, plist,
+        ),
+        Command::Mfg(cmd) => run_mfg(cmd),
+        Command::ClassesSuggest {
+            replica,
+            realm,
+            company,
+            out,
+            rules,
+            as_of,
+        } => run_classes_suggest(&replica, realm, &company, &out, rules.as_deref(), as_of).map(ok),
+        Command::ClassesApply { db, company, csv } => {
+            run_classes_apply(&db, &company, &csv).map(ok)
+        }
+    }
+}
+
+// -- classes (D33) --------------------------------------------------------
+
+fn run_classes_suggest(
+    replica: &std::path::Path,
+    realm: Option<RealmId>,
+    company: &str,
+    out: &std::path::Path,
+    rules: Option<&std::path::Path>,
+    as_of: Option<NaiveDate>,
+) -> Result<(), CommandError> {
+    let rules_text = match rules {
+        Some(path) => {
+            fs::read_to_string(path).map_err(|e| runtime(format!("{}: {e}", path.display())))?
+        }
+        None => item_classes::DEFAULT_RULES.to_string(),
+    };
+    let rules = item_classes::Rules::parse(&rules_text, company).map_err(runtime)?;
+    // Read-only: this may be pointed at the live replica the daemon owns.
+    let store = Store::open_read_only(replica).map_err(runtime)?;
+    let realm = match realm {
+        Some(realm) => realm,
+        None => {
+            let realms = store.list_realms().map_err(runtime)?;
+            match realms.as_slice() {
+                [only] => only.realm_id.clone(),
+                _ => {
+                    return Err(runtime(format!(
+                        "{}: holds {} realms; name one with --realm",
+                        replica.display(),
+                        realms.len()
+                    )))
+                }
+            }
+        }
+    };
+    let as_of = as_of.unwrap_or_else(|| Utc::now().date_naive());
+    let rows = item_classes::worksheet(&store, &realm, &rules, as_of).map_err(runtime)?;
+    fs::write(out, item_classes::render_csv(&rows))
+        .map_err(|e| runtime(format!("{}: {e}", out.display())))?;
+    let (from, to) = item_classes::sales_window(as_of);
+    println!("sales window {from} to {to}");
+    print!("{}", item_classes::summarize(&rows).render_text());
+    println!("\nwrote {}", out.display());
+    Ok(())
+}
+
+fn run_classes_apply(
+    db: &std::path::Path,
+    company: &str,
+    csv: &std::path::Path,
+) -> Result<(), CommandError> {
+    let text = fs::read_to_string(csv).map_err(|e| runtime(format!("{}: {e}", csv.display())))?;
+    let rows = item_classes::parse_reviewed(&text).map_err(runtime)?;
+    let ledger = Ledger::open(db).map_err(runtime)?;
+    let report =
+        item_classes::apply(&ledger, company, &rows, &actor(), Utc::now()).map_err(runtime)?;
+    print!("{}", report.render_text(company));
+    Ok(())
+}
+
+fn actor() -> String {
+    env::var("USER").unwrap_or_else(|_| "dan".to_string())
+}
+
+// -- init ---------------------------------------------------------------
+
+fn run_init(
+    db: &std::path::Path,
+    company: &str,
+    name: &str,
+    realm: Option<&str>,
+) -> Result<(), CommandError> {
+    let ledger = Ledger::open(db).map_err(runtime)?;
+    ledger
+        .create_company(company, name, realm, Utc::now())
+        .map_err(runtime)?;
+    println!("created company {company} ({name:?}) in {}", db.display());
+    Ok(())
+}
+
+// -- import ---------------------------------------------------------------
+
+#[allow(clippy::too_many_arguments)]
+fn run_import(
+    db: &std::path::Path,
+    company: &str,
+    replica: &std::path::Path,
+    realm: &RealmId,
+    from: Option<NaiveDate>,
+    to: Option<NaiveDate>,
+) -> Result<(), CommandError> {
+    let ledger = Ledger::open(db).map_err(runtime)?;
+    let store = Store::open(replica).map_err(runtime)?;
+    let options = ImportOptions::with_d28_fallback(from, to);
+    let report = pipeline::import_replica(&ledger, &store, realm, company, &options, Utc::now())
+        .map_err(runtime)?;
+    print!("{}", report.render_text());
+    Ok(())
+}
+
+// -- import-slim ----------------------------------------------------------
+
+/// D28's slim cutover import (`docs/CUTOVER.md`). Always rehearses first, on
+/// a scratch copy of `--db` (or a blank book when there is none): a dry run
+/// stops there; a real run writes to `--db` only when the rehearsal passed
+/// every check, then checks the real book again.
+#[allow(clippy::too_many_arguments)]
+fn run_import_slim(
+    db: Option<&std::path::Path>,
+    company: &str,
+    replica: &std::path::Path,
+    realm: &RealmId,
+    as_of: NaiveDate,
+    qbo_csv: &std::path::Path,
+    qbo_ar: Option<&std::path::Path>,
+    qbo_ap: Option<&std::path::Path>,
+    dry_run: bool,
+    scratch: Option<&std::path::Path>,
+) -> Result<ExitCode, CommandError> {
+    let now = Utc::now();
+    let store = Store::open(replica).map_err(runtime)?;
+    let options = slim::SlimOptions {
+        as_of,
+        qbo_tb: read_qbo_csv(qbo_csv).map_err(runtime)?,
+        qbo_ar: qbo_ar.map(read_aging_csv).transpose().map_err(runtime)?,
+        qbo_ap: qbo_ap.map(read_aging_csv).transpose().map_err(runtime)?,
+    };
+
+    // The scratch book: the named one is kept, a temporary one removed.
+    let (scratch_path, keep) = match scratch {
+        Some(path) => {
+            if path.exists() {
+                return Err(runtime(format!(
+                    "{}: the scratch book must not exist yet",
+                    path.display()
+                )));
+            }
+            (path.to_path_buf(), true)
+        }
+        None => (
+            env::temp_dir().join(format!(
+                "ledger-slim-{company}-{}-{}.sqlite",
+                std::process::id(),
+                now.timestamp_nanos_opt().unwrap_or_default()
+            )),
+            false,
+        ),
+    };
+    let rehearsal = (|| -> Result<slim::SlimReport, CommandError> {
+        match db.filter(|path| path.exists()) {
+            Some(path) => {
+                let real = Ledger::open(path).map_err(runtime)?;
+                slim::copy_book(&real, &scratch_path).map_err(runtime)?;
+            }
+            None => drop(Ledger::open(&scratch_path).map_err(runtime)?),
+        }
+        let book = Ledger::open(&scratch_path).map_err(runtime)?;
+        slim::ensure_company(&book, company, realm, now).map_err(runtime)?;
+        slim::import_slim(&book, &store, realm, company, &options, now).map_err(runtime)
+    })();
+    if !keep {
+        for suffix in ["", "-wal", "-shm"] {
+            let mut path = scratch_path.clone().into_os_string();
+            path.push(suffix);
+            let _ = fs::remove_file(path);
+        }
+    }
+    let rehearsal = rehearsal?;
+
+    println!(
+        "DRY RUN on a scratch book{}\n",
+        if keep {
+            format!(" ({})", scratch_path.display())
+        } else {
+            String::new()
+        }
+    );
+    print!("{}", rehearsal.render_text(company));
+    if dry_run {
+        return Ok(if rehearsal.passed() {
+            ExitCode::SUCCESS
+        } else {
+            ExitCode::from(1)
+        });
+    }
+    let db = db.expect("a real run has --db (checked at parse)");
+    if !rehearsal.passed() {
+        println!(
+            "\nnothing written to {}: the rehearsal failed",
+            db.display()
+        );
+        return Ok(ExitCode::from(1));
+    }
+
+    let ledger = Ledger::open(db).map_err(runtime)?;
+    slim::ensure_company(&ledger, company, realm, now).map_err(runtime)?;
+    let real =
+        slim::import_slim(&ledger, &store, realm, company, &options, now).map_err(runtime)?;
+    println!("\nREAL RUN into {}\n", db.display());
+    print!("{}", real.render_text(company));
+    Ok(if real.passed() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(1)
+    })
+}
+
+/// `entity_id,name,current,1-30,31-60,61-90,over_90,total`, the CSV
+/// `qbo-local report --name ar-aging|ap-aging` writes. First line a header.
+fn read_aging_csv(path: &std::path::Path) -> Result<Vec<slim::QboAgingRow>, String> {
+    let raw = fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let mut rows = Vec::new();
+    for (line_no, line) in raw.lines().enumerate().skip(1) {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let fields: Vec<&str> = line.split(',').map(str::trim).collect();
+        let [entity_id, name, current, d1, d31, d61, d90, total] = fields[..] else {
+            return Err(format!(
+                "{}:{}: expected entity_id,name,current,1-30,31-60,61-90,over_90,total, got {line:?}",
+                path.display(),
+                line_no + 1
+            ));
+        };
+        let amount = |raw: &str| -> Result<Money, String> {
+            let decimal = Decimal::from_str(raw).map_err(|e| {
+                format!(
+                    "{}:{}: invalid amount {raw:?}: {e}",
+                    path.display(),
+                    line_no + 1
+                )
+            })?;
+            ledger_core::round_money(decimal, ledger_core::RoundingPolicy::MirroredAmount)
+                .map_err(|e| format!("{}:{}: amount {raw:?}: {e}", path.display(), line_no + 1))
+        };
+        rows.push(slim::QboAgingRow {
+            entity_id: (!entity_id.is_empty()).then(|| entity_id.to_string()),
+            name: name.to_string(),
+            current: amount(current)?,
+            days_1_30: amount(d1)?,
+            days_31_60: amount(d31)?,
+            days_61_90: amount(d61)?,
+            over_90: amount(d90)?,
+            total: amount(total)?,
+        });
+    }
+    Ok(rows)
+}
+
+// -- tb ---------------------------------------------------------------------
+
+fn run_tb(db: &std::path::Path, company: &str, as_of: NaiveDate) -> Result<(), CommandError> {
+    let ledger = handoff::open_book(db).map_err(runtime)?;
+    let tb = report::trial_balance(&ledger, company, as_of).map_err(runtime)?;
+    print!("{}", render_trial_balance(&tb, company, as_of));
+    Ok(())
+}
+
+fn render_trial_balance(tb: &TrialBalance, company: &str, as_of: NaiveDate) -> String {
+    let mut out = String::new();
+    out.push_str(&format!("TRIAL BALANCE   {company}   as of {as_of}\n\n"));
+    out.push_str(&format!(
+        "{:<8}{:<32}{:>14}{:>14}{:>14}\n",
+        "acct", "name", "debit", "credit", "balance"
+    ));
+    for row in &tb.rows {
+        if row.debit.is_zero() && row.credit.is_zero() {
+            continue;
+        }
+        out.push_str(&format!(
+            "{:<8}{:<32}{:>14}{:>14}{:>14}\n",
+            row.number,
+            row.name,
+            fmt_money(row.debit),
+            fmt_money(row.credit),
+            fmt_money(row.balance),
+        ));
+    }
+    out.push_str(&format!(
+        "\nTOTAL{:<35}{:>14}{:>14}\n",
+        "",
+        fmt_money(tb.total_debits),
+        fmt_money(tb.total_credits),
+    ));
+    if tb.total_debits == tb.total_credits {
+        out.push_str("balanced\n");
+    } else {
+        out.push_str("*** DOES NOT BALANCE ***\n");
+    }
+    if !tb.wrong_side.is_empty() {
+        out.push_str("\naccounts on the wrong side of their normal balance:\n");
+        for account in &tb.wrong_side {
+            out.push_str(&format!("  - {}\n", account.0));
+        }
+    }
+    out
+}
+
+// -- pnl ----------------------------------------------------------------
+
+fn run_pnl(
+    db: &std::path::Path,
+    company: &str,
+    from: NaiveDate,
+    to: NaiveDate,
+) -> Result<(), CommandError> {
+    let ledger = handoff::open_book(db).map_err(runtime)?;
+    let pnl = report::profit_and_loss(&ledger, company, from, to).map_err(runtime)?;
+    print!("{}", render_pnl(&pnl, company, from, to));
+    Ok(())
+}
+
+fn render_pnl(pnl: &Pnl, company: &str, from: NaiveDate, to: NaiveDate) -> String {
+    let mut out = String::new();
+    out.push_str(&format!("PROFIT AND LOSS   {company}   {from} .. {to}\n\n"));
+    out.push_str(&format!(
+        "  income          : {}\n",
+        fmt_money(pnl.income.total)
+    ));
+    out.push_str(&format!(
+        "  COGS            : {}\n",
+        fmt_money(pnl.cogs.total)
+    ));
+    out.push_str(&format!(
+        "  gross margin    : {}\n",
+        fmt_money(pnl.gross_margin)
+    ));
+    out.push_str(&format!(
+        "  expense         : {}\n",
+        fmt_money(pnl.expense.total)
+    ));
+    out.push_str(&format!(
+        "  net income      : {}\n",
+        fmt_money(pnl.net_income)
+    ));
+    out
+}
+
+// -- bs -----------------------------------------------------------------
+
+fn run_bs(db: &std::path::Path, company: &str, as_of: NaiveDate) -> Result<(), CommandError> {
+    let ledger = handoff::open_book(db).map_err(runtime)?;
+    let bs = report::balance_sheet(&ledger, company, as_of).map_err(runtime)?;
+    print!("{}", render_bs(&bs, company, as_of));
+    Ok(())
+}
+
+fn render_bs(bs: &BalanceSheet, company: &str, as_of: NaiveDate) -> String {
+    let mut out = String::new();
+    out.push_str(&format!("BALANCE SHEET   {company}   as of {as_of}\n\n"));
+    out.push_str("ASSETS\n");
+    for row in &bs.assets.rows {
+        out.push_str(&format!(
+            "  {:<40}{:>14}\n",
+            row.name,
+            fmt_money(row.balance)
+        ));
+    }
+    out.push_str(&format!(
+        "  {:<40}{:>14}\n\n",
+        "TOTAL ASSETS",
+        fmt_money(bs.assets.total)
+    ));
+    out.push_str("LIABILITIES\n");
+    for row in &bs.liabilities.rows {
+        out.push_str(&format!(
+            "  {:<40}{:>14}\n",
+            row.name,
+            fmt_money(row.balance)
+        ));
+    }
+    out.push_str(&format!(
+        "  {:<40}{:>14}\n\n",
+        "TOTAL LIABILITIES",
+        fmt_money(bs.liabilities.total)
+    ));
+    out.push_str("EQUITY\n");
+    for row in &bs.equity.rows {
+        out.push_str(&format!(
+            "  {:<40}{:>14}\n",
+            row.name,
+            fmt_money(row.balance)
+        ));
+    }
+    out.push_str(&format!(
+        "  {:<40}{:>14}\n\n",
+        "TOTAL EQUITY",
+        fmt_money(bs.equity.total)
+    ));
+    out.push_str(&format!(
+        "TOTAL LIABILITIES AND EQUITY          {:>14}\n",
+        fmt_money(bs.total_liabilities_and_equity)
+    ));
+    out
+}
+
+// -- tax ------------------------------------------------------------------
+
+fn run_tax(
+    db: &std::path::Path,
+    company: &str,
+    year: i32,
+    quarter: u32,
+    rate: Decimal,
+) -> Result<(), CommandError> {
+    let ledger = handoff::open_book(db).map_err(runtime)?;
+    let lines =
+        report::sales_tax_lines(&ledger, company, (year, quarter), rate).map_err(runtime)?;
+    print!("{}", render_tax(&lines, company, year, quarter, rate));
+    Ok(())
+}
+
+fn render_tax(
+    lines: &SalesTaxLines,
+    company: &str,
+    year: i32,
+    quarter: u32,
+    rate: Decimal,
+) -> String {
+    let mut out = String::new();
+    out.push_str(&format!(
+        "SALES TAX LIABILITY   {company}   {year} Q{quarter}   rate {rate}\n\n"
+    ));
+    out.push_str(&format!(
+        "  A  total income      : {}\n",
+        fmt_money(lines.a_total_income)
+    ));
+    out.push_str(&format!(
+        "  B  tax collected      : {}\n",
+        fmt_money(lines.b_tax_collected)
+    ));
+    out.push_str(&format!(
+        "  C  taxable sales      : {}\n",
+        fmt_money(lines.c_taxable_sales)
+    ));
+    out.push_str(&format!(
+        "  D  non-taxable sales  : {}\n",
+        fmt_money(lines.d_nontaxable_sales)
+    ));
+    match lines.e_line_level_taxable {
+        Some(e) => out.push_str(&format!("  E  taxable, line level: {}\n", fmt_money(e))),
+        None => out.push_str("  E  taxable, line level: n/a\n"),
+    }
+    // Non-zero is expected when C is derived from a rounded B (D23), not
+    // necessarily an error — it is what Dan checks before filing.
+    if let Some(variance) = lines.variance {
+        out.push_str(&format!(
+            "     variance (E - C)  : {}\n",
+            fmt_money(variance)
+        ));
+    }
+    out.push_str("\nST-50 mapping:\n");
+    for (line, amount) in lines.st50 {
+        out.push_str(&format!("  line {line}: {}\n", fmt_money(amount)));
+    }
+    out.push_str("  lines 4-9: 0.00\n");
+    out
+}
+
+// -- close / reopen ---------------------------------------------------------
+
+fn run_close(
+    db: &std::path::Path,
+    company: &str,
+    period_end: NaiveDate,
+    note: &str,
+) -> Result<(), CommandError> {
+    let ledger = Ledger::open(db).map_err(runtime)?;
+    ledger
+        .close_period(company, period_end, &actor(), note, Utc::now())
+        .map_err(runtime)?;
+    println!("closed {company} through {period_end}");
+    Ok(())
+}
+
+fn run_reopen(
+    db: &std::path::Path,
+    company: &str,
+    period_end: NaiveDate,
+    note: &str,
+) -> Result<(), CommandError> {
+    let ledger = Ledger::open(db).map_err(runtime)?;
+    ledger
+        .reopen_period(company, period_end, &actor(), note, Utc::now())
+        .map_err(runtime)?;
+    println!("reopened {company} at {period_end}: {note}");
+    Ok(())
+}
+
+// -- tbdiff -------------------------------------------------------------
+
+fn run_tbdiff(
+    db: &std::path::Path,
+    company: &str,
+    as_of: NaiveDate,
+    qbo_csv: &std::path::Path,
+) -> Result<ExitCode, CommandError> {
+    let ledger = Ledger::open(db).map_err(runtime)?;
+    let tb = report::trial_balance(&ledger, company, as_of).map_err(runtime)?;
+    let qbo_rows = read_qbo_csv(qbo_csv).map_err(runtime)?;
+    let diff = report::tb_diff(&tb, &qbo_rows, &TierRules::default()).map_err(runtime)?;
+    print!("{}", diff.render_text(company, as_of));
+    if diff.must_failures.is_empty() {
+        Ok(ExitCode::SUCCESS)
+    } else {
+        Ok(ExitCode::from(1))
+    }
+}
+
+/// `qbo_account_id,name,balance`, dollars-and-cents text in the third
+/// column. The first line is always a header and is skipped. No quoting —
+/// an internal reconciliation format, not a general CSV reader.
+fn read_qbo_csv(path: &std::path::Path) -> Result<Vec<QboTbRow>, String> {
+    let raw = fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let mut rows = Vec::new();
+    for (line_no, line) in raw.lines().enumerate().skip(1) {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let fields: Vec<&str> = line.split(',').collect();
+        let [qbo_account_id, name, balance] = fields[..] else {
+            return Err(format!(
+                "{}:{}: expected qbo_account_id,name,balance, got {line:?}",
+                path.display(),
+                line_no + 1
+            ));
+        };
+        let decimal = Decimal::from_str(balance.trim()).map_err(|e| {
+            format!(
+                "{}:{}: invalid balance {balance:?}: {e}",
+                path.display(),
+                line_no + 1
+            )
+        })?;
+        let balance =
+            ledger_core::round_money(decimal, ledger_core::RoundingPolicy::MirroredAmount)
+                .map_err(|e| {
+                    format!(
+                        "{}:{}: balance {balance:?} is not a QBO-mirrored two-decimal amount: {e}",
+                        path.display(),
+                        line_no + 1
+                    )
+                })?;
+        rows.push(QboTbRow {
+            qbo_account_id: qbo_account_id.trim().to_string(),
+            name: name.trim().to_string(),
+            balance,
+        });
+    }
+    Ok(rows)
+}
+
+// -- gl -----------------------------------------------------------------
+
+fn run_gl(
+    db: &std::path::Path,
+    company: &str,
+    from: NaiveDate,
+    to: NaiveDate,
+    account: Option<String>,
+) -> Result<(), CommandError> {
+    let ledger = handoff::open_book(db).map_err(runtime)?;
+    let account_id = account.map(AccountId);
+    let gl = accountant::general_ledger(&ledger, company, from, to, account_id.as_ref())
+        .map_err(runtime)?;
+    print!("{}", render_gl(&gl, company, from, to));
+    Ok(())
+}
+
+fn render_gl(gl: &GlDetail, company: &str, from: NaiveDate, to: NaiveDate) -> String {
+    let mut out = String::new();
+    out.push_str(&format!("GL DETAIL   {company}   {from} .. {to}\n"));
+    for section in &gl.sections {
+        out.push_str(&format!(
+            "\n{} {}   opening {}\n",
+            section.number,
+            section.name,
+            fmt_money(section.opening_balance)
+        ));
+        for line in &section.lines {
+            out.push_str(&format!(
+                "  {}  {:<10}  {:<10}  dr {:>12}  cr {:>12}  bal {:>12}{}\n",
+                line.entry_date,
+                line.entry_id,
+                line.source_type.as_str(),
+                fmt_money(line.debit),
+                fmt_money(line.credit),
+                fmt_money(line.running_balance),
+                if line.is_flagged { "  [flagged]" } else { "" },
+            ));
+        }
+        out.push_str(&format!(
+            "  closing {}\n",
+            fmt_money(section.closing_balance)
+        ));
+    }
+    out
+}
+
+// -- audit ----------------------------------------------------------------
+
+fn run_audit(
+    db: &std::path::Path,
+    company: &str,
+    since: Option<NaiveDate>,
+) -> Result<(), CommandError> {
+    let ledger = handoff::open_book(db).map_err(runtime)?;
+    let rows = accountant::audit_trail(&ledger, company, since).map_err(runtime)?;
+    print!("{}", render_audit(&rows, company));
+    Ok(())
+}
+
+fn render_audit(rows: &[AuditRow], company: &str) -> String {
+    let mut out = String::new();
+    out.push_str(&format!("AUDIT TRAIL   {company}\n\n"));
+    for row in rows {
+        out.push_str(&format!(
+            "{}  {}  {}  {}  by {} ({}) at {}{}\n",
+            row.entry_date,
+            row.entry_id,
+            row.source_type.as_str(),
+            row.memo.as_deref().unwrap_or(""),
+            row.actor,
+            row.command_kind,
+            row.at.to_rfc3339(),
+            if row.is_flagged { "  [flagged]" } else { "" },
+        ));
+    }
+    out
+}
+
+// -- export ---------------------------------------------------------------
+
+fn run_export(
+    db: &std::path::Path,
+    company: &str,
+    as_of: NaiveDate,
+    dir: &std::path::Path,
+) -> Result<(), CommandError> {
+    let ledger = Ledger::open(db).map_err(runtime)?;
+    let paths = accountant::export_pack(&ledger, company, as_of, dir).map_err(runtime)?;
+    for path in paths {
+        println!("wrote {}", path.display());
+    }
+    Ok(())
+}
+
+// -- accountant pack / open ------------------------------------------------
+
+fn run_accountant_pack(
+    db: &std::path::Path,
+    company: &str,
+    as_of: NaiveDate,
+    out: &std::path::Path,
+) -> Result<(), CommandError> {
+    let ledger = Ledger::open(db).map_err(runtime)?;
+    let pack = handoff::write_pack(&ledger, company, as_of, out, Utc::now()).map_err(runtime)?;
+    println!("wrote {}", pack.dir.display());
+    for file in &pack.manifest.files {
+        println!("  {:<28} {}  {}", file.path, &file.sha256[..12], file.bytes);
+    }
+    println!("  {}", handoff::MANIFEST_FILE);
+    println!("  {}", handoff::SUMS_FILE);
+    println!(
+        "trial balance as of {as_of}: debits {} credits {}",
+        pack.manifest.trial_balance.total_debits, pack.manifest.trial_balance.total_credits
+    );
+    Ok(())
+}
+
+fn run_accountant_open(pack: &std::path::Path) -> Result<(), CommandError> {
+    let (manifest, snapshot) = handoff::verify_pack(pack).map_err(runtime)?;
+    let view = accountant::AccountantView::new(&snapshot, manifest.company.clone());
+    let tb = view.trial_balance(manifest.as_of).map_err(runtime)?;
+    let locked = snapshot
+        .locked_through(&manifest.company)
+        .map_err(runtime)?;
+    println!(
+        "ACCOUNTANT PACK   {}   as of {}   generated {}",
+        manifest.company,
+        manifest.as_of,
+        manifest.generated_at.to_rfc3339()
+    );
+    println!(
+        "{} files verified against manifest.json; snapshot opened read-only ({})",
+        manifest.files.len(),
+        if snapshot.is_read_only() {
+            "writes refused"
+        } else {
+            "WRITABLE"
+        },
+    );
+    println!(
+        "books closed through: {}",
+        locked
+            .map(|d| d.to_string())
+            .unwrap_or_else(|| "never".to_string())
+    );
+    println!();
+    print!(
+        "{}",
+        render_trial_balance(&tb, &manifest.company, manifest.as_of)
+    );
+    println!();
+    println!(
+        "every report reads the snapshot directly, e.g.\n  ledger gl --db {} --company {} --from {}-01-01 --to {}",
+        pack.join(handoff::SNAPSHOT_FILE).display(),
+        manifest.company,
+        manifest.as_of.format("%Y"),
+        manifest.as_of,
+    );
+    Ok(())
+}
+
+// -- adjust -----------------------------------------------------------------
+
+fn render_adjustment(request: &AdjustmentRequest) -> String {
+    format!(
+        "{}  {:?}  by {} at {}{}{}\n",
+        request.request_id,
+        request.state,
+        request.requested_by,
+        request.requested_at.to_rfc3339(),
+        if request.period_closed {
+            "  [period_closed]"
+        } else {
+            ""
+        },
+        request
+            .posted_entry_id
+            .as_ref()
+            .map(|id| format!("  entry {id}"))
+            .unwrap_or_default(),
+    )
+}
+
+fn run_adjust_propose(
+    db: &std::path::Path,
+    company: &str,
+    by: &str,
+    desc: &str,
+    lines: Vec<JournalLine>,
+) -> Result<(), CommandError> {
+    let ledger = Ledger::open(db).map_err(runtime)?;
+    let request = accountant::propose_adjustment(&ledger, company, by, desc, lines, Utc::now())
+        .map_err(runtime)?;
+    print!("{}", render_adjustment(&request));
+    Ok(())
+}
+
+fn run_adjust_list(
+    db: &std::path::Path,
+    company: &str,
+    state: Option<&str>,
+) -> Result<(), CommandError> {
+    let ledger = handoff::open_book(db).map_err(runtime)?;
+    let state = state
+        .map(|raw| {
+            AdjustmentState::parse(raw).ok_or_else(|| runtime(format!("unknown state {raw:?}")))
+        })
+        .transpose()?;
+    let requests = accountant::list_adjustments(&ledger, company, state).map_err(runtime)?;
+    for request in &requests {
+        print!("{}", render_adjustment(request));
+    }
+    Ok(())
+}
+
+fn run_adjust_decide(
+    db: &std::path::Path,
+    company: &str,
+    id: &str,
+    by: &str,
+    note: &str,
+    approve: bool,
+) -> Result<(), CommandError> {
+    let ledger = Ledger::open(db).map_err(runtime)?;
+    let request =
+        accountant::decide_adjustment(&ledger, company, id, by, approve, note, Utc::now())
+            .map_err(runtime)?;
+    print!("{}", render_adjustment(&request));
+    Ok(())
+}
+
+// -- reclass ----------------------------------------------------------------
+
+#[allow(clippy::too_many_arguments)]
+fn run_reclass(
+    db: &std::path::Path,
+    company: &str,
+    entry: &str,
+    line_no: i64,
+    account: &str,
+    class: Option<&str>,
+    by: &str,
+) -> Result<(), CommandError> {
+    let ledger = Ledger::open(db).map_err(runtime)?;
+    let request = accountant::propose_reclassify(
+        &ledger,
+        company,
+        entry,
+        line_no,
+        AccountId(account.to_string()),
+        class.map(|c| ClassId(c.to_string())),
+        by,
+        Utc::now(),
+    )
+    .map_err(runtime)?;
+    print!("{}", render_adjustment(&request));
+    Ok(())
+}
+
+// -- bank -----------------------------------------------------------------
+
+#[allow(clippy::too_many_arguments)]
+fn run_bank_import(
+    db: &std::path::Path,
+    company: &str,
+    account: &str,
+    file: &std::path::Path,
+    format: BankFormat,
+    profile: BankProfileName,
+    opening: Money,
+    closing: Money,
+    from: NaiveDate,
+    to: NaiveDate,
+) -> Result<(), CommandError> {
+    let ledger = Ledger::open(db).map_err(runtime)?;
+    let text = fs::read_to_string(file).map_err(|e| runtime(format!("{}: {e}", file.display())))?;
+    let lines = match format {
+        BankFormat::Csv => {
+            let csv_profile = match profile {
+                BankProfileName::Chase => bank::CsvProfile::chase(),
+                BankProfileName::Generic => bank::CsvProfile::generic(),
+            };
+            bank::parse_csv(&text, &csv_profile).map_err(runtime)?
+        }
+        BankFormat::Ofx => bank::parse_ofx(&text).map_err(runtime)?,
+    };
+
+    let account_id = AccountId(account.to_string());
+    let statement = NewStatement {
+        period_start: from,
+        period_end: to,
+        opening_balance: opening,
+        closing_balance: closing,
+        lines,
+    };
+    let report = ledger
+        .import_statement(company, &account_id, statement, Utc::now())
+        .map_err(runtime)?;
+    println!(
+        "imported statement {} - inserted {}, skipped (duplicate) {}",
+        report.statement_id, report.inserted, report.skipped_duplicate
+    );
+    Ok(())
+}
+
+fn run_bank_match(
+    db: &std::path::Path,
+    company: &str,
+    statement: &str,
+) -> Result<(), CommandError> {
+    let ledger = Ledger::open(db).map_err(runtime)?;
+    let report = ledger
+        .match_statement(company, statement, &MatchRules::default(), Utc::now())
+        .map_err(runtime)?;
+    println!("exact matches      : {}", report.exact);
+    println!("settlement matches : {}", report.settlement);
+    println!("proposals          : {}", report.proposals.len());
+    for proposal in &report.proposals {
+        println!(
+            "  - {} -> {} ({:?}, {})",
+            proposal.line_id, proposal.suggested_account.0, proposal.kind, proposal.reason
+        );
+    }
+    Ok(())
+}
+
+fn run_bank_confirm(
+    db: &std::path::Path,
+    company: &str,
+    line: &str,
+    account: &str,
+    class: Option<&str>,
+) -> Result<(), CommandError> {
+    let ledger = Ledger::open(db).map_err(runtime)?;
+    let account_id = AccountId(account.to_string());
+    let class_id = class.map(|c| ClassId(c.to_string()));
+    let entry_id = ledger
+        .confirm_proposal(company, line, &account_id, class_id, Utc::now())
+        .map_err(runtime)?;
+    println!("confirmed {line} -> posted entry {entry_id}");
+    Ok(())
+}
+
+fn run_bank_close(
+    db: &std::path::Path,
+    company: &str,
+    statement: &str,
+) -> Result<ExitCode, CommandError> {
+    let ledger = Ledger::open(db).map_err(runtime)?;
+    match ledger.close_statement(company, statement, Utc::now()) {
+        Ok(close) => {
+            println!(
+                "closed statement {} at {}",
+                close.statement_id, close.closed_at
+            );
+            Ok(ExitCode::SUCCESS)
+        }
+        Err(LedgerError::StatementDoesNotClose {
+            difference,
+            unmatched,
+        }) => {
+            println!(
+                "statement {statement} does not close: off by {} with {unmatched} unmatched line(s)",
+                fmt_money(difference)
+            );
+            Ok(ExitCode::from(1))
+        }
+        Err(err) => Err(runtime(err)),
+    }
+}
+
+fn run_bank_status(
+    db: &std::path::Path,
+    company: &str,
+    statement: &str,
+) -> Result<(), CommandError> {
+    let ledger = Ledger::open(db).map_err(runtime)?;
+    let lines = ledger
+        .list_bank_lines(company, statement)
+        .map_err(runtime)?;
+
+    println!("BANK STATEMENT   {statement}\n");
+    println!(
+        "{:<38}{:<12}{:>12}  {:<10}description",
+        "line", "posted", "amount", "match"
+    );
+    for line in &lines {
+        println!(
+            "{:<38}{:<12}{:>12}  {:<10}{}",
+            line.line_id,
+            line.posted_on,
+            fmt_money(line.amount),
+            line.match_kind.as_deref().unwrap_or("unmatched"),
+            line.description,
+        );
+    }
+
+    let matched = lines
+        .iter()
+        .filter(|line| {
+            matches!(
+                line.match_kind.as_deref(),
+                Some("exact") | Some("settlement") | Some("manual")
+            )
+        })
+        .count();
+    let proposed: Vec<_> = lines
+        .iter()
+        .filter(|line| line.match_kind.as_deref() == Some("proposed"))
+        .collect();
+    let unresolved = lines
+        .iter()
+        .filter(|line| line.match_kind.is_none())
+        .count();
+    println!(
+        "\nmatched: {matched}   proposals: {}   unresolved (not yet matched): {unresolved}",
+        proposed.len()
+    );
+
+    if !proposed.is_empty() {
+        println!("\nPROPOSALS:");
+        for line in proposed {
+            let (account, reason) = bank::suggest_account(&line.description);
+            println!(
+                "  - {} {} suggests {} ({reason})",
+                line.line_id,
+                fmt_money(line.amount),
+                account.0
+            );
+        }
+    }
+    Ok(())
+}
+
+// -- authnet ----------------------------------------------------------------
+
+/// `ledger authnet import`: parse, group, build the documents, and post
+/// every one of them that has not already been saved — `document_id`
+/// (`authnet:<batch>`, `authnet:txn:<txn>`) is the dedupe key, so re-running
+/// the same file posts nothing new (D22's "a re-run replaces, never
+/// duplicates" rule, simplified here to "already saved, so skip": a settled
+/// Authorize.net transaction is immutable once it appears in this export,
+/// unlike a QBO document that can still change after import).
+#[allow(clippy::too_many_arguments)]
+fn run_authnet_import(
+    db: &std::path::Path,
+    company: &str,
+    file: &std::path::Path,
+    clearing: &str,
+    fees: &str,
+    undeposited: &str,
+    refund_class: &str,
+    fee_class: &str,
+) -> Result<(), CommandError> {
+    let ledger = Ledger::open(db).map_err(runtime)?;
+    let text = fs::read_to_string(file).map_err(|e| runtime(format!("{}: {e}", file.display())))?;
+    let config = AuthnetConfig {
+        clearing: AccountId(clearing.to_string()),
+        fees: AccountId(fees.to_string()),
+        undeposited: AccountId(undeposited.to_string()),
+        refund_class: ClassId(refund_class.to_string()),
+        fee_class: ClassId(fee_class.to_string()),
+    };
+    let report = authnet::import_settlement(&ledger, company, &text, &config, &actor(), Utc::now())
+        .map_err(runtime)?;
+    for warning in &report.warnings {
+        println!("warning: {warning}");
+    }
+    println!("batches settled    : {}", report.settled);
+    println!("payments applied   : {}", report.applied);
+    println!("payments unapplied : {}", report.unapplied);
+    println!("refunds            : {}", report.refunded);
+    println!("skipped (already imported): {}", report.skipped);
+    println!("rejected           : {}", report.rejected.len());
+    for reason in &report.rejected {
+        println!("  - {reason}");
+    }
+    Ok(())
+}
+
+// -- payroll ------------------------------------------------------------------
+
+/// `ledger payroll import`: parse the pay-run lines CSV, build one journal
+/// per run, and post them all or none (`ledger::payroll::import_runs`).
+/// Prints totals only — never an employee or a paycheck.
+fn run_payroll_import(
+    db: &std::path::Path,
+    company: &str,
+    file: &std::path::Path,
+    config: Option<PathBuf>,
+    dry_run: bool,
+) -> Result<(), CommandError> {
+    let config_path = config.unwrap_or_else(payroll::default_config_path);
+    let config = PayrollConfig::load(&config_path).map_err(runtime)?;
+    let text = fs::read_to_string(file).map_err(|e| runtime(format!("{}: {e}", file.display())))?;
+    let runs = payroll::parse_csv(&text).map_err(runtime)?;
+    let money = |m: ledger_core::Money| {
+        let minor = m.minor();
+        let sign = if minor < 0 { "-" } else { "" };
+        format!(
+            "{sign}{}.{:02}",
+            minor.unsigned_abs() / 100,
+            minor.unsigned_abs() % 100
+        )
+    };
+    let print_totals = |totals: &payroll::RunTotals| {
+        println!("  gross wages        : {}", money(totals.gross));
+        println!("  employer costs     : {}", money(totals.employer_costs));
+        println!("  to payroll liab.   : {}", money(totals.liabilities));
+        println!("  net pay            : {}", money(totals.net_pay));
+        if !totals.noncash.is_zero() {
+            println!("  non-cash, not posted: {}", money(totals.noncash));
+        }
+    };
+
+    if dry_run {
+        for run in &runs {
+            let (doc, totals) = payroll::journal_document(run, &config).map_err(runtime)?;
+            println!("{} (dry run, nothing written)", doc.document_id);
+            print_totals(&totals);
+            for line in &doc.lines {
+                let side = match line.posting {
+                    Some(Side::Debit) => "Dr",
+                    _ => "Cr",
+                };
+                let account = line.account.as_ref().map_or("", |a| a.0.as_str());
+                let class = line.class.as_ref().map_or("", |c| c.0.as_str());
+                println!(
+                    "  {side} {account:<5} {class:<6} {:>12}",
+                    money(line.amount)
+                );
+            }
+        }
+        return Ok(());
+    }
+
+    let ledger = Ledger::open(db).map_err(runtime)?;
+    let outcomes = payroll::import_runs(&ledger, company, &runs, &config, &actor(), Utc::now())
+        .map_err(runtime)?;
+    for outcome in &outcomes {
+        println!(
+            "{} {} entry {}",
+            outcome.document_id,
+            outcome.status.as_str(),
+            outcome.entry_id
+        );
+        print_totals(&outcome.totals);
+    }
+    Ok(())
+}
+
+/// `ledger authnet link`: one hosted payment page for one open invoice
+/// (`ledger::authnet::link`). Prints what it got; never prints the token's
+/// credentials, which it never sees in the first place.
+fn run_authnet_link(
+    db: &std::path::Path,
+    company: &str,
+    document: &str,
+    config: Option<PathBuf>,
+    out: Option<PathBuf>,
+) -> Result<(), CommandError> {
+    let ledger = Ledger::open(db).map_err(runtime)?;
+    let config = config.unwrap_or_else(link::default_config_path);
+    let mut client = link::live_client(&config);
+    let minted = link::payment_link(&ledger, company, document, client.as_mut(), Utc::now())
+        .map_err(runtime)?;
+    println!("invoice     : {}", minted.invoice_number);
+    println!("amount      : {}", fmt_money(minted.amount));
+    println!("environment : {}", minted.environment.as_str());
+    println!("url         : {} (POST field token)", minted.url);
+    println!("expires     : {}", minted.expires_at.to_rfc3339());
+    match out {
+        Some(path) => {
+            fs::write(&path, minted.html())
+                .map_err(|e| runtime(format!("{}: {e}", path.display())))?;
+            println!("page        : {} (open before it expires)", path.display());
+        }
+        None => println!("token       : {}", minted.token),
+    }
+    Ok(())
+}
+
+/// `ledger render document`: one saved document to a PDF (D39).
+fn run_render_document(
+    db: &std::path::Path,
+    company: &str,
+    document: &str,
+    out: Option<PathBuf>,
+    config: Option<PathBuf>,
+    pay_link: bool,
+) -> Result<(), CommandError> {
+    use ledger::render::{self, PayLinkMode, PayLinkOutcome, RenderConfig};
+    let ledger = Ledger::open(db).map_err(runtime)?;
+    let documents_path = config.clone().unwrap_or_else(render::default_config_path);
+    let settings = RenderConfig::load(&documents_path).map_err(runtime)?;
+    let dir = render::output_dir(&settings, company, out.as_deref()).map_err(runtime)?;
+    let mut client =
+        pay_link.then(|| link::live_client(&config.unwrap_or_else(link::default_config_path)));
+    let mode = match client.as_mut() {
+        Some(client) => PayLinkMode::Client(client.as_mut()),
+        None => PayLinkMode::Off,
+    };
+    let done = render::render_document(
+        &ledger,
+        company,
+        document,
+        &settings,
+        &dir,
+        mode,
+        Utc::now(),
+    )
+    .map_err(runtime)?;
+    println!("file        : {}", done.rendered.path.display());
+    println!("pages       : {}", done.rendered.page_count);
+    println!("total       : {}", fmt_money(done.figures.total));
+    println!("balance due : {}", fmt_money(done.figures.balance));
+    match &done.pay_link {
+        PayLinkOutcome::Attached { link, page } => println!(
+            "pay link    : {} (open before {})",
+            page.display(),
+            link.expires_at.to_rfc3339()
+        ),
+        PayLinkOutcome::NotConfigured(reason) => println!("pay link    : none ({reason})"),
+        PayLinkOutcome::Failed(reason) => println!("pay link    : failed ({reason})"),
+        PayLinkOutcome::Skipped | PayLinkOutcome::NotApplicable => {}
+    }
+    for warning in &done.rendered.warnings {
+        eprintln!("warning: {warning}");
+    }
+    Ok(())
+}
+
+/// `ledger render statement`: one customer's open items and aging (D39).
+fn run_render_statement(
+    db: &std::path::Path,
+    company: &str,
+    customer: &str,
+    as_of: NaiveDate,
+    out: Option<PathBuf>,
+    config: Option<PathBuf>,
+) -> Result<(), CommandError> {
+    use ledger::render::{self, RenderConfig};
+    let ledger = Ledger::open(db).map_err(runtime)?;
+    let settings =
+        RenderConfig::load(&config.unwrap_or_else(render::default_config_path)).map_err(runtime)?;
+    let dir = render::output_dir(&settings, company, out.as_deref()).map_err(runtime)?;
+    let done = render::render_statement(&ledger, company, customer, as_of, &settings, &dir)
+        .map_err(runtime)?;
+    println!("file        : {}", done.rendered.path.display());
+    println!("pages       : {}", done.rendered.page_count);
+    println!("open items  : {}", done.open_items);
+    println!("total due   : {}", fmt_money(done.aging.total));
+    for warning in &done.rendered.warnings {
+        eprintln!("warning: {warning}");
+    }
+    Ok(())
+}
+
+/// `ledger authnet credentials`: two lines on stdin into the keychain, so
+/// the key never lands in shell history or a file.
+fn run_authnet_credentials(environment: &str) -> Result<(), CommandError> {
+    #[cfg(target_os = "macos")]
+    {
+        use std::io::BufRead;
+        let environment = if environment == "production" {
+            link::Environment::Production
+        } else {
+            link::Environment::Sandbox
+        };
+        eprintln!("API Login ID, then Transaction Key, one per line:");
+        let mut lines = std::io::stdin().lock().lines();
+        let mut next = |what: &str| -> Result<String, CommandError> {
+            match lines.next() {
+                Some(Ok(line)) if !line.trim().is_empty() => Ok(line.trim().to_string()),
+                _ => Err(runtime(format!("no {what} on stdin"))),
+            }
+        };
+        let credentials = link::Credentials {
+            api_login_id: next("API Login ID")?,
+            transaction_key: next("Transaction Key")?,
+        };
+        link::KeychainCredentials::new()
+            .save(environment, &credentials)
+            .map_err(runtime)?;
+        println!(
+            "saved to keychain {} / {}",
+            link::KEYCHAIN_SERVICE,
+            environment.as_str()
+        );
+        Ok(())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = environment;
+        Err(runtime(
+            "the keychain is macOS only; set AUTHNET_API_LOGIN_ID and AUTHNET_TRANSACTION_KEY",
+        ))
+    }
+}
+
+fn fmt_money(amount: Money) -> String {
+    let minor = amount.minor();
+    let sign = if minor < 0 { "-" } else { "" };
+    let abs = minor.unsigned_abs();
+    format!("{sign}{}.{:02}", abs / 100, abs % 100)
+}
+
+fn fmt_pct(value: rust_decimal::Decimal) -> String {
+    format!("{:.1}%", value * rust_decimal::Decimal::from(100))
+}
+
+fn read_json<T: serde::de::DeserializeOwned>(file: &std::path::Path) -> Result<T, CommandError> {
+    let text = fs::read_to_string(file).map_err(|e| runtime(format!("{}: {e}", file.display())))?;
+    serde_json::from_str(&text).map_err(|e| runtime(format!("{}: {e}", file.display())))
+}
+
+// -- mfg (§11) ------------------------------------------------------------
+
+fn run_mfg(command: MfgCommand) -> Result<ExitCode, CommandError> {
+    match command {
+        MfgCommand::MaterialAdd { db, company, file } => {
+            run_mfg_material_add(&db, &company, &file).map(ok)
+        }
+        MfgCommand::MaterialList { db, company } => run_mfg_material_list(&db, &company).map(ok),
+        MfgCommand::Receive { db, company, file } => run_mfg_receive(&db, &company, &file).map(ok),
+        MfgCommand::SheetAdd { db, company, file } => {
+            run_mfg_sheet_add(&db, &company, &file).map(ok)
+        }
+        MfgCommand::SheetList { db, company } => run_mfg_sheet_list(&db, &company).map(ok),
+        MfgCommand::SheetCost {
+            db,
+            company,
+            sheet,
+            price,
+        } => run_mfg_sheet_cost(&db, &company, &sheet, price).map(ok),
+        MfgCommand::Build { db, company, file } => run_mfg_build(&db, &company, &file).map(ok),
+        MfgCommand::Adjust {
+            db,
+            company,
+            account,
+            amount,
+            class,
+            date,
+            reason,
+        } => run_mfg_adjust(&db, &company, &account, amount, &class, date, &reason).map(ok),
+        MfgCommand::Variance {
+            db,
+            company,
+            from,
+            to,
+        } => run_mfg_variance(&db, &company, from, to).map(ok),
+        MfgCommand::Onhand { db, company } => run_mfg_onhand(&db, &company).map(ok),
+    }
+}
+
+fn run_mfg_material_add(
+    db: &std::path::Path,
+    company: &str,
+    file: &std::path::Path,
+) -> Result<(), CommandError> {
+    let new: NewMaterial = read_json(file)?;
+    let ledger = Ledger::open(db).map_err(runtime)?;
+    ledger.add_material(company, &new).map_err(runtime)?;
+    println!("added material {}", new.material_id);
+    Ok(())
+}
+
+fn run_mfg_material_list(db: &std::path::Path, company: &str) -> Result<(), CommandError> {
+    let ledger = Ledger::open(db).map_err(runtime)?;
+    let materials = ledger.list_materials(company).map_err(runtime)?;
+    println!(
+        "{:<20}{:<28}{:<8}{:>14}{:>16}",
+        "material", "name", "unit", "qty on hand", "avg cost/unit"
+    );
+    for material in &materials {
+        println!(
+            "{:<20}{:<28}{:<8}{:>14}{:>16}",
+            material.material_id,
+            material.name,
+            material.unit.as_str(),
+            material.qty_on_hand,
+            fmt_money(material.avg_cost_minor_per_unit),
+        );
+    }
+    Ok(())
+}
+
+fn run_mfg_receive(
+    db: &std::path::Path,
+    company: &str,
+    file: &std::path::Path,
+) -> Result<(), CommandError> {
+    let receipt: RawMaterialReceipt = read_json(file)?;
+    let ledger = Ledger::open(db).map_err(runtime)?;
+    let result =
+        landed::receive_materials(&ledger, company, receipt, Utc::now()).map_err(runtime)?;
+    println!(
+        "posted entry {} - landed {} total",
+        result.entry_id,
+        fmt_money(result.total_landed)
+    );
+    for line in &result.lines {
+        println!(
+            "  {} lot {} landed {} -> avg {}/unit, {} on hand",
+            line.material_id,
+            line.lot_id,
+            fmt_money(line.landed_cost),
+            fmt_money(line.new_avg_cost_minor_per_unit),
+            line.new_qty_on_hand,
+        );
+    }
+    Ok(())
+}
+
+fn run_mfg_sheet_add(
+    db: &std::path::Path,
+    company: &str,
+    file: &std::path::Path,
+) -> Result<(), CommandError> {
+    let new: NewBuildSheet = read_json(file)?;
+    let ledger = Ledger::open(db).map_err(runtime)?;
+    let full = ledger
+        .add_build_sheet(company, &new, Utc::now())
+        .map_err(runtime)?;
+    println!(
+        "added sheet {} ({} lines)",
+        full.header.sheet_id,
+        full.lines.len()
+    );
+    Ok(())
+}
+
+fn run_mfg_sheet_list(db: &std::path::Path, company: &str) -> Result<(), CommandError> {
+    let ledger = Ledger::open(db).map_err(runtime)?;
+    let sheets = ledger.list_build_sheets(company).map_err(runtime)?;
+    println!(
+        "{:<20}{:<14}{:>4}{:>10}{:>12}",
+        "sheet", "item", "ver", "yield", "labour min"
+    );
+    for sheet in &sheets {
+        println!(
+            "{:<20}{:<14}{:>4}{:>10}{:>12}",
+            sheet.sheet_id, sheet.item_id, sheet.version, sheet.yield_pct, sheet.labour_minutes,
+        );
+    }
+    Ok(())
+}
+
+fn run_mfg_sheet_cost(
+    db: &std::path::Path,
+    company: &str,
+    sheet_id: &str,
+    price: Option<Money>,
+) -> Result<(), CommandError> {
+    let ledger = Ledger::open(db).map_err(runtime)?;
+    let sheet = ledger.build_sheet(company, sheet_id).map_err(runtime)?;
+    let mut materials = std::collections::HashMap::new();
+    for line in &sheet.lines {
+        if let Some(id) = line.component_id() {
+            if !materials.contains_key(id) {
+                materials.insert(
+                    id.to_string(),
+                    ledger.material(company, id).map_err(runtime)?,
+                );
+            }
+        }
+    }
+    let cost = mfg_sheet::standard_cost(&sheet, &materials).map_err(runtime)?;
+    println!("STANDARD COST   {sheet_id}\n");
+    println!(
+        "material   {:>10}   (gross {} bf)",
+        fmt_money(cost.material),
+        cost.material_gross_bf
+    );
+    println!("labour     {:>10}", fmt_money(cost.labour));
+    println!("overhead   {:>10}", fmt_money(cost.overhead));
+    println!("total      {:>10}", fmt_money(cost.total));
+
+    if let Some(price) = price {
+        let margin = if price.is_zero() {
+            rust_decimal::Decimal::ZERO
+        } else {
+            rust_decimal::Decimal::new(price.minor() - cost.total.minor(), 2)
+                / rust_decimal::Decimal::new(price.minor(), 2)
+        };
+        println!(
+            "\nat price {}: margin {}\n",
+            fmt_money(price),
+            fmt_pct(margin)
+        );
+        println!("SENSITIVITY\n");
+        println!("{:<20}{:>10}{:>12}", "scenario", "margin", "delta");
+        let scenarios = mfg_sheet::sensitivity(&sheet, &materials, price).map_err(runtime)?;
+        for scenario in &scenarios {
+            println!(
+                "{:<20}{:>10}{:>12}",
+                scenario.name,
+                fmt_pct(scenario.margin_pct),
+                fmt_pct(scenario.delta_vs_base),
+            );
+        }
+    }
+    Ok(())
+}
+
+fn run_mfg_build(
+    db: &std::path::Path,
+    company: &str,
+    file: &std::path::Path,
+) -> Result<(), CommandError> {
+    let new: NewBuild = read_json(file)?;
+    let ledger = Ledger::open(db).map_err(runtime)?;
+    let result = mfg_build::complete_build(&ledger, company, new, Utc::now()).map_err(runtime)?;
+    println!(
+        "build {} posted entry {} - standard {} actual material {} applied {} variance {}",
+        result.build_id,
+        result.entry_id,
+        fmt_money(result.standard_cost),
+        fmt_money(result.actual_material),
+        fmt_money(result.applied),
+        fmt_money(result.variance),
+    );
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_mfg_adjust(
+    db: &std::path::Path,
+    company: &str,
+    account: &str,
+    amount: Money,
+    class: &str,
+    date: NaiveDate,
+    reason: &str,
+) -> Result<(), CommandError> {
+    let ledger = Ledger::open(db).map_err(runtime)?;
+    let entry_id = mfg_build::adjust_inventory(
+        &ledger,
+        company,
+        NewAdjustment {
+            account: account.to_string(),
+            amount,
+            class: ClassId(class.to_string()),
+            adjusted_on: date,
+            reason: reason.to_string(),
+        },
+        Utc::now(),
+    )
+    .map_err(runtime)?;
+    println!("posted entry {entry_id}");
+    Ok(())
+}
+
+fn run_mfg_variance(
+    db: &std::path::Path,
+    company: &str,
+    from: NaiveDate,
+    to: NaiveDate,
+) -> Result<(), CommandError> {
+    let ledger = Ledger::open(db).map_err(runtime)?;
+    let rows = mfg_report::variance_by_item(&ledger, company, from, to).map_err(runtime)?;
+    println!(
+        "{:<16}{:>8}{:>14}{:>14}{:>10}",
+        "item", "builds", "std material", "variance", "pct"
+    );
+    for row in &rows {
+        println!(
+            "{:<16}{:>8}{:>14}{:>14}{:>10}",
+            row.item_id,
+            row.build_count,
+            fmt_money(row.total_standard_material),
+            fmt_money(row.total_variance),
+            row.variance_pct
+                .map(fmt_pct)
+                .unwrap_or_else(|| "-".to_string()),
+        );
+    }
+    Ok(())
+}
+
+fn run_mfg_onhand(db: &std::path::Path, company: &str) -> Result<(), CommandError> {
+    let ledger = Ledger::open(db).map_err(runtime)?;
+    let report = mfg_report::material_on_hand(&ledger, company).map_err(runtime)?;
+    println!(
+        "{:<20}{:>12}{:>14}{:>14}",
+        "material", "qty", "avg cost", "value"
+    );
+    for row in &report.materials {
+        println!(
+            "{:<20}{:>12}{:>14}{:>14}",
+            row.material_id,
+            row.qty_on_hand,
+            fmt_money(row.avg_cost_minor_per_unit),
+            fmt_money(row.value),
+        );
+    }
+    println!(
+        "\ntotal value {}   account 1300 {}   {}",
+        fmt_money(report.total_value),
+        fmt_money(report.account_1300_balance),
+        if report.total_value == report.account_1300_balance {
+            "agree"
+        } else {
+            "** DO NOT AGREE"
+        },
+    );
+    Ok(())
+}
+
+fn parse_opening(mut args: Args<'_>) -> Result<Command, UsageError> {
+    let mut db = None;
+    let mut company = None;
+    let mut as_of = None;
+    let mut qbo_csv = None;
+    while let Some(flag) = args.next() {
+        match flag.as_str() {
+            "--db" => db = Some(PathBuf::from(next_value(&mut args, "--db")?)),
+            "--company" => company = Some(next_value(&mut args, "--company")?),
+            "--as-of" => as_of = Some(parse_date(&next_value(&mut args, "--as-of")?, "--as-of")?),
+            "--qbo-csv" => qbo_csv = Some(PathBuf::from(next_value(&mut args, "--qbo-csv")?)),
+            other => return Err(UsageError::unknown_flag(other)),
+        }
+    }
+    Ok(Command::Opening {
+        db: db.ok_or_else(|| UsageError::missing_flag("--db"))?,
+        company: company.ok_or_else(|| UsageError::missing_flag("--company"))?,
+        as_of: as_of.ok_or_else(|| UsageError::missing_flag("--as-of"))?,
+        qbo_csv: qbo_csv.ok_or_else(|| UsageError::missing_flag("--qbo-csv"))?,
+    })
+}
+
+fn parse_boundary(mut args: Args<'_>) -> Result<Command, UsageError> {
+    let mut db = None;
+    let mut company = None;
+    let mut replica = None;
+    let mut realm = None;
+    let mut snapshots = None;
+    while let Some(flag) = args.next() {
+        match flag.as_str() {
+            "--db" => db = Some(PathBuf::from(next_value(&mut args, "--db")?)),
+            "--company" => company = Some(next_value(&mut args, "--company")?),
+            "--replica" => replica = Some(PathBuf::from(next_value(&mut args, "--replica")?)),
+            "--realm" => realm = Some(parse_realm(&next_value(&mut args, "--realm")?)?),
+            "--snapshots" => snapshots = Some(PathBuf::from(next_value(&mut args, "--snapshots")?)),
+            other => return Err(UsageError::unknown_flag(other)),
+        }
+    }
+    Ok(Command::Boundary {
+        db: db.ok_or_else(|| UsageError::missing_flag("--db"))?,
+        company: company.ok_or_else(|| UsageError::missing_flag("--company"))?,
+        replica: replica.ok_or_else(|| UsageError::missing_flag("--replica"))?,
+        realm: realm.ok_or_else(|| UsageError::missing_flag("--realm"))?,
+        snapshots: snapshots.ok_or_else(|| UsageError::missing_flag("--snapshots"))?,
+    })
+}
+
+fn parse_verify(mut args: Args<'_>) -> Result<Command, UsageError> {
+    let mut db = None;
+    let mut company = None;
+    while let Some(flag) = args.next() {
+        match flag.as_str() {
+            "--db" => db = Some(PathBuf::from(next_value(&mut args, "--db")?)),
+            "--company" => company = Some(next_value(&mut args, "--company")?),
+            other => return Err(UsageError::unknown_flag(other)),
+        }
+    }
+    Ok(Command::Verify {
+        db: db.ok_or_else(|| UsageError::missing_flag("--db"))?,
+        company: company.ok_or_else(|| UsageError::missing_flag("--company"))?,
+    })
+}
+
+#[allow(clippy::too_many_lines)]
+fn parse_nightly(mut args: Args<'_>) -> Result<Command, UsageError> {
+    let mut db = None;
+    let mut company = None;
+    let mut replica = None;
+    let mut realm = None;
+    let mut qbo_csv = None;
+    let mut out = None;
+    let mut from = None;
+    let mut as_of = None;
+    let mut plist = false;
+    while let Some(flag) = args.next() {
+        match flag.as_str() {
+            "--db" => db = Some(PathBuf::from(next_value(&mut args, "--db")?)),
+            "--company" => company = Some(next_value(&mut args, "--company")?),
+            "--replica" => replica = Some(PathBuf::from(next_value(&mut args, "--replica")?)),
+            "--realm" => realm = Some(parse_realm(&next_value(&mut args, "--realm")?)?),
+            "--qbo-csv" => qbo_csv = Some(PathBuf::from(next_value(&mut args, "--qbo-csv")?)),
+            "--out" => out = Some(PathBuf::from(next_value(&mut args, "--out")?)),
+            "--from" => from = Some(parse_date(&next_value(&mut args, "--from")?, "--from")?),
+            "--as-of" => as_of = Some(parse_date(&next_value(&mut args, "--as-of")?, "--as-of")?),
+            "--plist" => plist = true,
+            other => return Err(UsageError::unknown_flag(other)),
+        }
+    }
+    Ok(Command::Nightly {
+        db: db.ok_or_else(|| UsageError::missing_flag("--db"))?,
+        company: company.ok_or_else(|| UsageError::missing_flag("--company"))?,
+        replica: replica.ok_or_else(|| UsageError::missing_flag("--replica"))?,
+        realm: realm.ok_or_else(|| UsageError::missing_flag("--realm"))?,
+        qbo_csv: qbo_csv.ok_or_else(|| UsageError::missing_flag("--qbo-csv"))?,
+        out: out.ok_or_else(|| UsageError::missing_flag("--out"))?,
+        from,
+        as_of,
+        plist,
+    })
+}
+
+fn run_opening(
+    db: &std::path::Path,
+    company: &str,
+    as_of: NaiveDate,
+    qbo_csv: &std::path::Path,
+) -> Result<(), CommandError> {
+    let ledger = Ledger::open(db).map_err(runtime)?;
+    let rows = read_qbo_csv(qbo_csv).map_err(runtime)?;
+    let report = pipeline::apply_opening_balance(&ledger, company, as_of, &rows, Utc::now())
+        .map_err(runtime)?;
+    let verdict = if report.skipped_unchanged {
+        "skipped (unchanged)"
+    } else if report.replaced {
+        "replaced"
+    } else {
+        "posted"
+    };
+    println!(
+        "opening balance {} for {company} as of {as_of}: {verdict}",
+        report.document_id
+    );
+    Ok(())
+}
+
+fn run_boundary(
+    db: &std::path::Path,
+    company: &str,
+    replica: &std::path::Path,
+    realm: &RealmId,
+    snapshots_dir: &std::path::Path,
+) -> Result<(), CommandError> {
+    let ledger = Ledger::open(db).map_err(runtime)?;
+    let store = Store::open(replica).map_err(runtime)?;
+    let snapshots = read_snapshots_dir(snapshots_dir).map_err(runtime)?;
+    let report = pipeline::boundary_walk(
+        &ledger,
+        &store,
+        realm,
+        company,
+        &snapshots,
+        &TierRules::default(),
+        Utc::now(),
+    )
+    .map_err(runtime)?;
+    print!("{}", report.render_text(company));
+    Ok(())
+}
+
+// -- verify -----------------------------------------------------------------
+
+fn run_verify(db: &std::path::Path, company: &str) -> Result<ExitCode, CommandError> {
+    let ledger = Ledger::open(db).map_err(runtime)?;
+    let report = verify::verify(&ledger, company).map_err(runtime)?;
+    print!("{}", report.render_text(company));
+    if report.is_ok() {
+        Ok(ExitCode::SUCCESS)
+    } else {
+        Ok(ExitCode::from(1))
+    }
+}
+
+// -- nightly ------------------------------------------------------------
+
+/// §7: "as of the previous day" — yesterday in UTC, when `--as-of` is not
+/// given.
+fn yesterday(now: chrono::DateTime<Utc>) -> NaiveDate {
+    now.date_naive() - chrono::Duration::days(1)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_nightly(
+    db: &std::path::Path,
+    company: &str,
+    replica: &std::path::Path,
+    realm: &RealmId,
+    qbo_csv: &std::path::Path,
+    out: &std::path::Path,
+    from: Option<NaiveDate>,
+    as_of: Option<NaiveDate>,
+    plist: bool,
+) -> Result<ExitCode, CommandError> {
+    if plist {
+        let label = format!("com.aquamentor.ledger.nightly.{company}");
+        let text =
+            nightly::render_launchd_plist(&label, realm, company, db, replica, qbo_csv, out, from);
+        print!("{text}");
+        return Ok(ExitCode::SUCCESS);
+    }
+
+    let now = Utc::now();
+    let as_of = as_of.unwrap_or_else(|| yesterday(now));
+    let ledger = Ledger::open(db).map_err(runtime)?;
+    let store = Store::open(replica).map_err(runtime)?;
+    let qbo_rows = read_qbo_csv(qbo_csv).map_err(runtime)?;
+
+    let outcome = nightly::run_nightly(
+        &ledger, &store, realm, company, &qbo_rows, from, as_of, out, now,
+    )
+    .map_err(runtime)?;
+
+    print!("{}", outcome.diff.render_text(company, as_of));
+    println!("{}", outcome.summary_line());
+    println!("wrote {}", outcome.text_path.display());
+    println!("wrote {}", outcome.csv_path.display());
+    if !outcome.import.rejected.is_empty() {
+        println!(
+            "\nimport rejected {} document(s):",
+            outcome.import.rejected.len()
+        );
+        for row in &outcome.import.rejected {
+            println!("  - {}: {}", row.document_id, row.reason);
+        }
+    }
+
+    if outcome.passed() {
+        Ok(ExitCode::SUCCESS)
+    } else {
+        Ok(ExitCode::from(1))
+    }
+}
+
+/// Every `tb-YYYY.csv` file directly inside `dir`, each read with
+/// [`read_qbo_csv`] — the same CSV shape `tbdiff` and `opening` use — and
+/// paired with the year its filename names. Any other file in the directory
+/// is ignored rather than rejected, so a stray `README` or a `.DS_Store`
+/// does not block the walk.
+fn read_snapshots_dir(dir: &std::path::Path) -> Result<Vec<(i32, Vec<QboTbRow>)>, String> {
+    let mut out = Vec::new();
+    let entries = fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("{}: {e}", dir.display()))?;
+        let path = entry.path();
+        let Some(file_name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        let Some(year_str) = file_name
+            .strip_prefix(SNAPSHOT_PREFIX)
+            .and_then(|s| s.strip_suffix(SNAPSHOT_SUFFIX))
+        else {
+            continue;
+        };
+        let year: i32 = year_str
+            .parse()
+            .map_err(|_| format!("{}: not tb-YYYY.csv", path.display()))?;
+        out.push((year, read_qbo_csv(&path)?));
+    }
+    out.sort_by_key(|(year, _)| *year);
+    Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(raw: &[&str]) -> Vec<String> {
+        raw.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn no_args_is_a_usage_error() {
+        assert!(parse(&[]).is_err());
+    }
+
+    #[test]
+    fn help_is_a_usage_error_with_no_reason() {
+        let err = parse(&args(&["--help"])).unwrap_err();
+        assert_eq!(err.reason, None);
+    }
+
+    #[test]
+    fn unknown_subcommand_is_reported() {
+        let err = parse(&args(&["frobnicate"])).unwrap_err();
+        assert!(err.reason.unwrap().contains("frobnicate"));
+    }
+
+    #[test]
+    fn init_parses_required_and_optional_flags() {
+        let command = parse(&args(&[
+            "init",
+            "--db",
+            "l.sqlite",
+            "--company",
+            "aquamentor",
+            "--name",
+            "Aquamentor LLC",
+            "--realm",
+            "1234567890123456",
+        ]))
+        .unwrap();
+        assert_eq!(
+            command,
+            Command::Init {
+                db: PathBuf::from("l.sqlite"),
+                company: "aquamentor".to_string(),
+                name: "Aquamentor LLC".to_string(),
+                realm: Some("1234567890123456".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn init_without_realm_is_fine() {
+        let command = parse(&args(&[
+            "init",
+            "--db",
+            "l.sqlite",
+            "--company",
+            "aquamentor",
+            "--name",
+            "Aquamentor LLC",
+        ]))
+        .unwrap();
+        assert_eq!(
+            command,
+            Command::Init {
+                db: PathBuf::from("l.sqlite"),
+                company: "aquamentor".to_string(),
+                name: "Aquamentor LLC".to_string(),
+                realm: None,
+            }
+        );
+    }
+
+    #[test]
+    fn init_missing_name_is_a_usage_error() {
+        let err = parse(&args(&[
+            "init",
+            "--db",
+            "l.sqlite",
+            "--company",
+            "aquamentor",
+        ]))
+        .unwrap_err();
+        assert!(err.reason.unwrap().contains("--name"));
+    }
+
+    #[test]
+    fn import_parses_optional_date_window() {
+        let command = parse(&args(&[
+            "import",
+            "--db",
+            "l.sqlite",
+            "--company",
+            "aquamentor",
+            "--replica",
+            "r.sqlite",
+            "--realm",
+            "1234567890123456",
+            "--from",
+            "2026-01-01",
+            "--to",
+            "2026-12-31",
+        ]))
+        .unwrap();
+        assert_eq!(
+            command,
+            Command::Import {
+                db: PathBuf::from("l.sqlite"),
+                company: "aquamentor".to_string(),
+                replica: PathBuf::from("r.sqlite"),
+                realm: RealmId::parse("1234567890123456").unwrap(),
+                from: NaiveDate::from_ymd_opt(2026, 1, 1),
+                to: NaiveDate::from_ymd_opt(2026, 12, 31),
+            }
+        );
+    }
+
+    #[test]
+    fn import_missing_realm_is_a_usage_error() {
+        let err = parse(&args(&[
+            "import",
+            "--db",
+            "l.sqlite",
+            "--company",
+            "aquamentor",
+            "--replica",
+            "r.sqlite",
+        ]))
+        .unwrap_err();
+        assert!(err.reason.unwrap().contains("--realm"));
+    }
+
+    #[test]
+    fn import_bad_realm_is_an_invalid_value() {
+        let err = parse(&args(&[
+            "import",
+            "--db",
+            "l.sqlite",
+            "--company",
+            "aquamentor",
+            "--replica",
+            "r.sqlite",
+            "--realm",
+            "not-numeric",
+        ]))
+        .unwrap_err();
+        assert!(err.reason.unwrap().contains("--realm"));
+    }
+
+    #[test]
+    fn tb_requires_as_of() {
+        let err = parse(&args(&[
+            "tb",
+            "--db",
+            "l.sqlite",
+            "--company",
+            "aquamentor",
+        ]))
+        .unwrap_err();
+        assert!(err.reason.unwrap().contains("--as-of"));
+    }
+
+    #[test]
+    fn tb_parses() {
+        let command = parse(&args(&[
+            "tb",
+            "--db",
+            "l.sqlite",
+            "--company",
+            "aquamentor",
+            "--as-of",
+            "2026-06-30",
+        ]))
+        .unwrap();
+        assert_eq!(
+            command,
+            Command::Tb {
+                db: PathBuf::from("l.sqlite"),
+                company: "aquamentor".to_string(),
+                as_of: NaiveDate::from_ymd_opt(2026, 6, 30).unwrap(),
+            }
+        );
+    }
+
+    #[test]
+    fn tb_bad_date_is_an_invalid_value() {
+        let err = parse(&args(&[
+            "tb",
+            "--db",
+            "l.sqlite",
+            "--company",
+            "aquamentor",
+            "--as-of",
+            "not-a-date",
+        ]))
+        .unwrap_err();
+        assert!(err.reason.unwrap().contains("--as-of"));
+    }
+
+    #[test]
+    fn pnl_requires_from_and_to() {
+        let err = parse(&args(&[
+            "pnl",
+            "--db",
+            "l.sqlite",
+            "--company",
+            "aquamentor",
+            "--from",
+            "2026-01-01",
+        ]))
+        .unwrap_err();
+        assert!(err.reason.unwrap().contains("--to"));
+    }
+
+    #[test]
+    fn tax_defaults_the_rate() {
+        let command = parse(&args(&[
+            "tax",
+            "--db",
+            "l.sqlite",
+            "--company",
+            "aquamentor",
+            "--year",
+            "2026",
+            "--quarter",
+            "2",
+        ]))
+        .unwrap();
+        assert_eq!(
+            command,
+            Command::Tax {
+                db: PathBuf::from("l.sqlite"),
+                company: "aquamentor".to_string(),
+                year: 2026,
+                quarter: 2,
+                rate: Decimal::from_str("0.06625").unwrap(),
+            }
+        );
+    }
+
+    #[test]
+    fn tax_accepts_an_explicit_rate() {
+        let command = parse(&args(&[
+            "tax",
+            "--db",
+            "l.sqlite",
+            "--company",
+            "aquamentor",
+            "--year",
+            "2026",
+            "--quarter",
+            "1",
+            "--rate",
+            "0.07",
+        ]))
+        .unwrap();
+        let Command::Tax { rate, .. } = command else {
+            panic!("expected Tax");
+        };
+        assert_eq!(rate, Decimal::from_str("0.07").unwrap());
+    }
+
+    #[test]
+    fn tax_rejects_a_quarter_outside_1_to_4() {
+        let err = parse(&args(&[
+            "tax",
+            "--db",
+            "l.sqlite",
+            "--company",
+            "aquamentor",
+            "--year",
+            "2026",
+            "--quarter",
+            "5",
+        ]))
+        .unwrap_err();
+        assert!(err.reason.unwrap().contains("--quarter"));
+    }
+
+    #[test]
+    fn close_and_reopen_require_period_end_and_note() {
+        let command = parse(&args(&[
+            "close",
+            "--db",
+            "l.sqlite",
+            "--company",
+            "aquamentor",
+            "--period-end",
+            "2026-06-30",
+            "--note",
+            "June close",
+        ]))
+        .unwrap();
+        assert_eq!(
+            command,
+            Command::Close {
+                db: PathBuf::from("l.sqlite"),
+                company: "aquamentor".to_string(),
+                period_end: NaiveDate::from_ymd_opt(2026, 6, 30).unwrap(),
+                note: "June close".to_string(),
+            }
+        );
+
+        let err = parse(&args(&[
+            "reopen",
+            "--db",
+            "l.sqlite",
+            "--company",
+            "aquamentor",
+            "--period-end",
+            "2026-06-30",
+        ]))
+        .unwrap_err();
+        assert!(err.reason.unwrap().contains("--note"));
+    }
+
+    #[test]
+    fn tbdiff_parses() {
+        let command = parse(&args(&[
+            "tbdiff",
+            "--db",
+            "l.sqlite",
+            "--company",
+            "aquamentor",
+            "--as-of",
+            "2026-06-30",
+            "--qbo-csv",
+            "qbo.csv",
+        ]))
+        .unwrap();
+        assert_eq!(
+            command,
+            Command::TbDiff {
+                db: PathBuf::from("l.sqlite"),
+                company: "aquamentor".to_string(),
+                as_of: NaiveDate::from_ymd_opt(2026, 6, 30).unwrap(),
+                qbo_csv: PathBuf::from("qbo.csv"),
+            }
+        );
+    }
+
+    #[test]
+    fn opening_parses() {
+        let command = parse(&args(&[
+            "opening",
+            "--db",
+            "l.sqlite",
+            "--company",
+            "aquamentor",
+            "--as-of",
+            "2023-12-31",
+            "--qbo-csv",
+            "tb-2023.csv",
+        ]))
+        .unwrap();
+        assert_eq!(
+            command,
+            Command::Opening {
+                db: PathBuf::from("l.sqlite"),
+                company: "aquamentor".to_string(),
+                as_of: NaiveDate::from_ymd_opt(2023, 12, 31).unwrap(),
+                qbo_csv: PathBuf::from("tb-2023.csv"),
+            }
+        );
+    }
+
+    #[test]
+    fn boundary_parses_and_requires_realm() {
+        let command = parse(&args(&[
+            "boundary",
+            "--db",
+            "l.sqlite",
+            "--company",
+            "aquamentor",
+            "--replica",
+            "r.sqlite",
+            "--realm",
+            "1234567890123456",
+            "--snapshots",
+            "snaps",
+        ]))
+        .unwrap();
+        assert_eq!(
+            command,
+            Command::Boundary {
+                db: PathBuf::from("l.sqlite"),
+                company: "aquamentor".to_string(),
+                replica: PathBuf::from("r.sqlite"),
+                realm: RealmId::parse("1234567890123456").unwrap(),
+                snapshots: PathBuf::from("snaps"),
+            }
+        );
+
+        let err = parse(&args(&[
+            "boundary",
+            "--db",
+            "l.sqlite",
+            "--company",
+            "aquamentor",
+            "--replica",
+            "r.sqlite",
+            "--snapshots",
+            "snaps",
+        ]))
+        .unwrap_err();
+        assert!(err.reason.unwrap().contains("--realm"));
+    }
+
+    #[test]
+    fn verify_parses_and_requires_company() {
+        assert_eq!(
+            parse(&args(&[
+                "verify",
+                "--db",
+                "l.sqlite",
+                "--company",
+                "aquamentor"
+            ])),
+            Ok(Command::Verify {
+                db: PathBuf::from("l.sqlite"),
+                company: "aquamentor".to_string(),
+            })
+        );
+        assert_eq!(
+            parse(&args(&["verify", "--db", "l.sqlite"])),
+            Err(UsageError::missing_flag("--company"))
+        );
+    }
+
+    #[test]
+    fn nightly_parses_a_complete_invocation_with_as_of() {
+        assert_eq!(
+            parse(&args(&[
+                "nightly",
+                "--db",
+                "l.sqlite",
+                "--company",
+                "aquamentor",
+                "--replica",
+                "r.sqlite",
+                "--realm",
+                "1234567890123456",
+                "--qbo-csv",
+                "tb.csv",
+                "--out",
+                "out",
+                "--from",
+                "2027-01-01",
+                "--as-of",
+                "2026-09-10",
+            ])),
+            Ok(Command::Nightly {
+                db: PathBuf::from("l.sqlite"),
+                company: "aquamentor".to_string(),
+                replica: PathBuf::from("r.sqlite"),
+                realm: RealmId::parse("1234567890123456").unwrap(),
+                qbo_csv: PathBuf::from("tb.csv"),
+                out: PathBuf::from("out"),
+                from: Some(NaiveDate::from_ymd_opt(2027, 1, 1).unwrap()),
+                as_of: Some(NaiveDate::from_ymd_opt(2026, 9, 10).unwrap()),
+                plist: false,
+            })
+        );
+    }
+
+    #[test]
+    fn nightly_as_of_is_optional_and_plist_toggles() {
+        let command = parse(&args(&[
+            "nightly",
+            "--db",
+            "l.sqlite",
+            "--company",
+            "aquamentor",
+            "--replica",
+            "r.sqlite",
+            "--realm",
+            "1234567890123456",
+            "--qbo-csv",
+            "tb.csv",
+            "--out",
+            "out",
+            "--plist",
+        ]))
+        .unwrap();
+        match command {
+            Command::Nightly {
+                from, as_of, plist, ..
+            } => {
+                assert_eq!(from, None);
+                assert_eq!(as_of, None);
+                assert!(plist);
+            }
+            other => panic!("expected Command::Nightly, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn nightly_requires_realm() {
+        let err = parse(&args(&[
+            "nightly",
+            "--db",
+            "l.sqlite",
+            "--company",
+            "aquamentor",
+            "--replica",
+            "r.sqlite",
+            "--qbo-csv",
+            "tb.csv",
+            "--out",
+            "out",
+        ]))
+        .unwrap_err();
+        assert!(err.reason.unwrap().contains("--realm"));
+    }
+
+    #[test]
+    fn yesterday_is_one_day_before_now_in_utc() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-09-12T05:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        assert_eq!(
+            yesterday(now),
+            NaiveDate::from_ymd_opt(2026, 9, 11).unwrap()
+        );
+    }
+
+    #[test]
+    fn an_unknown_flag_is_reported_with_its_own_name() {
+        let err = parse(&args(&[
+            "tb",
+            "--db",
+            "l.sqlite",
+            "--company",
+            "aquamentor",
+            "--as-of",
+            "2026-06-30",
+            "--bogus",
+        ]))
+        .unwrap_err();
+        assert!(err.reason.unwrap().contains("--bogus"));
+    }
+
+    #[test]
+    fn read_qbo_csv_skips_the_header_and_parses_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("qbo.csv");
+        fs::write(
+            &path,
+            "qbo_account_id,name,balance\n79,Accounts Receivable,1200.00\n35,Checking,500.50\n",
+        )
+        .unwrap();
+        let rows = read_qbo_csv(&path).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].qbo_account_id, "79");
+        assert_eq!(rows[0].balance, Money::from_minor(120_000));
+        assert_eq!(rows[1].balance, Money::from_minor(50_050));
+    }
+
+    #[test]
+    fn fmt_money_matches_report_rendering() {
+        assert_eq!(fmt_money(Money::from_minor(-105)), "-1.05");
+        assert_eq!(fmt_money(Money::from_minor(500)), "5.00");
+        assert_eq!(fmt_money(Money::ZERO), "0.00");
+    }
 }

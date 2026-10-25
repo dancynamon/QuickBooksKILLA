@@ -1,0 +1,95 @@
+# Template for .local/config.toml — copy this file there and fill in real
+# values. `.local/` is gitignored in full except for this example
+# (HANDOFF.md §0); nothing you put in the real copy ever reaches git.
+
+# Where OAuth tokens live. Omitted: "keychain" on macOS (the login keychain,
+# service bunzbooks-qbo-tokens, one item per realm), "file" (under
+# tokens_dir) everywhere else. Must sit above the first [table] header.
+# token_store = "keychain"
+
+[intuit]
+# BunzBooks has its own Intuit developer app, and never shares one: the
+# QuickBooks MCPs' app has a monthly API quota that qbo-local once spent for
+# all of them. Its Client ID and Secret are NOT written here — a config that
+# sets client_id or client_secret is refused. Store them in the login
+# keychain once:
+#
+#   security add-generic-password -U -s bunzbooks-intuit-app -a client_id -w '<Client ID>'
+#   security add-generic-password -U -s bunzbooks-intuit-app -a client_secret -w
+#
+# (the second form prompts for the secret, so it never sits in shell
+# history), or set BUNZBOOKS_QBO_CLIENT_ID and BUNZBOOKS_QBO_CLIENT_SECRET.
+# app_keychain_service = "bunzbooks-intuit-app"
+# token_keychain_service = "bunzbooks-qbo-tokens"
+
+# "production" or "sandbox". M0 is read-only and can point at production;
+# switch to "sandbox" before any write path is exercised (HANDOFF.md §3).
+environment = "production"
+
+# Must match the redirect URI registered on the Intuit app, as
+# http://localhost:<redirect_port>/callback.
+redirect_port = 8765
+
+# One [[realms]] entry per company. The realm id is deliberately not
+# recorded anywhere in the tracked repository — read it from the QBO web
+# link on any invoice (the `deeplinkcompanyid` parameter), or from wherever
+# `qbo_headless` already keeps it (HANDOFF.md §0).
+[[realms]]
+id = "0000000000000000"
+name = "Aquamentor, Inc."
+
+# [[realms]]
+# id = "0000000000000001"
+# name = "WaterLine CNC"
+
+# Both paths below default to these values when omitted; listed explicitly
+# here so they are easy to point elsewhere (e.g. an external drive) if
+# needed. Both already live under the gitignored .local/ tree.
+# tokens_dir = ".local/tokens"
+# rotation_log = ".local/rotation-log.jsonl"
+
+# A hard ceiling on Intuit API calls per UTC day, across every qbo-local
+# process sharing the ledger file. Past it, calls are refused locally and the
+# daemon sleeps to midnight UTC. 15,000 a day keeps a month under the builder
+# tier's 500,000 CorePlus calls.
+# [budget]
+# daily_calls = 15000
+# ledger = ".local/call-budget.json"
+
+# SurePayroll pay-run journal (docs/PAYROLL.md, D38). Who maps to which §3
+# class. An import refuses any employee or department not listed here, so
+# this must name everyone on the payroll before the first run is journaled.
+# Keys are whatever the pay-run CSV's `employee` column carries: SurePayroll
+# employee id is better than a name (it survives a name change). Classes:
+# foam, sign, chair, drop, cnc, uv. Accounts default as shown.
+[payroll]
+# bank_account = "1100"          # net pay leaves from here
+# liabilities_account = "2400"   # withholdings and employer taxes owed
+# wages_account = "5400"         # default wages account (direct labour)
+# employer_tax_account = ""      # unset: each person's wages account
+
+[payroll.employees]
+# "EMP-0001" = { class = "foam" }
+# "EMP-0002" = { class = "sign" }
+# An office wage onto an expense account rather than direct labour:
+# "EMP-0003" = { class = "drop", wages_account = "6900" }
+
+[payroll.departments]
+# Fallback for anyone not listed above, by SurePayroll department.
+# "Shop" = { class = "foam" }
+
+# Customer documents (DECISIONS.md D39, docs/MCP.md "Document tools"): who
+# the PDFs say they are from, and where `ledger render` / `render_document`
+# write them. Real values belong in the gitignored .local/config.toml only.
+# [documents]
+# output_dir = "~/Documents/Ledger Documents"   # one subfolder per company
+# pay_url = "https://pay.example.com/i/{number}"  # durable pay page, when one exists
+#
+# [documents.company.aquamentor]
+# name = "Company Name"
+# legal_name = "Legal Company Name Inc"
+# address = ["Street", "Town, ST 00000"]
+# phone = "(000) 000-0000"
+# email = "billing@example.com"
+# logo = "/absolute/path/to/logo.png"
+# footer = "Thank you for your business."

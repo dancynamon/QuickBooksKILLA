@@ -1,0 +1,7 @@
+[alias]
+# The DESIGN.md §11 measurements: `#[ignore]`d so an ordinary `cargo test`
+# skips them, run explicitly in release (they measure wall clock, and a debug
+# build's numbers are not the ones DESIGN.md records) with QBO_BENCH_ASSERT=1
+# set by whoever runs `bench-qbo` if they want the thresholds enforced rather
+# than only reported — CI's `bench` job (`.github/workflows/ci.yml`) sets it.
+bench-qbo = "test -p qbo-local --release -- --ignored --nocapture"

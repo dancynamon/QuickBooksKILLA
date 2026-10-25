@@ -1,0 +1,38 @@
+[
+  {
+    "call": "query",
+    "entity_type": "Customer",
+    "params": {
+      "entity_type": "Customer",
+      "max_results": 1000,
+      "realm": "1234567890123456",
+      "start_position": 0,
+      "updated": null
+    },
+    "response_file": "Customer/query-none-none-0.json"
+  },
+  {
+    "call": "query",
+    "entity_type": "Item",
+    "params": {
+      "entity_type": "Item",
+      "max_results": 1000,
+      "realm": "1234567890123456",
+      "start_position": 0,
+      "updated": null
+    },
+    "response_file": "Item/query-none-none-0.json"
+  },
+  {
+    "call": "query",
+    "entity_type": "Invoice",
+    "params": {
+      "entity_type": "Invoice",
+      "max_results": 1000,
+      "realm": "1234567890123456",
+      "start_position": 0,
+      "updated": null
+    },
+    "response_file": "Invoice/query-none-none-0.json"
+  }
+]

@@ -115,6 +115,9 @@ pub enum EntityType {
     Purchase,
     Deposit,
     JournalEntry,
+    Transfer,
+    CreditCardPayment,
+    InventoryAdjustment,
 }
 
 /// The subset of [`EntityType`] that represents a financial document.
@@ -133,6 +136,9 @@ pub enum DocumentType {
     Purchase,
     Deposit,
     JournalEntry,
+    Transfer,
+    CreditCardPayment,
+    InventoryAdjustment,
 }
 
 /// Which sync tier an entity belongs to. `DESIGN.md` §3.1 — history depth is
@@ -179,6 +185,12 @@ impl EntityType {
         EntityType::Purchase,
         EntityType::Deposit,
         EntityType::JournalEntry,
+        // D37: added after the practice run. Last in the tier, so a sweep
+        // that fails on one of them (InventoryAdjustment documents no Query
+        // operation) has already mirrored every document type before it.
+        EntityType::Transfer,
+        EntityType::CreditCardPayment,
+        EntityType::InventoryAdjustment,
         // Tier 3 — peripheral
         EntityType::Department,
         EntityType::Preferences,
@@ -245,7 +257,31 @@ impl EntityType {
             Purchase => "Purchase",
             Deposit => "Deposit",
             JournalEntry => "JournalEntry",
+            Transfer => "Transfer",
+            CreditCardPayment => "CreditCardPayment",
+            InventoryAdjustment => "InventoryAdjustment",
         }
+    }
+
+    /// The key QBO wraps this entity in on a read or query response. The
+    /// entity name everywhere but CreditCardPayment, which Intuit's API
+    /// reference shows coming back as `CreditCardPaymentTxn` (D37).
+    pub const fn response_key(self) -> &'static str {
+        match self {
+            EntityType::CreditCardPayment => "CreditCardPaymentTxn",
+            other => other.as_str(),
+        }
+    }
+
+    /// [`EntityType::parse`], also accepting a [`EntityType::response_key`].
+    pub fn parse_response_key(raw: &str) -> Result<Self, DomainError> {
+        EntityType::parse(raw).or_else(|_| {
+            EntityType::ALL
+                .iter()
+                .copied()
+                .find(|e| e.response_key() == raw)
+                .ok_or_else(|| DomainError::UnknownEntityType(raw.to_string()))
+        })
     }
 
     pub fn parse(raw: &str) -> Result<Self, DomainError> {
@@ -272,6 +308,9 @@ impl EntityType {
             E::Purchase => DocumentType::Purchase,
             E::Deposit => DocumentType::Deposit,
             E::JournalEntry => DocumentType::JournalEntry,
+            E::Transfer => DocumentType::Transfer,
+            E::CreditCardPayment => DocumentType::CreditCardPayment,
+            E::InventoryAdjustment => DocumentType::InventoryAdjustment,
             _ => return None,
         })
     }
@@ -294,6 +333,9 @@ impl DocumentType {
             D::Purchase => EntityType::Purchase,
             D::Deposit => EntityType::Deposit,
             D::JournalEntry => EntityType::JournalEntry,
+            D::Transfer => EntityType::Transfer,
+            D::CreditCardPayment => EntityType::CreditCardPayment,
+            D::InventoryAdjustment => EntityType::InventoryAdjustment,
         }
     }
 
@@ -353,11 +395,14 @@ mod tests {
 
     #[test]
     fn realm_id_rejects_things_that_are_not_realm_ids() {
-        for bad in ["", "Aquamentor", "1234567890123456 ", "/tmp/replica.db", "-1"] {
-            assert!(
-                RealmId::parse(bad).is_err(),
-                "should have rejected {bad:?}"
-            );
+        for bad in [
+            "",
+            "Aquamentor",
+            "1234567890123456 ",
+            "/tmp/replica.db",
+            "-1",
+        ] {
+            assert!(RealmId::parse(bad).is_err(), "should have rejected {bad:?}");
         }
     }
 
@@ -410,6 +455,9 @@ mod tests {
             DocumentType::Purchase,
             DocumentType::Deposit,
             DocumentType::JournalEntry,
+            DocumentType::Transfer,
+            DocumentType::CreditCardPayment,
+            DocumentType::InventoryAdjustment,
         ];
         for doc in documents {
             assert_eq!(doc.as_entity().as_document(), Some(doc));
@@ -436,7 +484,10 @@ mod tests {
         // order or every document lands with dangling references.
         let tiers: Vec<SyncTier> = EntityType::ALL.iter().map(|e| e.tier()).collect();
         let last_master = tiers.iter().rposition(|t| *t == SyncTier::Masters).unwrap();
-        let first_document = tiers.iter().position(|t| *t == SyncTier::Documents).unwrap();
+        let first_document = tiers
+            .iter()
+            .position(|t| *t == SyncTier::Documents)
+            .unwrap();
         assert!(last_master < first_document);
     }
 
@@ -449,6 +500,23 @@ mod tests {
         assert!(!scope.contains(&EntityType::Department));
         assert!(scope.contains(&EntityType::Invoice));
         assert!(scope.contains(&EntityType::Customer));
+    }
+
+    #[test]
+    fn credit_card_payment_answers_under_its_txn_key() {
+        assert_eq!(
+            EntityType::CreditCardPayment.response_key(),
+            "CreditCardPaymentTxn"
+        );
+        assert_eq!(EntityType::Transfer.response_key(), "Transfer");
+        assert_eq!(
+            EntityType::parse_response_key("CreditCardPaymentTxn").unwrap(),
+            EntityType::CreditCardPayment
+        );
+        assert_eq!(
+            EntityType::parse_response_key("CreditCardPayment").unwrap(),
+            EntityType::CreditCardPayment
+        );
     }
 
     #[test]

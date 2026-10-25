@@ -1,357 +1,892 @@
-//! The HTTP implementation of [`QboClient`]. `HANDOFF.md` §2.3.
+//! The live HTTP transport: [`HttpQboClient`] implements [`crate::client::QboClient`]
+//! against Intuit's REST API. `HANDOFF.md` §2.3.
 //!
-//! Split in two so the part that can be wrong is the part that is tested:
+//! Everything above the [`crate::client::QboClient`] trait — [`crate::driver::SyncDriver`],
+//! [`crate::reconcile::Reconciler`], [`crate::worker`] — is exercised against
+//! [`crate::client::MockQbo`] and never changes when this module does; the trait is
+//! the seam. This module's own tests run against a hand-rolled fake HTTP
+//! server (`tests/http_client.rs`) rather than the real Intuit sandbox, so the
+//! whole suite stays offline (`HANDOFF.md` §6, `DESIGN.md` §0).
 //!
-//! - **Mapping** — building each request (URL, query language, headers) and
-//!   turning each response into [`EntityPayload`]s or a [`QboError`]. Pure
-//!   functions over [`HttpRequest`] / [`HttpResponse`], exercised offline
-//!   against synthetic fixtures shaped like Intuit's responses.
-//! - **Transport** — moving bytes. A trait, so tests substitute a scripted one
-//!   and the real one ([`live::UreqTransport`], behind the `live` feature) is a
-//!   few lines with nothing in it to get wrong.
+//! No async runtime: `ureq` is a blocking client, which is enough for a sync
+//! loop that issues one request at a time and never needs to overlap I/O with
+//! other work. Pulling in an async runtime for that would be a second
+//! concurrency model layered under one this crate does not otherwise have.
 //!
-//! Rate limiting is **not** done here. The sync driver already spends from a
-//! [`crate::ratelimit::RealmLimiter`] before every call; a second limiter in
-//! the client would double-count every request against the same budget.
+//! ## Mapping HTTP onto [`QboClient`]
+//!
+//! - `query` builds `SELECT * FROM <Entity>` with an optional
+//!   `WHERE MetaData.LastUpdatedTime >= x AND < y` clause (name lists also
+//!   get `Active IN (true, false)`, see `active_filter`), followed by
+//!   `ORDERBY Id STARTPOSITION n MAXRESULTS m` ([`PAGE_ORDER`]), against
+//!   `GET /v3/company/<realm>/query`. QBO's `STARTPOSITION` is 1-based; the
+//!   trait's `start_position` is 0-based (`crate::client::QboClient::query`
+//!   documents zero as "the first page"), so every call adds one before it
+//!   goes on the wire.
+//! - `cdc` calls `GET /v3/company/<realm>/cdc?entities=A,B&changedSince=...`.
+//!   An entry whose `status` is `"Deleted"` becomes `is_deleted = true`.
+//! - `create`/`update` `POST /v3/company/<realm>/<entity>`, entity name
+//!   lowercased for the URL. `update` folds `Id`, the caller's
+//!   `base_sync_token` as `SyncToken`, and `sparse: false` into the body —
+//!   QBO applies a sparse update only to the fields present, and this client
+//!   always sends the full record, so `sparse` is always `false`.
+//! - `find_by_name` queries `WHERE <field> = '<escaped>'`, escaping a
+//!   embedded quote by doubling it, the same rule QBO's own query language
+//!   uses for string literals.
+//! - `index` projects `SELECT Id, MetaData FROM <Entity>`, paged, rather than
+//!   pulling whole payloads — the reconciliation sweep's first step only
+//!   needs ids and timestamps (`crate::reconcile`).
+//! - `fetch` is a plain `GET /v3/company/<realm>/<entity>/<id>`.
+//!
+//! ## Retries and errors
+//!
+//! Every call spends one [`RealmLimiter`] token from the `General` bucket
+//! before it does anything else; a refusal becomes [`QboError::RateLimited`]
+//! without an HTTP request ever going out — a local exhaustion behaves like a
+//! 429 in every way that matters to a caller (`DESIGN.md` §4.4).
+//!
+//! HTTP status is mapped exactly as `HANDOFF.md` §2.3 specifies: `429` →
+//! [`QboError::RateLimited`]; `5xx` and a transport failure (no response at
+//! all) → [`QboError::Network`]; `401` refreshes the token once, reactively,
+//! and retries the same request once — a second `401` becomes
+//! [`QboError::Network`], never a silent loop; `404` → [`QboError::NotFound`];
+//! a `4xx` whose body carries `Fault.Error[].code == "5010"` (QBO's Stale
+//! Object Error) → [`QboError::StaleSyncToken`]; every other `4xx` →
+//! [`QboError::Validation`]. The `RequestId` a caller passes in is sent
+//! unchanged on every attempt and is never regenerated inside this module —
+//! retrying a `create` with a fresh id is exactly the duplicate-master bug
+//! `HANDOFF.md` §6 describes.
+//!
+//! ## Token rotation
+//!
+//! Before every call, [`TokenSource::current`] checks
+//! [`crate::auth::TokenSet::needs_refresh`]; if it is due, this module
+//! refreshes proactively, rotates [`crate::auth::TokenGenerations`], saves
+//! through the configured [`crate::auth::TokenStore`], and appends a
+//! fingerprint-only [`crate::auth::RotationLogEntry`] to the JSONL rotation
+//! log — the same sequence a reactive 401 refresh runs, just triggered by the
+//! clock instead of a response.
 
-use chrono::{DateTime, SecondsFormat, Utc};
-use thiserror::Error;
+use std::fs::OpenOptions;
+use std::io::Write;
+use std::path::{Path, PathBuf};
+
+use chrono::{DateTime, Utc};
+use serde_json::Value;
 use uuid::Uuid;
 
-use crate::client::{unique_name_field, EntityPayload, QboClient, QboError, UpdatedRange};
+use crate::auth::{AuthError, RotationLogEntry, TokenGenerations, TokenSet, TokenStore};
+use crate::budget::{CallBudget, SpendError};
+use crate::client::{
+    unique_name_field, EntityPayload, IndexEntry, QboClient, QboError, ReportName, ReportParams,
+    UpdatedRange,
+};
 use crate::domain::{EntityType, RealmId};
+use crate::oauth::{self, OAuthConfig};
+use crate::ratelimit::{BucketClass, RealmLimiter, RealmLimits};
 
-/// The oldest minor version Intuit still honours; requests below it are
-/// silently upgraded, so pinning it explicitly keeps response shapes stable.
+/// Intuit's production API host.
+pub const PRODUCTION_BASE_URL: &str = "https://quickbooks.api.intuit.com";
+/// Intuit's sandbox API host.
+pub const SANDBOX_BASE_URL: &str = "https://sandbox-quickbooks.api.intuit.com";
+
+/// The `minorversion` query parameter sent on every request. QBO ties
+/// behavioural changes to this number rather than to the URL path; 75 is
+/// current as of this writing (`HANDOFF.md` §4 — verify against Intuit's
+/// release notes if entity shapes drift).
 pub const DEFAULT_MINOR_VERSION: u32 = 75;
 
-pub const PRODUCTION_BASE: &str = "https://quickbooks.api.intuit.com";
-pub const SANDBOX_BASE: &str = "https://sandbox-quickbooks.api.intuit.com";
-
 // ---------------------------------------------------------------------------
-// Transport
+// Token source
 // ---------------------------------------------------------------------------
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub enum Method {
+/// Loads, refreshes and persists one realm's [`TokenGenerations`].
+///
+/// Kept separate from [`HttpQboClient`] so the refresh-and-save sequence has
+/// one owner: the client decides *when* to call it (proactively on
+/// [`TokenSet::needs_refresh`], reactively on a 401) and appends the rotation
+/// log entry, but never touches [`TokenStore`] directly.
+pub struct TokenSource {
+    store: Box<dyn TokenStore>,
+    config: OAuthConfig,
+    realm: RealmId,
+    /// Loaded lazily, from `store`, on first use — a `TokenSource` built for
+    /// a realm the store has never seen must not fail until it is actually
+    /// asked for a token.
+    generations: Option<TokenGenerations>,
+}
+
+impl TokenSource {
+    pub fn new(store: Box<dyn TokenStore>, config: OAuthConfig, realm: RealmId) -> Self {
+        TokenSource {
+            store,
+            config,
+            realm,
+            generations: None,
+        }
+    }
+
+    fn loaded(&mut self) -> Result<&mut TokenGenerations, QboError> {
+        if self.generations.is_none() {
+            let found = self
+                .store
+                .load(&self.realm)
+                .map_err(auth_err)?
+                .ok_or_else(|| {
+                    QboError::Network(format!(
+                        "no stored tokens for realm {} — run `qbo-local auth --realm {}` first",
+                        self.realm, self.realm
+                    ))
+                })?;
+            self.generations = Some(found);
+        }
+        Ok(self.generations.as_mut().expect("just populated"))
+    }
+
+    /// The newest usable generation, without refreshing it.
+    pub fn current(&mut self, now: DateTime<Utc>) -> Result<TokenSet, QboError> {
+        let generations = self.loaded()?;
+        generations.newest_usable(now).cloned().map_err(auth_err)
+    }
+
+    /// Refresh against Intuit, rotate the generation, persist it, and return
+    /// the fingerprints of the outgoing and incoming refresh tokens (for the
+    /// rotation log) plus the new access token.
+    pub fn refresh(
+        &mut self,
+        agent: &ureq::Agent,
+        now: DateTime<Utc>,
+    ) -> Result<RotationOutcome, QboError> {
+        let current = self.current(now)?;
+        let outgoing_fingerprint = current.fingerprint();
+        let next = oauth::refresh(&self.config, &current.refresh_token, agent)
+            .map_err(|error| QboError::Network(format!("token refresh: {error}")))?;
+        let incoming_fingerprint = next.fingerprint();
+        let access_token = next.access_token.clone();
+
+        let generations = self.loaded()?;
+        generations.rotate(next);
+        let snapshot = generations.clone();
+        self.store.save(&snapshot).map_err(auth_err)?;
+
+        Ok(RotationOutcome {
+            outgoing_fingerprint,
+            incoming_fingerprint,
+            access_token,
+        })
+    }
+}
+
+/// What a refresh produced, for the caller to both use and log.
+pub struct RotationOutcome {
+    pub outgoing_fingerprint: String,
+    pub incoming_fingerprint: String,
+    pub access_token: String,
+}
+
+fn auth_err(error: AuthError) -> QboError {
+    QboError::Network(format!("token store: {error}"))
+}
+
+// ---------------------------------------------------------------------------
+// The client
+// ---------------------------------------------------------------------------
+
+/// [`QboClient`] implemented over real HTTP.
+pub struct HttpQboClient {
+    base: String,
+    tokens: TokenSource,
+    limiter: RealmLimiter,
+    agent: ureq::Agent,
+    minor_version: u32,
+    rotation_log: PathBuf,
+    /// Whether `index` still tries the projected `SELECT Id, MetaData` query.
+    /// Production QBO answered that projection with rows carrying no
+    /// `MetaData.LastUpdatedTime` (M0 live run, 13 Oct 2026), so the first
+    /// such page flips this off and every later page goes straight to the
+    /// full-page index — one wasted call per client, not one per page.
+    index_projection: bool,
+    /// Every request that goes on the wire spends from this first.
+    budget: CallBudget,
+}
+
+impl HttpQboClient {
+    /// `base` is one of [`PRODUCTION_BASE_URL`] / [`SANDBOX_BASE_URL`] in
+    /// production, or a fake server's `http://127.0.0.1:PORT` under test.
+    pub fn new(
+        base: impl Into<String>,
+        tokens: TokenSource,
+        rotation_log: impl Into<PathBuf>,
+    ) -> Self {
+        let agent = ureq::AgentBuilder::new()
+            .timeout(std::time::Duration::from_secs(30))
+            .build();
+        HttpQboClient {
+            base: base.into(),
+            tokens,
+            limiter: RealmLimiter::new(RealmLimits::default(), Utc::now()),
+            agent,
+            minor_version: DEFAULT_MINOR_VERSION,
+            rotation_log: rotation_log.into(),
+            index_projection: true,
+            budget: CallBudget::unlimited(),
+        }
+    }
+
+    /// Cap the calls this client may make per UTC day ([`crate::budget`]).
+    /// Every live path sets one; [`Self::new`] alone is unlimited.
+    pub fn with_call_budget(mut self, budget: CallBudget) -> Self {
+        self.budget = budget;
+        self
+    }
+
+    pub fn with_minor_version(mut self, minor_version: u32) -> Self {
+        self.minor_version = minor_version;
+        self
+    }
+
+    fn minorversion_param(&self) -> (String, String) {
+        ("minorversion".to_string(), self.minor_version.to_string())
+    }
+
+    fn entity_path(&self, realm: &RealmId, entity_type: EntityType) -> String {
+        format!(
+            "/v3/company/{}/{}",
+            realm.as_str(),
+            entity_type.as_str().to_ascii_lowercase()
+        )
+    }
+
+    // -- token handling -----------------------------------------------------
+
+    fn ensure_token(&mut self, now: DateTime<Utc>) -> Result<String, QboError> {
+        let current = self.tokens.current(now)?;
+        if current.needs_refresh(now) {
+            let outcome = self.tokens.refresh(&self.agent, now)?;
+            self.log_rotation(now, &outcome, "proactive");
+            Ok(outcome.access_token)
+        } else {
+            Ok(current.access_token)
+        }
+    }
+
+    fn reactive_refresh(&mut self, now: DateTime<Utc>) -> Result<String, QboError> {
+        let outcome = self.tokens.refresh(&self.agent, now)?;
+        self.log_rotation(now, &outcome, "reactive");
+        Ok(outcome.access_token)
+    }
+
+    /// Best-effort: a rotation log write failing must not fail the request it
+    /// rode in on. The log exists so a 3am breakage has a first thing to
+    /// read (`DESIGN.md` §5.3), not as a transactional record the request
+    /// depends on.
+    fn log_rotation(&self, at: DateTime<Utc>, outcome: &RotationOutcome, kind: &str) {
+        let entry = RotationLogEntry {
+            at,
+            realm_id: self.tokens.realm.clone(),
+            outgoing: outcome.outgoing_fingerprint.clone(),
+            incoming: outcome.incoming_fingerprint.clone(),
+            outcome: kind.to_string(),
+        };
+        if let Err(error) = append_jsonl(&self.rotation_log, &entry) {
+            eprintln!("qbo-local: failed to append rotation log entry: {error}");
+        }
+    }
+
+    // -- request plumbing -----------------------------------------------------
+
+    /// Spend a rate-limit token from the `General` bucket, run `body` (which
+    /// may itself hit the network more than once, for the 401-retry case),
+    /// then release the concurrency slot regardless of outcome.
+    fn request_json(
+        &mut self,
+        method: Method,
+        path: &str,
+        query: &[(String, String)],
+        body: Option<&Value>,
+    ) -> Result<Value, QboError> {
+        self.request_json_bucketed(BucketClass::General, method, path, query, body)
+    }
+
+    /// As [`Self::request_json`], spending from `bucket` instead of always
+    /// `General` — the Reports API draws down its own budget
+    /// (`ratelimit::BucketClass::Reports`), which is what keeps a nightly
+    /// trial-balance pull from ever throttling ordinary sync traffic.
+    fn request_json_bucketed(
+        &mut self,
+        bucket: BucketClass,
+        method: Method,
+        path: &str,
+        query: &[(String, String)],
+        body: Option<&Value>,
+    ) -> Result<Value, QboError> {
+        let now = Utc::now();
+        if !self.limiter.try_acquire(bucket, now) {
+            return Err(QboError::RateLimited);
+        }
+        let outcome = self.request_json_inner(method, path, query, body);
+        self.limiter.release();
+        outcome
+    }
+
+    fn request_json_inner(
+        &mut self,
+        method: Method,
+        path: &str,
+        query: &[(String, String)],
+        body: Option<&Value>,
+    ) -> Result<Value, QboError> {
+        let now = Utc::now();
+        let token = self.ensure_token(now)?;
+        match self.attempt(method, path, query, body, &token) {
+            Err(AttemptError::Unauthorized) => {
+                let token = self.reactive_refresh(Utc::now())?;
+                self.attempt(method, path, query, body, &token)
+                    .map_err(AttemptError::into_qbo_error)
+            }
+            other => other.map_err(AttemptError::into_qbo_error),
+        }
+    }
+
+    fn attempt(
+        &mut self,
+        method: Method,
+        path: &str,
+        query: &[(String, String)],
+        body: Option<&Value>,
+        token: &str,
+    ) -> Result<Value, AttemptError> {
+        // Counted here, per attempt, so the 401 retry pays too: Intuit
+        // counts it.
+        match self.budget.spend(Utc::now()) {
+            Ok(_) => {}
+            Err(SpendError::Exhausted(exhausted)) => {
+                return Err(AttemptError::BudgetExhausted(exhausted))
+            }
+            Err(SpendError::Ledger(error)) => {
+                return Err(AttemptError::Network(format!(
+                    "call budget ledger: {error}"
+                )))
+            }
+        }
+        let url = format!("{}{}", self.base, path);
+        let mut request = match method {
+            Method::Get => self.agent.get(&url),
+            Method::Post => self.agent.post(&url),
+        };
+        for (key, value) in query {
+            request = request.query(key, value);
+        }
+        request = request
+            .set("Authorization", &format!("Bearer {token}"))
+            .set("Accept", "application/json");
+
+        let result = match body {
+            Some(body) => request.send_json(body.clone()),
+            None => request.call(),
+        };
+
+        match result {
+            Ok(response) => response
+                .into_json()
+                .map_err(|error| AttemptError::Network(format!("decoding response: {error}"))),
+            Err(ureq::Error::Status(code, response)) => {
+                let fault: Value = response.into_json().unwrap_or(Value::Null);
+                Err(classify_status(code, &fault))
+            }
+            Err(ureq::Error::Transport(transport)) => {
+                Err(AttemptError::Network(transport.to_string()))
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Method {
     Get,
     Post,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct HttpRequest {
-    pub method: Method,
-    pub url: String,
-    pub headers: Vec<(String, String)>,
-    pub body: Option<String>,
+/// What one HTTP attempt can come back as, before the 401 retry decides
+/// whether it is final.
+enum AttemptError {
+    Unauthorized,
+    RateLimited,
+    NotFound,
+    StaleSyncToken,
+    Validation(String),
+    Network(String),
+    BudgetExhausted(crate::budget::BudgetExhausted),
 }
 
-impl HttpRequest {
-    pub fn header(&self, name: &str) -> Option<&str> {
-        self.headers
-            .iter()
-            .find(|(key, _)| key.eq_ignore_ascii_case(name))
-            .map(|(_, value)| value.as_str())
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct HttpResponse {
-    pub status: u16,
-    pub body: String,
-}
-
-/// The request never produced a response: DNS, TLS, reset, timeout.
-#[derive(Debug, Error, Clone, PartialEq, Eq)]
-#[error("transport: {0}")]
-pub struct TransportError(pub String);
-
-pub trait Transport {
-    /// Send one request. Any HTTP status is a response, not an error — a 400
-    /// carries the fault body the mapping needs to read.
-    fn send(&mut self, request: &HttpRequest) -> Result<HttpResponse, TransportError>;
-}
-
-/// Where the bearer token comes from. Implemented by
-/// [`crate::oauth::TokenManager`]; a trait so the client is testable without it.
-pub trait AccessTokens {
-    /// A token valid now, refreshing first if it is near expiry.
-    fn bearer(&mut self, realm: &RealmId, now: DateTime<Utc>) -> Result<String, QboError>;
-
-    /// Intuit refused the token just used. Rotate regardless of its expiry —
-    /// the reactive fallback behind proactive refresh (`DESIGN.md` §5.4).
-    fn refused(&mut self, realm: &RealmId, now: DateTime<Utc>) -> Result<(), QboError>;
-}
-
-// ---------------------------------------------------------------------------
-// Encoding
-// ---------------------------------------------------------------------------
-
-/// RFC 3986 percent-encoding of everything outside the unreserved set.
-pub fn percent_encode(raw: &str) -> String {
-    let mut out = String::with_capacity(raw.len());
-    for byte in raw.bytes() {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
-                out.push(byte as char)
+impl AttemptError {
+    fn into_qbo_error(self) -> QboError {
+        match self {
+            // A second 401 after the reactive refresh means the new token
+            // still doesn't work — that is a network-shaped failure from the
+            // caller's point of view, not something retrying again would fix.
+            AttemptError::Unauthorized => {
+                QboError::Network("401 Unauthorized after token refresh".to_string())
             }
-            _ => out.push_str(&format!("%{byte:02X}")),
+            AttemptError::RateLimited => QboError::RateLimited,
+            AttemptError::NotFound => QboError::NotFound,
+            AttemptError::StaleSyncToken => QboError::StaleSyncToken,
+            AttemptError::Validation(detail) => QboError::Validation(detail),
+            AttemptError::Network(detail) => QboError::Network(detail),
+            AttemptError::BudgetExhausted(exhausted) => QboError::DailyBudgetExhausted(exhausted),
         }
     }
-    out
 }
 
-/// A string literal in QBO's query language. Apostrophes are backslash-escaped,
-/// and so is the backslash itself, or a name ending in one would swallow the
-/// closing quote.
-pub fn quote_literal(raw: &str) -> String {
-    let escaped = raw.replace('\\', "\\\\").replace('\'', "\\'");
-    format!("'{escaped}'")
+fn classify_status(code: u16, fault: &Value) -> AttemptError {
+    match code {
+        401 => AttemptError::Unauthorized,
+        404 => AttemptError::NotFound,
+        429 => AttemptError::RateLimited,
+        500..=599 => AttemptError::Network(format!("http {code}: {}", fault_detail(fault))),
+        _ if is_stale_sync_token(fault) => AttemptError::StaleSyncToken,
+        _ => AttemptError::Validation(fault_detail(fault)),
+    }
 }
 
-fn timestamp(at: DateTime<Utc>) -> String {
-    at.to_rfc3339_opts(SecondsFormat::Secs, true)
+/// QBO's Stale Object Error, `Fault.Error[].code == "5010"` — the signal a
+/// `SyncToken` sent with an update no longer matches the current one.
+fn is_stale_sync_token(fault: &Value) -> bool {
+    fault
+        .pointer("/Fault/Error")
+        .and_then(Value::as_array)
+        .is_some_and(|errors| {
+            errors
+                .iter()
+                .any(|error| error.get("code").and_then(Value::as_str) == Some("5010"))
+        })
+}
+
+fn fault_detail(fault: &Value) -> String {
+    let messages: Vec<String> = fault
+        .pointer("/Fault/Error")
+        .and_then(Value::as_array)
+        .map(|errors| {
+            errors
+                .iter()
+                .map(|error| {
+                    let message = error.get("Message").and_then(Value::as_str).unwrap_or("");
+                    let detail = error.get("Detail").and_then(Value::as_str).unwrap_or("");
+                    let code = error.get("code").and_then(Value::as_str).unwrap_or("");
+                    format!("{message} ({code}): {detail}")
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    if messages.is_empty() {
+        fault.to_string()
+    } else {
+        messages.join("; ")
+    }
 }
 
 // ---------------------------------------------------------------------------
-// Request building
+// QboClient
 // ---------------------------------------------------------------------------
 
-/// The query-language statement for a paged, optionally windowed read.
+impl QboClient for HttpQboClient {
+    fn query(
+        &mut self,
+        realm: &RealmId,
+        entity_type: EntityType,
+        updated: Option<UpdatedRange>,
+        start_position: usize,
+        max_results: usize,
+    ) -> Result<Vec<EntityPayload>, QboError> {
+        let query_string = build_select(entity_type, updated, start_position, max_results);
+        let path = format!("/v3/company/{}/query", realm.as_str());
+        let params = [
+            ("query".to_string(), query_string),
+            self.minorversion_param(),
+        ];
+        let value = self.request_json(Method::Get, &path, &params, None)?;
+        query_response_items(&value, entity_type)
+            .iter()
+            .map(|item| to_entity_payload(entity_type, item))
+            .collect()
+    }
+
+    fn cdc(
+        &mut self,
+        realm: &RealmId,
+        entity_types: &[EntityType],
+        changed_since: DateTime<Utc>,
+    ) -> Result<Vec<EntityPayload>, QboError> {
+        let entities = entity_types
+            .iter()
+            .map(|e| e.as_str())
+            .collect::<Vec<_>>()
+            .join(",");
+        let path = format!("/v3/company/{}/cdc", realm.as_str());
+        let params = [
+            ("entities".to_string(), entities),
+            ("changedSince".to_string(), changed_since.to_rfc3339()),
+            self.minorversion_param(),
+        ];
+        let value = self.request_json(Method::Get, &path, &params, None)?;
+        parse_cdc_response(&value)
+    }
+
+    fn create(
+        &mut self,
+        realm: &RealmId,
+        entity_type: EntityType,
+        payload: &Value,
+        request_id: Uuid,
+    ) -> Result<EntityPayload, QboError> {
+        let path = self.entity_path(realm, entity_type);
+        let params = [
+            ("requestid".to_string(), request_id.to_string()),
+            self.minorversion_param(),
+        ];
+        let value = self.request_json(Method::Post, &path, &params, Some(payload))?;
+        parse_single_entity(&value, entity_type)
+    }
+
+    fn update(
+        &mut self,
+        realm: &RealmId,
+        entity_type: EntityType,
+        qbo_id: &str,
+        payload: &Value,
+        base_sync_token: &str,
+        request_id: Uuid,
+    ) -> Result<EntityPayload, QboError> {
+        let mut body = payload.clone();
+        let object = body.as_object_mut().ok_or_else(|| {
+            QboError::Validation("update payload must be a JSON object".to_string())
+        })?;
+        object.insert("Id".to_string(), Value::String(qbo_id.to_string()));
+        object.insert(
+            "SyncToken".to_string(),
+            Value::String(base_sync_token.to_string()),
+        );
+        object.insert("sparse".to_string(), Value::Bool(false));
+
+        let path = self.entity_path(realm, entity_type);
+        let params = [
+            ("requestid".to_string(), request_id.to_string()),
+            self.minorversion_param(),
+        ];
+        let value = self.request_json(Method::Post, &path, &params, Some(&body))?;
+        parse_single_entity(&value, entity_type)
+    }
+
+    fn find_by_name(
+        &mut self,
+        realm: &RealmId,
+        entity_type: EntityType,
+        name: &str,
+    ) -> Result<Option<EntityPayload>, QboError> {
+        let field = unique_name_field(entity_type).ok_or_else(|| {
+            QboError::Validation(format!("{entity_type:?} has no unique name field"))
+        })?;
+        let escaped = name.replace('\'', "''");
+        let query_string = format!(
+            "SELECT * FROM {} WHERE {field} = '{escaped}'",
+            entity_type.as_str()
+        );
+        let path = format!("/v3/company/{}/query", realm.as_str());
+        let params = [
+            ("query".to_string(), query_string),
+            self.minorversion_param(),
+        ];
+        let value = self.request_json(Method::Get, &path, &params, None)?;
+        let mut items = query_response_items(&value, entity_type)
+            .iter()
+            .map(|item| to_entity_payload(entity_type, item))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(items.pop())
+    }
+
+    fn index(
+        &mut self,
+        realm: &RealmId,
+        entity_type: EntityType,
+        start_position: usize,
+        max_results: usize,
+    ) -> Result<Vec<IndexEntry>, QboError> {
+        // A projected query — ids and timestamps only — rather than the
+        // default `QboClient::index` (a full `query` with the payload
+        // thrown away), so the reconciliation sweep's first step doesn't
+        // pull whole payloads over the wire just to discard them.
+        let query_string = build_index_query(entity_type, start_position, max_results);
+        let path = format!("/v3/company/{}/query", realm.as_str());
+        let params = [
+            ("query".to_string(), query_string),
+            self.minorversion_param(),
+        ];
+        if self.index_projection {
+            let value = self.request_json(Method::Get, &path, &params, None)?;
+            let items = query_response_items(&value, entity_type);
+            let projected = items
+                .iter()
+                .all(|item| item.pointer("/MetaData/LastUpdatedTime").is_some());
+            if projected {
+                return items.iter().map(to_index_entry).collect();
+            }
+            // Keys only, never values: enough to see what the projection
+            // actually returned without logging a customer's data.
+            let keys: Vec<String> = items
+                .iter()
+                .find(|item| item.pointer("/MetaData/LastUpdatedTime").is_none())
+                .and_then(Value::as_object)
+                .map(|object| object.keys().cloned().collect())
+                .unwrap_or_default();
+            eprintln!(
+                "qbo-local: projected index of {} returned no MetaData.LastUpdatedTime \
+                 (keys: {}); using the full-page index from here on",
+                entity_type.as_str(),
+                keys.join(",")
+            );
+            self.index_projection = false;
+        }
+        Ok(self
+            .query(realm, entity_type, None, start_position, max_results)?
+            .into_iter()
+            .map(|payload| IndexEntry {
+                qbo_id: payload.qbo_id,
+                last_updated_utc: payload.last_updated_utc,
+                is_deleted: payload.is_deleted,
+            })
+            .collect())
+    }
+
+    fn fetch(
+        &mut self,
+        realm: &RealmId,
+        entity_type: EntityType,
+        qbo_id: &str,
+    ) -> Result<Option<EntityPayload>, QboError> {
+        let path = format!("{}/{qbo_id}", self.entity_path(realm, entity_type));
+        let params = [self.minorversion_param()];
+        match self.request_json(Method::Get, &path, &params, None) {
+            Ok(value) => Ok(Some(parse_single_entity(&value, entity_type)?)),
+            Err(QboError::NotFound) => Ok(None),
+            Err(other) => Err(other),
+        }
+    }
+
+    /// `GET /v3/company/<realm>/reports/<name>`, spending from the
+    /// `Reports` bucket rather than `General` (`LEDGER-DESIGN.md` §6, §7).
+    /// Only the `Some` fields of `params` go on the wire, under the names
+    /// QBO reads, which are not the same for every report:
+    ///
+    /// - An aging report's as-of date is `report_date`. QBO ignores
+    ///   `end_date` there and ages as of today.
+    /// - A `TrialBalance` with `end_date` and no `start_date` is answered
+    ///   as "this month-to-date", ending today, whatever `end_date` says.
+    ///   Any start date makes it honour `end_date`, and the balances do not
+    ///   depend on which (balance sheet cumulative, income and expense
+    ///   fiscal year to date), so the end date is sent as the start too.
+    ///
+    /// Both found on the practice run, 17 Oct 2026: five trial balances and
+    /// eight aging reports for different dates came back byte-identical.
+    fn report(
+        &mut self,
+        realm: &RealmId,
+        name: ReportName,
+        params: &ReportParams,
+    ) -> Result<Value, QboError> {
+        let path = format!("/v3/company/{}/reports/{}", realm.as_str(), name.as_str());
+        let is_aging = matches!(name, ReportName::AgedReceivables | ReportName::AgedPayables);
+        let start_date = match (name, params.start_date, params.end_date) {
+            (ReportName::TrialBalance, None, Some(end)) => Some(end),
+            (_, start, _) => start,
+        };
+        let mut query = vec![self.minorversion_param()];
+        if let Some(start) = start_date {
+            query.push(("start_date".to_string(), start.to_string()));
+        }
+        if let Some(end) = params.end_date {
+            let key = if is_aging { "report_date" } else { "end_date" };
+            query.push((key.to_string(), end.to_string()));
+        }
+        if let Some(method) = &params.accounting_method {
+            query.push(("accounting_method".to_string(), method.clone()));
+        }
+        if let Some(date_macro) = &params.date_macro {
+            query.push(("date_macro".to_string(), date_macro.clone()));
+        }
+        if let Some(aging_method) = &params.aging_method {
+            query.push(("aging_method".to_string(), aging_method.clone()));
+        }
+        self.request_json_bucketed(BucketClass::Reports, Method::Get, &path, &query, None)
+    }
+}
+
+/// The sort every paged query uses. It must be unique per row: offset paging
+/// over a key with ties lets QBO return the tied rows in a different order on
+/// each request, so a row on a page boundary is skipped by one page and
+/// repeated by the next. `MetaData.LastUpdatedTime` has ties wherever records
+/// were bulk-imported (M0, 14 Oct 2026: 41 live Items skipped by the index
+/// and quarantined as "extra"; 15 Customers read twice by the initial pull).
+/// No caller depends on the order itself: the driver's cursor advances to the
+/// sync's start time, never to the last row read.
+const PAGE_ORDER: &str = "ORDERBY Id";
+
+/// Name-list entities QBO filters to `Active = true` unless the query says
+/// otherwise. A deactivated customer, vendor or item is still referenced by
+/// every document that used it, so the mirror needs it; without the clause
+/// the initial pull never sees it and the reconcile index reports it as
+/// "extra" the moment CDC (which does return it) mirrors the deactivation
+/// (M0, 14 Oct 2026: 41 Items deactivated that morning, quarantined).
+fn active_filter(entity_type: EntityType) -> Option<&'static str> {
+    match entity_type {
+        EntityType::Account
+        | EntityType::Class
+        | EntityType::Customer
+        | EntityType::Vendor
+        | EntityType::Item
+        | EntityType::Term
+        | EntityType::Department => Some("Active IN (true, false)"),
+        _ => None,
+    }
+}
+
+/// `SELECT Id, MetaData FROM <Entity> [WHERE Active IN (true, false)]
+/// ORDERBY Id STARTPOSITION n MAXRESULTS m`.
+fn build_index_query(entity_type: EntityType, start_position: usize, max_results: usize) -> String {
+    let mut query = format!("SELECT Id, MetaData FROM {}", entity_type.as_str());
+    if let Some(active) = active_filter(entity_type) {
+        query.push_str(&format!(" WHERE {active}"));
+    }
+    query.push_str(&format!(
+        " {PAGE_ORDER} STARTPOSITION {} MAXRESULTS {max_results}",
+        start_position + 1,
+    ));
+    query
+}
+
+/// `SELECT * FROM <Entity> [WHERE [Active IN (true, false) AND]
+/// MetaData.LastUpdatedTime >= x AND < y] ORDERBY Id STARTPOSITION n MAXRESULTS m`.
 ///
-/// `start_position` is zero-based, as the trait defines it; QBO's
-/// `STARTPOSITION` is one-based. That off-by-one is exactly the kind of thing a
-/// mapping layer exists to own in one place.
-pub fn select_statement(
+/// `start_position` is the trait's 0-based page offset; QBO's `STARTPOSITION`
+/// counts from 1, so it goes on the wire as `start_position + 1`.
+fn build_select(
     entity_type: EntityType,
     updated: Option<UpdatedRange>,
     start_position: usize,
     max_results: usize,
 ) -> String {
-    let mut statement = format!("SELECT * FROM {}", entity_type.as_str());
-    if let Some(window) = updated {
-        statement.push_str(&format!(
-            " WHERE MetaData.LastUpdatedTime >= {} AND MetaData.LastUpdatedTime < {}",
-            quote_literal(&timestamp(window.from)),
-            quote_literal(&timestamp(window.to)),
+    let mut filters: Vec<String> = active_filter(entity_type)
+        .map(str::to_string)
+        .into_iter()
+        .collect();
+    if let Some(range) = updated {
+        filters.push(format!(
+            "MetaData.LastUpdatedTime >= '{}' AND MetaData.LastUpdatedTime < '{}'",
+            range.from.to_rfc3339(),
+            range.to.to_rfc3339(),
         ));
     }
-    // Ordered so STARTPOSITION paging is stable. Ties on LastUpdatedTime are
-    // ordered however Intuit orders them; that is unverified (DESIGN.md §0) and
-    // the reconciliation sweep is what catches a row skipped across a tie.
-    statement.push_str(&format!(
-        " ORDERBY MetaData.LastUpdatedTime STARTPOSITION {} MAXRESULTS {}",
+    let mut query = format!("SELECT * FROM {}", entity_type.as_str());
+    if !filters.is_empty() {
+        query.push_str(&format!(" WHERE {}", filters.join(" AND ")));
+    }
+    query.push_str(&format!(
+        " {PAGE_ORDER} STARTPOSITION {} MAXRESULTS {max_results}",
         start_position + 1,
-        max_results
     ));
-    statement
+    query
 }
 
-pub fn name_statement(entity_type: EntityType, field: &str, name: &str) -> String {
-    format!(
-        "SELECT * FROM {} WHERE {} = {}",
-        entity_type.as_str(),
-        field,
-        quote_literal(name)
-    )
+/// `value["QueryResponse"][entity_type.as_str()]`, or empty when QBO omits
+/// the key entirely — its convention for "no rows matched" rather than an
+/// empty array.
+fn query_response_items(value: &Value, entity_type: EntityType) -> Vec<Value> {
+    value
+        .pointer(&format!("/QueryResponse/{}", entity_type.response_key()))
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default()
 }
 
-/// The REST resource name for writes: the entity name lower-cased.
-fn resource(entity_type: EntityType) -> String {
-    entity_type.as_str().to_ascii_lowercase()
+fn parse_single_entity(value: &Value, entity_type: EntityType) -> Result<EntityPayload, QboError> {
+    let object = value.get(entity_type.response_key()).ok_or_else(|| {
+        QboError::Validation(format!(
+            "response missing {:?} object: {value}",
+            entity_type.response_key()
+        ))
+    })?;
+    to_entity_payload(entity_type, object)
 }
 
-#[derive(Clone, Debug)]
-pub struct HttpQboConfig {
-    /// [`PRODUCTION_BASE`] or [`SANDBOX_BASE`]. Writes point at the sandbox
-    /// until explicitly repointed (`DESIGN.md` §8).
-    pub base_url: String,
-    pub minor_version: u32,
-}
+/// `CDCResponse[].QueryResponse[]` is an array of objects, each keyed by
+/// entity type name (plus paging metadata keys this walk skips) — unlike a
+/// plain query response, one CDC call can carry several entity types at once.
+fn parse_cdc_response(value: &Value) -> Result<Vec<EntityPayload>, QboError> {
+    const METADATA_KEYS: &[&str] = &["startPosition", "maxResults", "totalCount"];
 
-impl HttpQboConfig {
-    pub fn production() -> Self {
-        HttpQboConfig {
-            base_url: PRODUCTION_BASE.to_string(),
-            minor_version: DEFAULT_MINOR_VERSION,
+    let mut out = Vec::new();
+    let responses = value
+        .pointer("/CDCResponse")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    for response in responses {
+        let query_responses = response
+            .get("QueryResponse")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        for query_response in query_responses {
+            let Value::Object(fields) = query_response else {
+                continue;
+            };
+            for (key, items) in fields {
+                if METADATA_KEYS.contains(&key.as_str()) {
+                    continue;
+                }
+                let Ok(entity_type) = EntityType::parse_response_key(&key) else {
+                    continue;
+                };
+                let Value::Array(items) = items else { continue };
+                for item in items {
+                    out.push(to_entity_payload(entity_type, &item)?);
+                }
+            }
         }
     }
-
-    pub fn sandbox() -> Self {
-        HttpQboConfig {
-            base_url: SANDBOX_BASE.to_string(),
-            minor_version: DEFAULT_MINOR_VERSION,
-        }
-    }
-
-    fn company(&self, realm: &RealmId) -> String {
-        format!("{}/v3/company/{}", self.base_url.trim_end_matches('/'), realm)
-    }
-
-    pub fn query_url(&self, realm: &RealmId, statement: &str) -> String {
-        format!(
-            "{}/query?query={}&minorversion={}",
-            self.company(realm),
-            percent_encode(statement),
-            self.minor_version
-        )
-    }
-
-    pub fn cdc_url(
-        &self,
-        realm: &RealmId,
-        entity_types: &[EntityType],
-        changed_since: DateTime<Utc>,
-    ) -> String {
-        let names: Vec<&str> = entity_types.iter().map(|e| e.as_str()).collect();
-        format!(
-            "{}/cdc?entities={}&changedSince={}&minorversion={}",
-            self.company(realm),
-            percent_encode(&names.join(",")),
-            percent_encode(&timestamp(changed_since)),
-            self.minor_version
-        )
-    }
-
-    /// Create and update share one endpoint; `requestid` is what makes a
-    /// retried write replay instead of repeating. It is passed in, never minted
-    /// here — regenerating it per attempt gives no idempotency at all.
-    pub fn write_url(&self, realm: &RealmId, entity_type: EntityType, request_id: Uuid) -> String {
-        format!(
-            "{}/{}?requestid={}&minorversion={}",
-            self.company(realm),
-            resource(entity_type),
-            request_id,
-            self.minor_version
-        )
-    }
+    Ok(out)
 }
 
-/// An update body: the outbox payload with `Id` and the base `SyncToken`
-/// written over whatever it carried. The token is the conflict check, so it
-/// must be the one the edit was based on, not one the payload happens to hold.
-pub fn update_body(
-    payload: &serde_json::Value,
-    qbo_id: &str,
-    base_sync_token: &str,
-) -> Result<serde_json::Value, QboError> {
-    let mut body = payload.clone();
-    let object = body
-        .as_object_mut()
-        .ok_or_else(|| QboError::Validation("update payload is not a JSON object".into()))?;
-    object.insert("Id".into(), qbo_id.into());
-    object.insert("SyncToken".into(), base_sync_token.into());
-    Ok(body)
-}
-
-// ---------------------------------------------------------------------------
-// Response mapping
-// ---------------------------------------------------------------------------
-
-/// Intuit fault codes the mapping distinguishes. Everything else QBO refuses is
-/// [`QboError::Validation`].
-const FAULT_STALE_OBJECT: &str = "5010";
-const FAULT_OBJECT_NOT_FOUND: &str = "610";
-const FAULT_AUTHENTICATION: &str = "3200";
-const FAULT_THROTTLED: &str = "003001";
-
-/// Map a non-success response to the error the worker routes on.
-///
-/// Status decides first where it is unambiguous; the fault code decides the
-/// rest. A stale `SyncToken` must come out as [`QboError::StaleSyncToken`] and
-/// nothing else, because that is the variant that bypasses the retry budget —
-/// retrying a stale token is last-writer-wins by another name.
-pub fn map_failure(response: &HttpResponse) -> QboError {
-    let fault = parse_fault(&response.body);
-    let code = fault.as_ref().map(|f| f.code.as_str());
-
-    match (response.status, code) {
-        (429, _) | (_, Some(FAULT_THROTTLED)) => QboError::RateLimited,
-        (401, _) | (_, Some(FAULT_AUTHENTICATION)) => {
-            QboError::Unauthorized(describe(response, fault.as_ref()))
-        }
-        (_, Some(FAULT_STALE_OBJECT)) => QboError::StaleSyncToken,
-        (_, Some(FAULT_OBJECT_NOT_FOUND)) | (404, None) => QboError::NotFound,
-        (500..=599, _) => QboError::Network(describe(response, fault.as_ref())),
-        _ => QboError::Validation(describe(response, fault.as_ref())),
-    }
-}
-
-#[derive(Debug, PartialEq, Eq)]
-struct Fault {
-    code: String,
-    message: String,
-    detail: String,
-}
-
-/// Intuit wraps errors as `{"Fault":{"Error":[{...}],"type":...}}`, and some
-/// gateway errors come back as `{"fault":{"error":[...]}}` in lower case. Both
-/// are read; the first error is the one reported.
-fn parse_fault(body: &str) -> Option<Fault> {
-    let value: serde_json::Value = serde_json::from_str(body).ok()?;
-    let fault = value.get("Fault").or_else(|| value.get("fault"))?;
-    let errors = fault.get("Error").or_else(|| fault.get("error"))?;
-    let first = errors.as_array()?.first()?;
-    let field = |name: &str| {
-        first
-            .get(name)
-            .or_else(|| first.get(name.to_ascii_lowercase()))
-            .map(|v| match v {
-                serde_json::Value::String(s) => s.clone(),
-                other => other.to_string(),
-            })
-            .unwrap_or_default()
-    };
-    Some(Fault {
-        code: field("code"),
-        message: field("Message"),
-        detail: field("Detail"),
-    })
-}
-
-fn describe(response: &HttpResponse, fault: Option<&Fault>) -> String {
-    match fault {
-        Some(f) if f.detail.is_empty() => format!("HTTP {} [{}] {}", response.status, f.code, f.message),
-        Some(f) => format!("HTTP {} [{}] {}: {}", response.status, f.code, f.message, f.detail),
-        None => {
-            let excerpt: String = response.body.chars().take(200).collect();
-            format!("HTTP {} {}", response.status, excerpt)
-        }
-    }
-}
-
-/// One entity object as QBO serialises it.
-///
-/// Deleted entities in a CDC response carry `"status": "Deleted"` and little
-/// else. They have no `SyncToken`, so an empty one is recorded: a tombstone is
-/// never the base of an update.
-pub fn parse_entity(
-    entity_type: EntityType,
-    object: &serde_json::Value,
-) -> Result<EntityPayload, QboError> {
-    let protocol = |what: &str| QboError::Protocol(format!("{} {what}", entity_type.as_str()));
-
+/// `Id`, `SyncToken`, `MetaData.LastUpdatedTime`, and (CDC only) `status ==
+/// "Deleted"` — the raw object is kept whole as `raw_json` regardless.
+fn to_entity_payload(entity_type: EntityType, object: &Value) -> Result<EntityPayload, QboError> {
     let qbo_id = object
         .get("Id")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| protocol("has no Id"))?
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            QboError::Validation(format!("{entity_type:?} response missing Id: {object}"))
+        })?
         .to_string();
-    let is_deleted = object.get("status").and_then(|v| v.as_str()) == Some("Deleted");
     let sync_token = object
         .get("SyncToken")
-        .and_then(|v| v.as_str())
-        .unwrap_or_default()
+        .and_then(Value::as_str)
+        .unwrap_or("0")
         .to_string();
-    if sync_token.is_empty() && !is_deleted {
-        return Err(protocol(&format!("{qbo_id} has no SyncToken")));
-    }
-    let updated_raw = object
+    let last_updated_raw = object
         .pointer("/MetaData/LastUpdatedTime")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| protocol(&format!("{qbo_id} has no MetaData.LastUpdatedTime")))?;
-    let last_updated_utc = DateTime::parse_from_rfc3339(updated_raw)
-        .map_err(|_| protocol(&format!("{qbo_id} has unparseable LastUpdatedTime {updated_raw:?}")))?
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            QboError::Validation(format!(
+                "{entity_type:?} {qbo_id} missing MetaData.LastUpdatedTime"
+            ))
+        })?;
+    let last_updated_utc = DateTime::parse_from_rfc3339(last_updated_raw)
+        .map_err(|error| {
+            QboError::Validation(format!(
+                "{entity_type:?} {qbo_id}: bad LastUpdatedTime {last_updated_raw:?}: {error}"
+            ))
+        })?
         .with_timezone(&Utc);
+    let is_deleted = object.get("status").and_then(Value::as_str) == Some("Deleted");
 
     Ok(EntityPayload {
         entity_type,
@@ -363,667 +898,324 @@ pub fn parse_entity(
     })
 }
 
-fn parse_json(response: &HttpResponse) -> Result<serde_json::Value, QboError> {
-    serde_json::from_str(&response.body)
-        .map_err(|e| QboError::Protocol(format!("response is not JSON: {e}")))
-}
-
-/// `{"QueryResponse": {"Invoice": [...], "startPosition": 1, ...}}`. An empty
-/// result is `{"QueryResponse": {}}` — no key at all, not an empty array.
-pub fn parse_query(entity_type: EntityType, response: &HttpResponse) -> Result<Vec<EntityPayload>, QboError> {
-    let value = parse_json(response)?;
-    let query = value
-        .get("QueryResponse")
-        .ok_or_else(|| QboError::Protocol("query response has no QueryResponse".into()))?;
-    match query.get(entity_type.as_str()) {
-        None => Ok(Vec::new()),
-        Some(serde_json::Value::Array(objects)) => {
-            objects.iter().map(|o| parse_entity(entity_type, o)).collect()
-        }
-        // CompanyInfo and Preferences are singletons in some responses.
-        Some(object @ serde_json::Value::Object(_)) => Ok(vec![parse_entity(entity_type, object)?]),
-        Some(_) => Err(QboError::Protocol(format!(
-            "QueryResponse.{} is neither array nor object",
-            entity_type.as_str()
-        ))),
-    }
-}
-
-/// `{"CDCResponse": [{"QueryResponse": [{"Invoice": [...]}, {"Customer": [...]}]}]}`.
-///
-/// Only the requested types are read; anything else Intuit volunteers is
-/// ignored rather than guessed at.
-pub fn parse_cdc(entity_types: &[EntityType], response: &HttpResponse) -> Result<Vec<EntityPayload>, QboError> {
-    let value = parse_json(response)?;
-    let blocks = value
-        .get("CDCResponse")
-        .and_then(|v| v.as_array())
-        .ok_or_else(|| QboError::Protocol("cdc response has no CDCResponse array".into()))?;
-
-    let mut out = Vec::new();
-    for block in blocks {
-        let Some(queries) = block.get("QueryResponse").and_then(|v| v.as_array()) else {
-            continue;
-        };
-        for query in queries {
-            for &entity_type in entity_types {
-                if let Some(objects) = query.get(entity_type.as_str()).and_then(|v| v.as_array()) {
-                    for object in objects {
-                        out.push(parse_entity(entity_type, object)?);
-                    }
-                }
-            }
-        }
-    }
-    Ok(out)
-}
-
-/// `{"Invoice": {...}, "time": "..."}` — the written entity under its own name.
-pub fn parse_write(entity_type: EntityType, response: &HttpResponse) -> Result<EntityPayload, QboError> {
-    let value = parse_json(response)?;
-    let object = value.get(entity_type.as_str()).ok_or_else(|| {
-        QboError::Protocol(format!("write response has no {} object", entity_type.as_str()))
-    })?;
-    parse_entity(entity_type, object)
-}
-
-// ---------------------------------------------------------------------------
-// Client
-// ---------------------------------------------------------------------------
-
-pub struct HttpQboClient<T: Transport, A: AccessTokens> {
-    transport: T,
-    tokens: A,
-    config: HttpQboConfig,
-    clock: Box<dyn FnMut() -> DateTime<Utc>>,
-    /// Requests sent, retries after a 401 included. Reported, not limited.
-    pub requests_sent: usize,
-}
-
-impl<T: Transport, A: AccessTokens> HttpQboClient<T, A> {
-    pub fn new(transport: T, tokens: A, config: HttpQboConfig) -> Self {
-        Self::with_clock(transport, tokens, config, Box::new(Utc::now))
-    }
-
-    pub fn with_clock(
-        transport: T,
-        tokens: A,
-        config: HttpQboConfig,
-        clock: Box<dyn FnMut() -> DateTime<Utc>>,
-    ) -> Self {
-        HttpQboClient {
-            transport,
-            tokens,
-            config,
-            clock,
-            requests_sent: 0,
-        }
-    }
-
-    pub fn transport(&self) -> &T {
-        &self.transport
-    }
-
-    pub fn tokens(&self) -> &A {
-        &self.tokens
-    }
-
-    /// Send, and on a 401 rotate the token once and resend. One retry only: a
-    /// second 401 straight after a successful refresh is not something another
-    /// refresh fixes.
-    fn execute(
-        &mut self,
-        realm: &RealmId,
-        method: Method,
-        url: String,
-        body: Option<String>,
-    ) -> Result<HttpResponse, QboError> {
-        let mut refreshed = false;
-        loop {
-            let now = (self.clock)();
-            let bearer = self.tokens.bearer(realm, now)?;
-            let mut headers = vec![
-                ("Authorization".to_string(), format!("Bearer {bearer}")),
-                ("Accept".to_string(), "application/json".to_string()),
-            ];
-            if body.is_some() {
-                headers.push(("Content-Type".to_string(), "application/json".to_string()));
-            }
-            let request = HttpRequest {
-                method,
-                url: url.clone(),
-                headers,
-                body: body.clone(),
-            };
-            self.requests_sent += 1;
-            let response = self
-                .transport
-                .send(&request)
-                .map_err(|e| QboError::Network(e.0))?;
-
-            if (200..300).contains(&response.status) {
-                return Ok(response);
-            }
-            let error = map_failure(&response);
-            if matches!(error, QboError::Unauthorized(_)) && !refreshed {
-                refreshed = true;
-                self.tokens.refused(realm, (self.clock)())?;
-                continue;
-            }
-            return Err(error);
-        }
-    }
-}
-
-impl<T: Transport, A: AccessTokens> QboClient for HttpQboClient<T, A> {
-    fn query(
-        &mut self,
-        realm: &RealmId,
-        entity_type: EntityType,
-        updated: Option<UpdatedRange>,
-        start_position: usize,
-        max_results: usize,
-    ) -> Result<Vec<EntityPayload>, QboError> {
-        let statement = select_statement(entity_type, updated, start_position, max_results);
-        let url = self.config.query_url(realm, &statement);
-        let response = self.execute(realm, Method::Get, url, None)?;
-        parse_query(entity_type, &response)
-    }
-
-    fn cdc(
-        &mut self,
-        realm: &RealmId,
-        entity_types: &[EntityType],
-        changed_since: DateTime<Utc>,
-    ) -> Result<Vec<EntityPayload>, QboError> {
-        let url = self.config.cdc_url(realm, entity_types, changed_since);
-        let response = self.execute(realm, Method::Get, url, None)?;
-        parse_cdc(entity_types, &response)
-    }
-
-    fn create(
-        &mut self,
-        realm: &RealmId,
-        entity_type: EntityType,
-        payload: &serde_json::Value,
-        request_id: Uuid,
-    ) -> Result<EntityPayload, QboError> {
-        let url = self.config.write_url(realm, entity_type, request_id);
-        let response = self.execute(realm, Method::Post, url, Some(payload.to_string()))?;
-        parse_write(entity_type, &response)
-    }
-
-    fn update(
-        &mut self,
-        realm: &RealmId,
-        entity_type: EntityType,
-        qbo_id: &str,
-        payload: &serde_json::Value,
-        base_sync_token: &str,
-        request_id: Uuid,
-    ) -> Result<EntityPayload, QboError> {
-        let body = update_body(payload, qbo_id, base_sync_token)?;
-        let url = self.config.write_url(realm, entity_type, request_id);
-        let response = self.execute(realm, Method::Post, url, Some(body.to_string()))?;
-        parse_write(entity_type, &response)
-    }
-
-    fn find_by_name(
-        &mut self,
-        realm: &RealmId,
-        entity_type: EntityType,
-        name: &str,
-    ) -> Result<Option<EntityPayload>, QboError> {
-        let field = unique_name_field(entity_type).ok_or_else(|| {
-            QboError::Validation(format!("{} has no unique name field", entity_type.as_str()))
+fn to_index_entry(object: &Value) -> Result<IndexEntry, QboError> {
+    let qbo_id = object
+        .get("Id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| QboError::Validation(format!("index response missing Id: {object}")))?
+        .to_string();
+    let last_updated_raw = object
+        .pointer("/MetaData/LastUpdatedTime")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            QboError::Validation(format!(
+                "index entry {qbo_id} missing MetaData.LastUpdatedTime"
+            ))
         })?;
-        let url = self
-            .config
-            .query_url(realm, &name_statement(entity_type, field, name));
-        let response = self.execute(realm, Method::Get, url, None)?;
-        // QBO's equality is case-insensitive; the duplicate rule it enforces is
-        // too, so a case-different match is the record a create would clash with.
-        Ok(parse_query(entity_type, &response)?.into_iter().next())
-    }
+    let last_updated_utc = DateTime::parse_from_rfc3339(last_updated_raw)
+        .map_err(|error| {
+            QboError::Validation(format!(
+                "index entry {qbo_id}: bad LastUpdatedTime {last_updated_raw:?}: {error}"
+            ))
+        })?
+        .with_timezone(&Utc);
+    // The query endpoint never returns a soft-deleted object at all — only
+    // CDC surfaces the deletion itself — so an indexed id is, by
+    // construction, not deleted.
+    Ok(IndexEntry {
+        qbo_id,
+        last_updated_utc,
+        is_deleted: false,
+    })
 }
 
-// ---------------------------------------------------------------------------
-// Live transport
-// ---------------------------------------------------------------------------
-
-/// The real transport. Behind the `live` feature so `cargo test` neither
-/// compiles a TLS stack nor has any way to reach Intuit.
-#[cfg(feature = "live")]
-pub mod live {
-    use std::time::Duration;
-
-    use super::{HttpRequest, HttpResponse, Method, Transport, TransportError};
-
-    pub struct UreqTransport {
-        agent: ureq::Agent,
+fn append_jsonl<T: serde::Serialize>(path: &Path, entry: &T) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
     }
-
-    impl UreqTransport {
-        pub fn new(timeout: Duration) -> Self {
-            UreqTransport {
-                agent: ureq::AgentBuilder::new()
-                    .timeout(timeout)
-                    .try_proxy_from_env(true)
-                    .build(),
-            }
-        }
-    }
-
-    impl Default for UreqTransport {
-        fn default() -> Self {
-            UreqTransport::new(Duration::from_secs(60))
-        }
-    }
-
-    impl Transport for UreqTransport {
-        fn send(&mut self, request: &HttpRequest) -> Result<HttpResponse, TransportError> {
-            let method = match request.method {
-                Method::Get => "GET",
-                Method::Post => "POST",
-            };
-            let mut builder = self.agent.request(method, &request.url);
-            for (name, value) in &request.headers {
-                builder = builder.set(name, value);
-            }
-            let result = match &request.body {
-                Some(body) => builder.send_string(body),
-                None => builder.call(),
-            };
-            let response = match result {
-                Ok(response) => response,
-                Err(ureq::Error::Status(_, response)) => response,
-                Err(ureq::Error::Transport(error)) => return Err(TransportError(error.to_string())),
-            };
-            let status = response.status();
-            let body = response
-                .into_string()
-                .map_err(|e| TransportError(format!("reading body: {e}")))?;
-            Ok(HttpResponse { status, body })
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Test doubles
-// ---------------------------------------------------------------------------
-
-/// A transport that returns queued responses and records what it was sent.
-#[derive(Default)]
-pub struct ScriptedTransport {
-    responses: std::collections::VecDeque<Result<HttpResponse, TransportError>>,
-    pub sent: Vec<HttpRequest>,
-}
-
-impl ScriptedTransport {
-    pub fn respond(&mut self, status: u16, body: impl Into<String>) -> &mut Self {
-        self.responses.push_back(Ok(HttpResponse {
-            status,
-            body: body.into(),
-        }));
-        self
-    }
-
-    pub fn fail(&mut self, message: &str) -> &mut Self {
-        self.responses.push_back(Err(TransportError(message.to_string())));
-        self
-    }
-}
-
-impl Transport for ScriptedTransport {
-    fn send(&mut self, request: &HttpRequest) -> Result<HttpResponse, TransportError> {
-        self.sent.push(request.clone());
-        self.responses
-            .pop_front()
-            .unwrap_or_else(|| Err(TransportError("script exhausted".into())))
-    }
+    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+    let line =
+        serde_json::to_string(entry).map_err(|error| std::io::Error::other(error.to_string()))?;
+    writeln!(file, "{line}")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
-    fn realm() -> RealmId {
-        RealmId::parse("1234567890123456").unwrap()
+    #[test]
+    fn build_select_has_no_where_clause_when_unbounded() {
+        let query = build_select(EntityType::Invoice, None, 0, 100);
+        assert_eq!(
+            query,
+            "SELECT * FROM Invoice ORDERBY Id STARTPOSITION 1 MAXRESULTS 100"
+        );
     }
 
-    fn at(secs: i64) -> DateTime<Utc> {
-        DateTime::from_timestamp(1_755_300_000 + secs, 0).unwrap()
-    }
-
-    /// Counts refreshes; hands out a new token after each.
-    #[derive(Default)]
-    struct CountingTokens {
-        generation: usize,
-        refusals: usize,
-    }
-
-    impl AccessTokens for CountingTokens {
-        fn bearer(&mut self, _: &RealmId, _: DateTime<Utc>) -> Result<String, QboError> {
-            Ok(format!("token-{}", self.generation))
+    #[test]
+    fn paged_queries_sort_on_the_unique_id_never_on_a_timestamp() {
+        // A timestamp sort has ties, and ties under offset paging skip and
+        // repeat rows across page boundaries (see `PAGE_ORDER`).
+        let window = UpdatedRange {
+            from: DateTime::parse_from_rfc3339("2026-10-01T00:00:00Z")
+                .unwrap()
+                .with_timezone(&Utc),
+            to: DateTime::parse_from_rfc3339("2026-10-14T00:00:00Z")
+                .unwrap()
+                .with_timezone(&Utc),
+        };
+        for query in [
+            build_select(EntityType::Item, None, 1000, 1000),
+            build_select(EntityType::Item, Some(window), 0, 1000),
+            build_index_query(EntityType::Item, 1000, 1000),
+            build_index_query(EntityType::Invoice, 1000, 1000),
+        ] {
+            assert!(
+                query.contains(" ORDERBY Id STARTPOSITION "),
+                "query was: {query}"
+            );
+            assert!(!query.contains("ORDERBY MetaData"), "query was: {query}");
         }
-        fn refused(&mut self, _: &RealmId, _: DateTime<Utc>) -> Result<(), QboError> {
-            self.refusals += 1;
-            self.generation += 1;
-            Ok(())
-        }
-    }
-
-    fn client(transport: ScriptedTransport) -> HttpQboClient<ScriptedTransport, CountingTokens> {
-        HttpQboClient::with_clock(
-            transport,
-            CountingTokens::default(),
-            HttpQboConfig::sandbox(),
-            Box::new(|| at(0)),
-        )
-    }
-
-    fn invoice(id: &str, token: &str, updated: &str) -> serde_json::Value {
-        serde_json::json!({
-            "Id": id,
-            "SyncToken": token,
-            "DocNumber": format!("T-{id}"),
-            "TotalAmt": 100.0,
-            "MetaData": { "CreateTime": updated, "LastUpdatedTime": updated }
-        })
-    }
-
-    fn fault(code: &str, message: &str) -> String {
-        serde_json::json!({
-            "Fault": {
-                "Error": [{ "Message": message, "Detail": "synthetic", "code": code }],
-                "type": "ValidationFault"
-            },
-            "time": "2026-08-23T10:00:00.000-07:00"
-        })
-        .to_string()
-    }
-
-    // --- encoding ---------------------------------------------------------
-
-    #[test]
-    fn percent_encoding_leaves_only_unreserved_characters() {
-        assert_eq!(percent_encode("a-Z_0.~"), "a-Z_0.~");
-        assert_eq!(percent_encode("SELECT * FROM x"), "SELECT%20%2A%20FROM%20x");
-        assert_eq!(percent_encode("Bob's & Co"), "Bob%27s%20%26%20Co");
-        assert_eq!(percent_encode("é"), "%C3%A9");
-    }
-
-    #[test]
-    fn literals_escape_apostrophes_and_backslashes() {
-        assert_eq!(quote_literal("plain"), "'plain'");
-        assert_eq!(quote_literal("Bob's Pools"), r"'Bob\'s Pools'");
-        // A trailing backslash must not escape the closing quote.
-        assert_eq!(quote_literal(r"ends\"), r"'ends\\'");
-    }
-
-    // --- request building -------------------------------------------------
-
-    #[test]
-    fn start_position_is_one_based_on_the_wire() {
-        let statement = select_statement(EntityType::Invoice, None, 0, 1000);
         assert_eq!(
-            statement,
-            "SELECT * FROM Invoice ORDERBY MetaData.LastUpdatedTime STARTPOSITION 1 MAXRESULTS 1000"
-        );
-        assert!(select_statement(EntityType::Invoice, None, 1000, 1000).contains("STARTPOSITION 1001"));
-    }
-
-    #[test]
-    fn a_window_is_half_open() {
-        let statement = select_statement(
-            EntityType::Bill,
-            Some(UpdatedRange { from: at(0), to: at(60) }),
-            0,
-            500,
-        );
-        assert!(statement.contains("MetaData.LastUpdatedTime >= '2025-08-15T23:20:00Z'"));
-        assert!(statement.contains("AND MetaData.LastUpdatedTime < '2025-08-15T23:21:00Z'"));
-    }
-
-    #[test]
-    fn urls_are_realm_scoped_and_pin_the_minor_version() {
-        let config = HttpQboConfig::production();
-        let url = config.cdc_url(&realm(), &[EntityType::Invoice, EntityType::Customer], at(0));
-        assert_eq!(
-            url,
-            "https://quickbooks.api.intuit.com/v3/company/1234567890123456/cdc\
-             ?entities=Invoice%2CCustomer&changedSince=2025-08-15T23%3A20%3A00Z&minorversion=75"
-        );
-        let request_id = Uuid::nil();
-        assert_eq!(
-            config.write_url(&realm(), EntityType::PurchaseOrder, request_id),
-            "https://quickbooks.api.intuit.com/v3/company/1234567890123456/purchaseorder\
-             ?requestid=00000000-0000-0000-0000-000000000000&minorversion=75"
+            build_index_query(EntityType::Item, 1000, 1000),
+            "SELECT Id, MetaData FROM Item WHERE Active IN (true, false) ORDERBY Id STARTPOSITION 1001 MAXRESULTS 1000"
         );
     }
 
     #[test]
-    fn an_update_body_carries_the_base_token_not_the_payloads() {
-        let payload = serde_json::json!({ "SyncToken": "9", "TotalAmt": 5 });
-        let body = update_body(&payload, "42", "3").unwrap();
-        assert_eq!(body["Id"], "42");
-        assert_eq!(body["SyncToken"], "3");
-        assert_eq!(body["TotalAmt"], 5);
-        assert!(update_body(&serde_json::json!([1]), "42", "3").is_err());
-    }
-
-    // --- response mapping -------------------------------------------------
-
-    #[test]
-    fn query_responses_parse_including_the_empty_shape() {
-        let body = serde_json::json!({
-            "QueryResponse": {
-                "Invoice": [invoice("1", "0", "2026-08-01T09:00:00-07:00"),
-                            invoice("2", "4", "2026-08-02T09:00:00-07:00")],
-                "startPosition": 1,
-                "maxResults": 2
+    fn name_lists_ask_for_inactive_records_and_documents_do_not() {
+        // QBO returns only active name-list rows unless asked; documents have
+        // no Active field and would reject the filter.
+        let window = UpdatedRange {
+            from: DateTime::parse_from_rfc3339("2026-10-01T00:00:00Z")
+                .unwrap()
+                .with_timezone(&Utc),
+            to: DateTime::parse_from_rfc3339("2026-10-14T00:00:00Z")
+                .unwrap()
+                .with_timezone(&Utc),
+        };
+        for entity_type in [
+            EntityType::Account,
+            EntityType::Class,
+            EntityType::Customer,
+            EntityType::Vendor,
+            EntityType::Item,
+            EntityType::Term,
+            EntityType::Department,
+        ] {
+            for query in [
+                build_select(entity_type, None, 0, 1000),
+                build_index_query(entity_type, 0, 1000),
+            ] {
+                assert!(
+                    query.contains(" WHERE Active IN (true, false) ORDERBY Id"),
+                    "query was: {query}"
+                );
             }
-        });
-        let response = HttpResponse { status: 200, body: body.to_string() };
-        let parsed = parse_query(EntityType::Invoice, &response).unwrap();
-        assert_eq!(parsed.len(), 2);
-        assert_eq!(parsed[1].sync_token, "4");
-        // Offsets are normalised to UTC.
-        assert_eq!(parsed[0].last_updated_utc.to_rfc3339(), "2026-08-01T16:00:00+00:00");
-
-        let empty = HttpResponse { status: 200, body: r#"{"QueryResponse":{}}"#.into() };
-        assert!(parse_query(EntityType::Invoice, &empty).unwrap().is_empty());
+            let windowed = build_select(entity_type, Some(window), 0, 1000);
+            assert!(
+                windowed.contains(
+                    " WHERE Active IN (true, false) AND MetaData.LastUpdatedTime >= '2026-10-01T00:00:00+00:00' AND MetaData.LastUpdatedTime < '2026-10-14T00:00:00+00:00' ORDERBY Id"
+                ),
+                "query was: {windowed}"
+            );
+        }
+        for entity_type in [EntityType::Invoice, EntityType::Bill, EntityType::TaxCode] {
+            assert!(!build_select(entity_type, None, 0, 10).contains("Active"));
+            assert!(!build_index_query(entity_type, 0, 10).contains("Active"));
+        }
     }
 
     #[test]
-    fn cdc_responses_carry_tombstones_and_ignore_unrequested_types() {
-        let body = serde_json::json!({
-            "CDCResponse": [{
-                "QueryResponse": [
-                    { "Invoice": [
-                        invoice("7", "2", "2026-08-03T09:00:00Z"),
-                        { "Id": "8", "status": "Deleted",
-                          "MetaData": { "LastUpdatedTime": "2026-08-03T10:00:00Z" } }
-                    ] },
-                    { "Customer": [ { "Id": "c1", "SyncToken": "0",
-                                      "MetaData": { "LastUpdatedTime": "2026-08-03T11:00:00Z" } } ] }
-                ]
-            }]
-        });
-        let response = HttpResponse { status: 200, body: body.to_string() };
-        let parsed = parse_cdc(&[EntityType::Invoice], &response).unwrap();
-        assert_eq!(parsed.len(), 2);
-        assert!(!parsed[0].is_deleted);
-        assert!(parsed[1].is_deleted);
-        assert_eq!(parsed[1].sync_token, "");
-    }
-
-    #[test]
-    fn a_live_entity_without_a_sync_token_is_a_protocol_error() {
-        let object = serde_json::json!({ "Id": "1", "MetaData": { "LastUpdatedTime": "2026-08-03T09:00:00Z" } });
-        assert!(matches!(parse_entity(EntityType::Invoice, &object), Err(QboError::Protocol(_))));
-    }
-
-    #[test]
-    fn failures_map_to_the_variants_the_worker_routes_on() {
-        let response = |status, body: String| HttpResponse { status, body };
-        assert_eq!(
-            map_failure(&response(400, fault("5010", "Stale Object Error"))),
-            QboError::StaleSyncToken
+    fn build_select_converts_zero_based_start_to_one_based_startposition() {
+        let query = build_select(EntityType::Customer, None, 40, 20);
+        assert!(
+            query.contains("STARTPOSITION 41 MAXRESULTS 20"),
+            "query was: {query}"
         );
-        assert_eq!(map_failure(&response(400, fault("610", "Object Not Found"))), QboError::NotFound);
-        assert_eq!(map_failure(&response(429, String::new())), QboError::RateLimited);
-        assert_eq!(map_failure(&response(400, fault("003001", "ThrottleExceeded"))), QboError::RateLimited);
-        assert!(matches!(map_failure(&response(401, fault("3200", "AuthenticationFailed"))), QboError::Unauthorized(_)));
-        assert!(matches!(map_failure(&response(503, "<html>down</html>".into())), QboError::Network(_)));
-        assert!(matches!(
-            map_failure(&response(400, fault("6000", "A business validation error has occurred"))),
-            QboError::Validation(_)
-        ));
     }
 
     #[test]
-    fn transient_classification_survives_the_mapping() {
-        // The worker's retry-versus-inbox decision rides on this.
-        assert!(map_failure(&HttpResponse { status: 502, body: String::new() }).is_transient());
-        assert!(map_failure(&HttpResponse { status: 429, body: String::new() }).is_transient());
-        assert!(!map_failure(&HttpResponse { status: 400, body: fault("5010", "Stale") }).is_transient());
-        assert!(!map_failure(&HttpResponse { status: 400, body: fault("6000", "bad") }).is_transient());
-    }
-
-    // --- client -----------------------------------------------------------
-
-    #[test]
-    fn a_query_sends_a_bearer_and_parses_the_page() {
-        let mut transport = ScriptedTransport::default();
-        transport.respond(
-            200,
-            serde_json::json!({ "QueryResponse": { "Invoice": [invoice("1", "0", "2026-08-01T00:00:00Z")] } })
-                .to_string(),
-        );
-        let mut qbo = client(transport);
-        let page = qbo.query(&realm(), EntityType::Invoice, None, 0, 1000).unwrap();
-        assert_eq!(page.len(), 1);
-
-        let sent = &qbo.transport().sent[0];
-        assert_eq!(sent.method, Method::Get);
-        assert_eq!(sent.header("authorization"), Some("Bearer token-0"));
-        assert!(sent.url.starts_with("https://sandbox-quickbooks.api.intuit.com/v3/company/1234567890123456/query?query=SELECT"));
-    }
-
-    #[test]
-    fn a_401_rotates_the_token_once_and_resends() {
-        let mut transport = ScriptedTransport::default();
-        transport
-            .respond(401, fault("3200", "AuthenticationFailed"))
-            .respond(200, r#"{"QueryResponse":{}}"#);
-        let mut qbo = client(transport);
-        assert!(qbo.query(&realm(), EntityType::Invoice, None, 0, 10).unwrap().is_empty());
-        assert_eq!(qbo.tokens().refusals, 1);
-        assert_eq!(qbo.transport().sent[1].header("Authorization"), Some("Bearer token-1"));
-    }
-
-    #[test]
-    fn a_second_401_is_returned_not_looped_on() {
-        let mut transport = ScriptedTransport::default();
-        transport
-            .respond(401, fault("3200", "AuthenticationFailed"))
-            .respond(401, fault("3200", "AuthenticationFailed"));
-        let mut qbo = client(transport);
-        let result = qbo.query(&realm(), EntityType::Invoice, None, 0, 10);
-        assert!(matches!(result, Err(QboError::Unauthorized(_))));
-        assert_eq!(qbo.requests_sent, 2);
-    }
-
-    #[test]
-    fn a_transport_failure_is_a_transient_network_error() {
-        let mut transport = ScriptedTransport::default();
-        transport.fail("connection reset by peer");
-        let mut qbo = client(transport);
-        let error = qbo.cdc(&realm(), &[EntityType::Invoice], at(0)).unwrap_err();
-        assert!(error.is_transient());
-    }
-
-    #[test]
-    fn create_reuses_the_callers_request_id() {
-        let mut transport = ScriptedTransport::default();
-        transport.fail("timeout").respond(
-            200,
-            serde_json::json!({ "Invoice": invoice("55", "0", "2026-08-01T00:00:00Z") }).to_string(),
-        );
-        let mut qbo = client(transport);
-        let request_id = Uuid::now_v7();
-        let payload = serde_json::json!({ "DocNumber": "T-1" });
-
-        assert!(qbo.create(&realm(), EntityType::Invoice, &payload, request_id).is_err());
-        let created = qbo.create(&realm(), EntityType::Invoice, &payload, request_id).unwrap();
-        assert_eq!(created.qbo_id, "55");
-
-        let sent = &qbo.transport().sent;
-        assert_eq!(sent[0].url, sent[1].url, "a retry must carry the same requestid");
-        assert!(sent[0].url.contains(&request_id.to_string()));
-        assert_eq!(sent[0].header("Content-Type"), Some("application/json"));
-    }
-
-    #[test]
-    fn a_stale_update_comes_back_as_stale_sync_token() {
-        let mut transport = ScriptedTransport::default();
-        transport.respond(400, fault("5010", "Stale Object Error"));
-        let mut qbo = client(transport);
-        let result = qbo.update(
-            &realm(),
-            EntityType::Invoice,
-            "55",
-            &serde_json::json!({ "TotalAmt": 1 }),
-            "0",
-            Uuid::now_v7(),
-        );
-        assert_eq!(result, Err(QboError::StaleSyncToken));
-        let body: serde_json::Value =
-            serde_json::from_str(qbo.transport().sent[0].body.as_deref().unwrap()).unwrap();
-        assert_eq!(body["SyncToken"], "0");
-    }
-
-    #[test]
-    fn find_by_name_queries_the_unique_field_with_escaping() {
-        let mut transport = ScriptedTransport::default();
-        transport.respond(200, r#"{"QueryResponse":{}}"#);
-        let mut qbo = client(transport);
-        assert!(qbo
-            .find_by_name(&realm(), EntityType::Customer, "Bob's Pools")
+    fn build_select_adds_a_bounded_where_clause() {
+        let from = DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
             .unwrap()
-            .is_none());
-        let url = &qbo.transport().sent[0].url;
-        assert!(url.contains(&percent_encode(r"WHERE DisplayName = 'Bob\'s Pools'")));
+            .with_timezone(&Utc);
+        let to = DateTime::parse_from_rfc3339("2026-01-02T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let query = build_select(EntityType::Invoice, Some(UpdatedRange { from, to }), 0, 10);
+        assert!(
+            query.contains("WHERE MetaData.LastUpdatedTime >= '2026-01-01T00:00:00+00:00'"),
+            "query was: {query}"
+        );
+        assert!(
+            query.contains("AND MetaData.LastUpdatedTime < '2026-01-02T00:00:00+00:00'"),
+            "query was: {query}"
+        );
+    }
 
+    #[test]
+    fn query_response_items_is_empty_when_qbo_omits_the_key() {
+        let value = json!({ "QueryResponse": { "maxResults": 0 } });
+        assert!(query_response_items(&value, EntityType::Invoice).is_empty());
+    }
+
+    #[test]
+    fn to_entity_payload_reads_id_sync_token_and_timestamp() {
+        let object = json!({
+            "Id": "418",
+            "SyncToken": "3",
+            "MetaData": { "LastUpdatedTime": "2026-08-01T12:00:00-07:00" },
+        });
+        let payload = to_entity_payload(EntityType::Invoice, &object).unwrap();
+        assert_eq!(payload.qbo_id, "418");
+        assert_eq!(payload.sync_token, "3");
+        assert!(!payload.is_deleted);
+        assert_eq!(
+            payload.last_updated_utc.to_rfc3339(),
+            "2026-08-01T19:00:00+00:00"
+        );
+    }
+
+    #[test]
+    fn to_entity_payload_reads_a_missing_sync_token_as_zero() {
+        let object =
+            json!({ "Id": "1", "MetaData": { "LastUpdatedTime": "2026-01-01T00:00:00Z" } });
+        let payload = to_entity_payload(EntityType::Invoice, &object).unwrap();
+        assert_eq!(payload.sync_token, "0");
+    }
+
+    #[test]
+    fn to_entity_payload_maps_a_deleted_status() {
+        let object = json!({
+            "Id": "20", "SyncToken": "1",
+            "MetaData": { "LastUpdatedTime": "2026-01-01T00:00:00Z" },
+            "status": "Deleted",
+        });
+        assert!(
+            to_entity_payload(EntityType::Invoice, &object)
+                .unwrap()
+                .is_deleted
+        );
+    }
+
+    #[test]
+    fn to_entity_payload_without_an_id_is_a_validation_error() {
+        let object = json!({ "MetaData": { "LastUpdatedTime": "2026-01-01T00:00:00Z" } });
         assert!(matches!(
-            qbo.find_by_name(&realm(), EntityType::Invoice, "x"),
+            to_entity_payload(EntityType::Invoice, &object),
             Err(QboError::Validation(_))
         ));
     }
 
     #[test]
-    fn the_sync_driver_runs_over_the_http_client() {
-        // The seam: nothing above the trait changes. A full sweep of one type
-        // through the real mapping, against a store.
-        use crate::driver::{SyncDriver, SyncOptions};
-        use crate::store::Store;
+    fn parse_cdc_response_walks_every_entity_type_and_skips_paging_metadata() {
+        let value = json!({
+            "CDCResponse": [ { "QueryResponse": [
+                { "startPosition": 1, "maxResults": 1, "Customer": [
+                    { "Id": "10", "SyncToken": "0", "MetaData": { "LastUpdatedTime": "2026-01-01T00:00:00Z" } }
+                ] },
+                { "Invoice": [
+                    { "Id": "20", "SyncToken": "0", "MetaData": { "LastUpdatedTime": "2026-01-01T00:00:00Z" }, "status": "Deleted" }
+                ] },
+            ] } ]
+        });
+        let payloads = parse_cdc_response(&value).unwrap();
+        assert_eq!(payloads.len(), 2);
+        assert!(payloads
+            .iter()
+            .any(|p| p.entity_type == EntityType::Customer && p.qbo_id == "10" && !p.is_deleted));
+        assert!(payloads
+            .iter()
+            .any(|p| p.entity_type == EntityType::Invoice && p.qbo_id == "20" && p.is_deleted));
+    }
 
-        let mut transport = ScriptedTransport::default();
-        transport.respond(
-            200,
-            serde_json::json!({ "QueryResponse": { "Customer": [
-                { "Id": "1", "SyncToken": "0", "DisplayName": "HARBOR SWIM CLUB",
-                  "MetaData": { "LastUpdatedTime": "2026-08-01T00:00:00Z" } }
-            ] } })
-            .to_string(),
+    #[test]
+    fn credit_card_payments_are_read_from_their_txn_key() {
+        // D37: Intuit's API reference wraps this entity as
+        // `CreditCardPaymentTxn` on read and query.
+        let row = json!({ "Id": "29", "SyncToken": "0", "Amount": 10.0,
+                          "MetaData": { "LastUpdatedTime": "2026-01-01T00:00:00Z" } });
+        let query = json!({ "QueryResponse": { "CreditCardPaymentTxn": [row.clone()] } });
+        assert_eq!(
+            query_response_items(&query, EntityType::CreditCardPayment).len(),
+            1
         );
-        let store = Store::open_in_memory().unwrap();
-        store.register_realm(&realm(), "test", at(0)).unwrap();
-        let mut driver = SyncDriver::new(client(transport), SyncOptions::default(), at(0));
-        let report = driver
-            .sync_entity_type(&store, &realm(), EntityType::Customer, at(0))
-            .unwrap();
-        assert_eq!(report.mirrored, 1);
+        let read = json!({ "CreditCardPaymentTxn": row.clone() });
+        assert_eq!(
+            parse_single_entity(&read, EntityType::CreditCardPayment)
+                .unwrap()
+                .qbo_id,
+            "29"
+        );
+        // CDC: accepted under either name, since the docs show only the
+        // query shape.
+        for key in ["CreditCardPaymentTxn", "CreditCardPayment"] {
+            let cdc = json!({ "CDCResponse": [ { "QueryResponse": [ { key: [row.clone()] } ] } ] });
+            let payloads = parse_cdc_response(&cdc).unwrap();
+            assert_eq!(payloads.len(), 1, "{key}");
+            assert_eq!(payloads[0].entity_type, EntityType::CreditCardPayment);
+        }
+    }
+
+    #[test]
+    fn is_stale_sync_token_matches_only_fault_code_5010() {
+        let stale = json!({ "Fault": { "Error": [ { "code": "5010" } ] } });
+        let other = json!({ "Fault": { "Error": [ { "code": "6140" } ] } });
+        assert!(is_stale_sync_token(&stale));
+        assert!(!is_stale_sync_token(&other));
+        assert!(!is_stale_sync_token(&Value::Null));
+    }
+
+    #[test]
+    fn fault_detail_joins_message_and_detail_per_error() {
+        let fault = json!({ "Fault": { "Error": [
+            { "Message": "Invalid Reference Id", "Detail": "CustomerRef", "code": "6140" }
+        ] } });
+        let detail = fault_detail(&fault);
+        assert!(detail.contains("Invalid Reference Id"));
+        assert!(detail.contains("CustomerRef"));
+        assert!(detail.contains("6140"));
+    }
+
+    #[test]
+    fn fault_detail_falls_back_to_the_raw_body_when_there_is_no_fault_shape() {
+        let body = json!({ "something": "unexpected" });
+        assert_eq!(fault_detail(&body), body.to_string());
+    }
+
+    #[test]
+    fn classify_status_maps_every_code_per_handoff_2_3() {
+        assert!(matches!(
+            classify_status(401, &Value::Null),
+            AttemptError::Unauthorized
+        ));
+        assert!(matches!(
+            classify_status(404, &Value::Null),
+            AttemptError::NotFound
+        ));
+        assert!(matches!(
+            classify_status(429, &Value::Null),
+            AttemptError::RateLimited
+        ));
+        assert!(matches!(
+            classify_status(500, &Value::Null),
+            AttemptError::Network(_)
+        ));
+        assert!(matches!(
+            classify_status(
+                400,
+                &json!({ "Fault": { "Error": [ { "code": "5010" } ] } })
+            ),
+            AttemptError::StaleSyncToken
+        ));
+        assert!(matches!(
+            classify_status(
+                400,
+                &json!({ "Fault": { "Error": [ { "code": "6140" } ] } })
+            ),
+            AttemptError::Validation(_)
+        ));
     }
 }

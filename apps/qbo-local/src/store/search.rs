@@ -15,13 +15,13 @@ use ledger_core::Money;
 use rusqlite::params;
 use rust_decimal::Decimal;
 
-use super::{document_row, DocumentRow, Store, StoreError, DOCUMENT_SELECT};
+use super::{document_row, serialize_money_opt, DocumentRow, Store, StoreError, DOCUMENT_SELECT};
 use crate::domain::{ContactType, RealmId};
 
 /// Why a row matched. The declaration order **is** the ranking — `derive(Ord)`
 /// on a fieldless enum orders by variant position, so adding a reason in the
 /// wrong place silently reorders results. Add at the end unless you mean to.
-#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Debug, serde::Serialize)]
 pub enum MatchReason {
     /// The query is this document's number, exactly.
     DocumentNumber,
@@ -37,29 +37,31 @@ pub enum MatchReason {
     Text,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "kind")]
 pub enum Hit {
     Document(Box<DocumentRow>),
     Contact(ContactHit),
     Item(ItemHit),
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct SearchHit {
     pub reason: MatchReason,
     pub hit: Hit,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct ContactHit {
     pub contact_type: ContactType,
     pub qbo_id: String,
     pub display_name: String,
     pub company_name: Option<String>,
+    #[serde(serialize_with = "serialize_money_opt")]
     pub balance: Option<Money>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct ItemHit {
     pub qbo_id: String,
     pub name: String,
@@ -473,7 +475,10 @@ mod tests {
 
     #[test]
     fn fts_syntax_in_the_query_is_inert() {
-        assert_eq!(fts_expression("blue harbor").as_deref(), Some("\"blue\" \"harbor\"*"));
+        assert_eq!(
+            fts_expression("blue harbor").as_deref(),
+            Some("\"blue\" \"harbor\"*")
+        );
         // `OR`, `NEAR`, quotes and a trailing `*` are all just text here.
         assert_eq!(
             fts_expression("foam OR \"tube\"*").as_deref(),

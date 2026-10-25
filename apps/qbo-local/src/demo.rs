@@ -450,7 +450,7 @@ mod tests {
         assert!(store.quarantined(&realm).unwrap().is_empty(), "{:?}", store.quarantined(&realm));
         assert_eq!(store.list_documents(&realm, DocumentType::Invoice, 1_000).unwrap().len(), 150);
         assert!(store.count_projected(&realm, ProjectedTable::DocumentLinks).unwrap() > 0);
-        assert_eq!(store.orphaned_lines(&realm).unwrap(), 0);
+        assert_eq!(store.orphaned_line_count(&realm).unwrap(), 0);
 
         // Every product is costed, and the seeded runs include an overrun.
         let prices = store.material_prices(&realm).unwrap();
