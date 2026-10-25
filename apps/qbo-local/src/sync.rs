@@ -126,15 +126,22 @@ pub fn classify_response_with_cap(returned: usize, cap: usize) -> CdcOutcome {
 
 /// Whether CDC is known to cover this entity type.
 ///
-/// ⚠️ §0 records the exact CDC exclusion list as unverified against Intuit's own
-/// documentation (open item 1). The tiers are the honest split available now:
-/// masters and documents are the entities CDC is documented to serve, and the
-/// peripheral tier is where the uncertainty sits. Unconfirmed means the full
-/// sweep, which §4.3 treats as the correctness baseline rather than a fallback —
-/// so being wrong here costs bandwidth, not accuracy.
+/// Intuit's CDC page (verified 28 Sep 2026, D25) documents CDC for "all API
+/// entities except" JournalCode, TaxAgency, TimeActivity, TaxCode and TaxRate.
+/// Of the types this replica syncs, TaxCode and TaxRate are on that list: a
+/// CDC poll would silently never see them change, so they always take the
+/// sweep path. The peripheral tier stays unconfirmed as before; §4.3 treats
+/// the sweep as the correctness baseline, so being conservative here costs
+/// bandwidth, not accuracy.
 pub fn cdc_coverage_confirmed(entity_type: EntityType) -> bool {
-    entity_type.tier() != crate::domain::SyncTier::Peripheral
+    !CDC_EXCLUDED.contains(&entity_type)
+        && entity_type.tier() != crate::domain::SyncTier::Peripheral
 }
+
+/// Entity types Intuit documents as not served by CDC, restricted to the ones
+/// [`EntityType`] models (JournalCode, TaxAgency and TimeActivity are not
+/// replicated). D25.
+pub const CDC_EXCLUDED: [EntityType; 2] = [EntityType::TaxCode, EntityType::TaxRate];
 
 impl SyncCursor {
     pub fn new(realm_id: RealmId, entity_type: EntityType) -> Self {
@@ -203,7 +210,12 @@ mod tests {
     #[test]
     fn a_fresh_cursor_polls_incrementally() {
         let strategy = plan_sync(&cursor(Some(at(0))), at(1), max_age(), true);
-        assert_eq!(strategy, SyncStrategy::Cdc { changed_since: at(0) });
+        assert_eq!(
+            strategy,
+            SyncStrategy::Cdc {
+                changed_since: at(0)
+            }
+        );
     }
 
     #[test]
@@ -243,6 +255,16 @@ mod tests {
     }
 
     #[test]
+    fn the_documented_cdc_exclusions_are_never_polled() {
+        // D25: Intuit's CDC page excludes TaxCode and TaxRate.
+        assert!(!cdc_coverage_confirmed(EntityType::TaxCode));
+        assert!(!cdc_coverage_confirmed(EntityType::TaxRate));
+        assert!(cdc_coverage_confirmed(EntityType::Customer));
+        assert!(cdc_coverage_confirmed(EntityType::Invoice));
+        assert!(cdc_coverage_confirmed(EntityType::JournalEntry));
+    }
+
+    #[test]
     fn unconfirmed_coverage_always_sweeps() {
         // CDC's entity exclusion list is unverified, so correctness rests on the
         // sweep path and CDC is only ever a latency optimisation.
@@ -263,8 +285,14 @@ mod tests {
 
     #[test]
     fn a_response_at_the_cap_is_treated_as_truncated() {
-        assert_eq!(classify_response(CDC_RESPONSE_CAP), CdcOutcome::PossiblyTruncated);
-        assert_eq!(classify_response(CDC_RESPONSE_CAP + 1), CdcOutcome::PossiblyTruncated);
+        assert_eq!(
+            classify_response(CDC_RESPONSE_CAP),
+            CdcOutcome::PossiblyTruncated
+        );
+        assert_eq!(
+            classify_response(CDC_RESPONSE_CAP + 1),
+            CdcOutcome::PossiblyTruncated
+        );
     }
 
     #[test]
@@ -272,7 +300,11 @@ mod tests {
         // The invariant that stops silent data loss.
         let mut cursor = cursor(Some(at(0)));
         cursor.advance(&CdcOutcome::PossiblyTruncated, at(5));
-        assert_eq!(cursor.last_cdc_cursor, Some(at(0)), "cursor moved on a truncated response");
+        assert_eq!(
+            cursor.last_cdc_cursor,
+            Some(at(0)),
+            "cursor moved on a truncated response"
+        );
 
         cursor.advance(&CdcOutcome::Complete, at(5));
         assert_eq!(cursor.last_cdc_cursor, Some(at(5)));
@@ -287,7 +319,9 @@ mod tests {
         // And the next plan polls rather than sweeping again.
         assert_eq!(
             plan_sync(&cursor, at(4), max_age(), true),
-            SyncStrategy::Cdc { changed_since: at(3) }
+            SyncStrategy::Cdc {
+                changed_since: at(3)
+            }
         );
     }
 

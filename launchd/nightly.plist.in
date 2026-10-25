@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- The nightly parallel run, tools/nightly.sh (docs/NIGHTLY.md, "Switching
+     it on"). A template: its dry run (`tools/nightly.sh plists`) fills in every
+     placeholder from .local/nightly.conf and prints the result. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>@NIGHTLY_LABEL@</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>@ROOT@/tools/nightly.sh</string>
+    <string>run</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>@ROOT@</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>NIGHTLY_CONFIG</key>
+    <string>@NIGHTLY_CONFIG@</string>
+    <key>PATH</key>
+    <string>/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+  <!-- Once a night, after the day's last edits have synced. A slot missed
+       while the Mac sleeps fires at the next wake. Not at load: run
+       `tools/nightly.sh run` by hand once to see a night before trusting it. -->
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key>
+    <integer>@HOUR@</integer>
+    <key>Minute</key>
+    <integer>@MINUTE@</integer>
+  </dict>
+  <key>RunAtLoad</key>
+  <false/>
+  <key>KeepAlive</key>
+  <false/>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>StandardOutPath</key>
+  <string>@LOG_DIR@/nightly.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>@LOG_DIR@/nightly.err.log</string>
+</dict>
+</plist>

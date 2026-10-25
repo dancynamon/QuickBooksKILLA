@@ -1,0 +1,111 @@
+# D33: the rules `ledger classes suggest` uses to pre-fill the
+# `suggested_class` column of Dan's item → class worksheet.
+#
+# These are SUGGESTIONS. Nothing reads this file when posting: the importer
+# takes an item's class only from the map `ledger classes apply` writes from
+# the worksheet's `class` column, which Dan fills in himself
+# (docs/CUTOVER.md, "Item classes (D33)"). A wrong rule here costs a
+# correction in the spreadsheet, never a wrong entry in the book.
+#
+# How a rule matches (all comparisons ignore case):
+#
+#   sku_prefix      the item's SKU, or its name, starts with one of these.
+#                   A leading department digit and space ("3 PM-TRN-2412",
+#                   "1 AM LGC 72", a QuickBooks Desktop-era habit) is
+#                   ignored first, so "PM-" matches both "PM-SC-7236" and
+#                   "3 PM-TRN-2412".
+#   name_contains   the item's name contains one of these.
+#   category        the item's QBO category path (its FullyQualifiedName
+#                   without the item's own name, e.g. "AEGIS:RESCUE TUBES")
+#                   starts with one of these.
+#   income_account  the name of the item's QBO income account is exactly
+#                   one of these.
+#
+# A rule fires when ANY one of its patterns matches. Rules are tried top to
+# bottom and the FIRST that fires wins, so put the narrow rules (a brand
+# that resells, a dropshipped line) above the broad ones (a category).
+# The `name` is what the worksheet's `rule` column shows; keep it short and
+# unique. `class` must be one of the company's §3 classes (foam, sign,
+# chair, drop, cnc, uv); `unclassified` is the import-only fallback and is
+# refused here.
+#
+# Deliberately NOT here: shipping and freight items (SHIP-*, RT-FREIGHT),
+# the Amazon sales tax item, and other service items. Their lines are
+# income too and need a class, but which one is a policy question for Dan
+# and Joel (D33, D34), not a pattern. They come out of `suggest` blank.
+
+# --- lifeguard chairs -------------------------------------------------------
+
+[[rule]]
+name = "lifeguard-chairs"
+class = "chair"
+sku_prefix = ["AM LGC", "AM-LGC", "LGC"]
+name_contains = ["LIFEGUARD CHAIR"]
+category = ["LGC PARTS"]
+
+# --- resale and dropship -----------------------------------------------------
+# Above the foam rules: a robotic cleaner part can carry a foam-sounding name.
+
+[[rule]]
+name = "robotic-cleaners"
+class = "drop"
+sku_prefix = ["DPH "]
+name_contains = ["DOLPHIN", "MAYTRONICS"]
+category = ["MAYDLPH", "WVPARTS", "AP_PARTS", "AP_COMMERCIAL", "3 AQPR"]
+
+[[rule]]
+name = "ada-stairs"
+class = "drop"
+name_contains = ["ADA EASY STAIR"]
+category = ["4 VPC"]
+
+# Department 2 in QBO's numbering: AEDs, first aid, extrication collars.
+[[rule]]
+name = "first-aid-resale"
+class = "drop"
+category = ["2 "]
+
+# --- signs ------------------------------------------------------------------
+
+[[rule]]
+name = "pool-signs"
+class = "sign"
+sku_prefix = ["PS "]
+name_contains = ["POOL SIGN", "RULES SIGN"]
+category = ["3 POOL SIGNS"]
+
+# --- foam: Aquamentor's own AEGIS line and the shapes cut from foam ---------
+
+[[rule]]
+name = "aegis-brand"
+class = "foam"
+category = ["AEGIS"]
+
+[[rule]]
+name = "rescue-tubes"
+class = "foam"
+sku_prefix = ["XRT-", "RT-", "RT "]
+name_contains = ["RESCUE TUBE"]
+
+[[rule]]
+name = "pool-mats"
+class = "foam"
+sku_prefix = ["PM-", "PMSC-", "RM-"]
+
+[[rule]]
+name = "kickboards-and-bars"
+class = "foam"
+sku_prefix = ["KX ", "NYBB"]
+name_contains = ["KICKBOARD", "SWIM BAR", "BARBELL", "NOODLE"]
+category = ["KICKBOARD", "NYBB", "SWIM BAR", "KNEELING PAD"]
+
+[[rule]]
+name = "dock-bumpers"
+class = "foam"
+sku_prefix = ["DBB-", "DBB "]
+name_contains = ["DOCK BUMPER"]
+
+[[rule]]
+name = "foam-categories"
+class = "foam"
+category = ["3 FOAM POOL TOYS", "WORLDWIDE FOAM"]

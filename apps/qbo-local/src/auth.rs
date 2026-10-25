@@ -27,6 +27,8 @@ pub enum AuthError {
     Corrupt(#[from] serde_json::Error),
     #[error("no usable token generation remains for realm {0}; re-authorisation required")]
     Lockout(RealmId),
+    #[error("keychain: {0}")]
+    Keychain(String),
 }
 
 /// How many previous generations to retain (§5.2).
@@ -70,8 +72,14 @@ impl TokenSet {
     /// the token itself.** Same convention as a card's last four.
     pub fn fingerprint(&self) -> String {
         let token = &self.refresh_token;
-        let tail: String = token.chars().rev().take(4).collect::<Vec<_>>()
-            .into_iter().rev().collect();
+        let tail: String = token
+            .chars()
+            .rev()
+            .take(4)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
         format!("…{tail} ({} chars)", token.chars().count())
     }
 }
@@ -361,7 +369,11 @@ mod tests {
         // anything that might overwrite a recoverable file.
         let directory = tempfile::tempdir().unwrap();
         let store = FileTokenStore::new(directory.path());
-        fs::write(directory.path().join("tokens-1234567890123456.json"), b"{ not json").unwrap();
+        fs::write(
+            directory.path().join("tokens-1234567890123456.json"),
+            b"{ not json",
+        )
+        .unwrap();
         assert!(matches!(store.load(&realm()), Err(AuthError::Corrupt(_))));
     }
 }

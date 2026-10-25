@@ -43,7 +43,7 @@ backend in §2.1. Never in the repo, never in a dotfile Dropbox syncs.
 
 ## 1. Where the work stands
 
-`cargo test` — 128 tests, all offline, all green. `cargo clippy --all-targets` —
+`cargo test` — 498 tests, all offline, all green. `cargo clippy --all-targets` —
 clean.
 
 Built and tested:
@@ -59,12 +59,30 @@ Built and tested:
 | `outbox` | State machine with enforced transitions |
 | `client` | The QBO trait boundary + `MockQbo` double |
 | `worker` | Drain loop, dependency resolution, local-id rewriting |
+| `driver` | Initial sync, CDC poll, truncation backfill (D12, D13) |
+| `reconcile` | Verification sweep against QBO's index (DESIGN §7 steps 1-4) |
+| `daemon`, `clock` | Cadence loop around the driver, backoff, nightly snapshots |
+| `store::query` | Read-only query API for the UI and the ledger import |
+| `http`, `oauth`, `config` | Live transport, OAuth loopback flow, `.local/config.toml` (§2.2, §2.3) |
 
-**Not built:** the HTTP transport behind `QboClient`, the OAuth authorisation
-flow, the keychain token backend, the initial-sync driver, the CDC poll loop,
-the reconciliation sweep, the Tauri shell, the React UI.
+**Built 28 Sep:** `KeychainTokenStore` (§2.1, `keychain.rs`), the default
+token store on macOS via `token_store` in `.local/config.toml`;
+`qbo-local import-token`; `status --config`. **Not built:** wiring the daemon
+into a Tauri shell and its front-end (M1). What remains of M0 is running it
+live on the Mac — `tools/m0-live.sh`, `docs/cowork-mac-session/KICKOFF.md`.
 
-M0 needs the first five of those. The last two are M1.
+**Built in the cloud on 13 Sep** — `apps/qbo-local/src/http.rs`
+(`HttpQboClient`, implementing `client::QboClient` over real HTTP),
+`apps/qbo-local/src/oauth.rs` (the authorization-code loopback flow:
+`run_loopback`, `exchange_code`, `refresh`), `apps/qbo-local/src/config.rs`
+(`.local/config.toml`, templated by `.local/config.example.toml` at the repo
+root), and `--live` on `qbo-local daemon` / `qbo-local sweep` plus the new
+`qbo-local auth` subcommand in `main.rs`. Proven offline against a hand-rolled
+fake Intuit server (`apps/qbo-local/tests/support/mod.rs`) — `tests/http_client.rs`
+covers every mapping in §2.3 below plus `SyncDriver` running end to end over
+HTTP, `tests/oauth.rs` covers the loopback and token exchange. `developer.intuit.com`
+was still blocked in this session, so the §0 and §4 confidence levels are
+unchanged — verify those against Intuit's live docs before M0 is called done.
 
 ---
 
@@ -92,56 +110,64 @@ dies between Intuit invalidating the old refresh token and the new one reaching
 disk, and that case is the difference between a hiccup and re-authorising by
 hand at 3am.
 
-### 2.2 OAuth authorisation flow
+### 2.2 OAuth authorisation flow — built; run it
 
-One-time, per realm. Local loopback redirect. Store the result via 2.1.
+`oauth.rs`: `OAuthConfig::intuit`, `authorize_url`, `run_loopback` (a one-shot
+loopback listener), `exchange_code`, `refresh`. `TokenSource` in `http.rs`
+wires `TokenSet::needs_refresh` into every `HttpQboClient` call — proactive
+refresh at ~50 minutes on a 60-minute token, reactive refresh on a 401 as the
+fallback — rotates `TokenGenerations`, saves through `TokenStore`, and appends
+a fingerprint-only `auth::RotationLogEntry` to the configured JSONL log.
+Tested offline against a fake token endpoint in `tests/http_client.rs` and
+`tests/oauth.rs`.
 
-`auth::TokenSet::needs_refresh` already implements proactive refresh at ~50
-minutes on a 60-minute token; wire it into the client so rotation happens while
-idle rather than mid-batch. Reactive refresh on a 401 stays as the fallback.
+Run it once per realm, after copying `.local/config.example.toml` to
+`.local/config.toml` and filling in the client id/secret and realm id (§0):
 
-Every rotation appends an `auth::RotationLogEntry` to a JSONL file. Log the
-fingerprint, never the token — `TokenSet::fingerprint()` already does the right
-thing.
-
-### 2.3 `HttpQboClient`
-
-Implement `client::QboClient`. The trait is the seam — nothing above it changes.
-
-```rust
-pub trait QboClient {
-    fn query(&mut self, realm, entity_type, start_position, max_results)
-        -> Result<Vec<EntityPayload>, QboError>;
-    fn cdc(&mut self, realm, entity_types, changed_since)
-        -> Result<Vec<EntityPayload>, QboError>;
-    fn create(&mut self, realm, entity_type, payload, request_id)
-        -> Result<EntityPayload, QboError>;
-    fn update(&mut self, realm, entity_type, qbo_id, payload, base_sync_token, request_id)
-        -> Result<EntityPayload, QboError>;
-    fn find_by_name(&mut self, realm, entity_type, name)
-        -> Result<Option<EntityPayload>, QboError>;
-}
+```
+qbo-local auth --realm <REALM_ID>
 ```
 
-Mapping obligations:
+This opens the consent URL (paste it into a browser by hand — the flow
+doesn't launch one for you), waits for the loopback redirect, and saves
+generation zero through `FileTokenStore`. The keychain backend (§2.1) is a
+drop-in replacement for `FileTokenStore` whenever it lands; nothing above
+`TokenStore` changes.
 
-- Every call passes through `ratelimit::RealmLimiter` first. Refusal means
-  wait, never proceed anyway.
-- HTTP 429 and 5xx → `QboError::RateLimited` / `QboError::Network`. These are
-  the only variants `is_transient()` returns true for, and that flag is what
-  the worker uses to decide retry versus failure inbox.
-- A stale-`SyncToken` response → `QboError::StaleSyncToken`, nothing else. The
-  worker routes that straight to `conflicted`, bypassing the retry budget, and
-  that behaviour is deliberate: retrying a stale token is last-writer-wins by
-  another name.
-- Everything else QBO refuses → `QboError::Validation`.
-- Reuse `record.request_id` on retries. Never regenerate it.
+### 2.3 `HttpQboClient` — built; run it
 
-`MockQbo` in `client.rs` is the behavioural spec. If the real client and the
-mock disagree about any of the above, the mock is what the worker's 20-odd
-tests were written against — reconcile deliberately, don't just change the mock.
+Implements `client::QboClient` exactly as this section originally specified —
+the full mapping (rate limiting, HTTP-status-to-`QboError`, `RequestId`
+reuse) now lives in `apps/qbo-local/src/http.rs`'s module doc, and
+`tests/http_client.rs` proves it against a hand-rolled fake Intuit server,
+one behaviour per test: paging and the 1-based
+`STARTPOSITION` conversion, CDC's `Deleted` status, `RequestId` replay on a
+retry after a 500, a stale-`SyncToken` fault, 429, a plain 400, 404, and both
+the proactive and reactive refresh paths. The same test file also runs
+`SyncDriver` end to end against that fake server, so the driver is proven
+against HTTP and not only `MockQbo`.
 
-### 2.4 Initial sync driver
+`MockQbo` in `client.rs` remains the behavioural spec for anything above the
+trait — if `HttpQboClient` and the mock ever disagree, reconcile deliberately
+rather than just changing the mock.
+
+Run a sweep or the daemon against a real realm once `auth` (§2.2) has saved a
+token:
+
+```
+qbo-local sweep --db replica.db --realm <REALM_ID> --live
+qbo-local daemon --db replica.db --realm <REALM_ID> --live --once
+```
+
+Both default to `.local/config.toml`; pass `--config PATH` to point elsewhere.
+`--mock` still works everywhere it did before, for exercising the loop without
+credentials at all.
+
+### 2.4 Initial sync driver — built (`driver.rs`, D12, D13)
+
+The section below is kept as the specification the driver was built to; the
+live-sync step that remains is running it against `HttpQboClient` and reporting
+the measured counts and wall-clock.
 
 Per realm, walk `EntityType::m0_scope()` — masters before documents, which the
 ordering in `EntityType::ALL` already guarantees and a test enforces.
@@ -155,7 +181,11 @@ Report actual row counts and wall-clock time. The brief is explicit that these
 are measured and reported, never asserted. Expect roughly nine thousand invoices
 and tens of thousands of documents in total, going back to 2012.
 
-### 2.5 CDC poll loop
+### 2.5 CDC poll loop — built (`daemon.rs`), not yet wired into a binary
+
+`Daemon::run` loops `SyncDriver::sync_realm` on a focused/idle cadence with
+backoff, and takes the nightly snapshot. What remains is the binary that
+constructs it with the real client and keychain store.
 
 15 seconds focused, 5 minutes idle, both configurable.
 
@@ -186,6 +216,55 @@ real customer, vendor, balance or realm id.** Scrub on the way in, not on the
 way out. This repository has already had to be cleaned once, and finding real
 names in a test file after the fact is much more work than inventing them up
 front.
+
+**A real fixture is a slice, scrubbed — one script (D31):**
+
+    tools/make-real-fixture.sh [--customers 8 --vendors 4 --since YYYY-MM-DD ...]
+
+It runs `qbo-local slice` against `.local/replica.db` (read-only; a few
+hundred records, closed over every reference, plus `deny-names.txt`), then
+`scrub-fixtures.py --seed-file .local/fixtures/scrub-seed` (names, contacts
+*and amounts*, invariants re-checked, leak detector), then replays the
+scrubbed set into a throwaway replica. Everything lands in
+`.local/fixtures/slice-<stamp>/`; the scrubbed directory is read file by file
+before it is copied to `apps/qbo-local/tests/fixtures/real-slice/` and
+committed. The seed is a secret: keep it, never commit it.
+
+**The three underlying commands, in the order a full recording session uses them:**
+
+1. `qbo-local record --db PATH --realm ID --dir .local/fixtures/<realm> --live`
+   — records every response a full sweep makes into `--dir`, via
+   `fixture::RecordingQbo` wrapping `HttpQboClient`. Errors are recorded too
+   (`{"error": "..."}`) and still raised, so a recording session fails exactly
+   the way a live sync would. `--mock` records from an empty `MockQbo`
+   instead — it never touches the network and proves the plumbing, which is
+   what `qbo-local`'s own CLI tests use it for; it is not how real fixtures
+   get made.
+2. `python3 tools/scrub-fixtures.py --seed-file SEED .local/fixtures/<realm> <scrubbed-dir>` —
+   the only path from a recording to something safe to `git add`. Writes a
+   fresh directory (never in place), deterministically, and refuses to write
+   anything at all if its own leak detector finds an original name surviving
+   somewhere in the output — the backstop the rule above depends on. Read the
+   module docstring for the exact field rules (names, addresses, phone,
+   email, `DocNumber`'s offset, `realmId`, and D31's amount rules).
+   `--keep-amounts` (no seed) is for invented data only; a full-book
+   recording with its `reports/` is refused without it, which is why real
+   fixtures come from `slice` rather than `record`.
+3. `qbo-local replay --db PATH --realm ID --dir <scrubbed-dir>` — syncs a
+   realm entirely from a fixture directory, via `fixture::FixtureQbo`, touching
+   no network at all. This is what the offline suite exercises against —
+   `apps/qbo-local/tests/fixtures/synthetic/` is a small committed example,
+   and `apps/qbo-local/src/fixture.rs` has the property test proving that
+   replaying a recording reproduces a direct sync byte-for-byte, entity by
+   entity.
+
+**Only the scrubbed directory is ever `git add`ed.** `.local/fixtures/` stays
+gitignored in full (§0), same as every other extract of the real book — one
+ignored directory rather than a list of filenames someone will forget to add
+to. The leak detector inside `tools/scrub-fixtures.py` is the backstop for
+this rule, not a replacement for following it: it fails the whole run, before
+anything is written, the moment a real name survives scrubbing anywhere in
+the output.
 
 ---
 
@@ -231,13 +310,13 @@ Record findings in `DECISIONS.md` and update `DESIGN.md` §0's confidence column
 From the kickoff brief's M0 acceptance, adjusted — WaterLine is out of scope
 per Dan, so Aquamentor alone:
 
-- [ ] Aquamentor fully mirrored, complete history, actual row counts reported
-- [ ] Initial sync wall-clock time reported (target < 10 min, measured not claimed)
-- [ ] CDC poll keeps the replica current
-- [ ] Token survives an app restart
-- [ ] Token survives a 24-hour idle, including a rotation
-- [ ] `cargo test` still fully offline and green
-- [ ] Writes still disabled for every realm
+- [x] Aquamentor fully mirrored, complete history, actual row counts reported — 14 Oct 2026, D26
+- [x] Initial sync wall-clock time reported (target < 10 min, measured not claimed) — 14 Oct 2026, D26
+- [x] CDC poll keeps the replica current — 14 Oct 2026, D26
+- [x] Token survives an app restart — 14 Oct 2026, D26
+- [x] Token survives a 24-hour idle, including a rotation — 15 Oct 2026, on rotation evidence (D26); a no-use 24 h gap was not tested
+- [x] `cargo test` still fully offline and green — 14 Oct 2026, D26
+- [x] Writes still disabled for every realm — 14 Oct 2026, D26
 
 WaterLine runs the same code path with its own realm-scoped budget whenever Dan
 wants it turned on — no design accommodation needed.

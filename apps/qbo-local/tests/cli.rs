@@ -1,0 +1,444 @@
+//! The `qbo-local` binary end to end: subcommands run as a real subprocess
+//! against a file database, `HANDOFF.md` §2.5, `ROADMAP.md` §A.
+//!
+//! Names and figures are invented (`HANDOFF.md` §2.6).
+
+use std::path::Path;
+use std::process::{Command, Output};
+
+const REALM: &str = "1234567890123456";
+const NO_CLIENT_SELECTED: &str =
+    "no QBO client selected: pass --live (see `qbo-local auth`) or --mock to exercise the loop";
+
+fn qbo_local(args: &[&str]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_qbo-local"))
+        .args(args)
+        .output()
+        .expect("failed to run the qbo-local binary")
+}
+
+fn stdout(output: &Output) -> String {
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+fn stderr(output: &Output) -> String {
+    String::from_utf8_lossy(&output.stderr).into_owned()
+}
+
+fn init(db: &Path, realm: &str, name: &str) -> Output {
+    let output = qbo_local(&[
+        "init",
+        "--db",
+        db.to_str().unwrap(),
+        "--realm",
+        realm,
+        "--name",
+        name,
+    ]);
+    assert!(output.status.success(), "init failed: {}", stderr(&output));
+    output
+}
+
+#[test]
+fn init_then_status_shows_the_registered_realm() {
+    let directory = tempfile::tempdir().unwrap();
+    let db = directory.path().join("replica.db");
+
+    init(&db, REALM, "Aquamentor, Inc.");
+
+    let status = qbo_local(&["status", "--db", db.to_str().unwrap()]);
+
+    assert!(
+        status.status.success(),
+        "status failed: {}",
+        stderr(&status)
+    );
+    let text = stdout(&status);
+    assert!(
+        text.contains(REALM),
+        "expected the realm id in status output:\n{text}"
+    );
+    assert!(
+        text.contains("Aquamentor, Inc."),
+        "expected the display name in status output:\n{text}"
+    );
+    assert!(
+        text.contains("realms registered : 1"),
+        "expected a realm count:\n{text}"
+    );
+}
+
+#[test]
+fn init_is_idempotent() {
+    let directory = tempfile::tempdir().unwrap();
+    let db = directory.path().join("replica.db");
+
+    init(&db, REALM, "Aquamentor, Inc.");
+    // Registering the same realm again is not an error.
+    let second = init(&db, REALM, "Aquamentor (renamed)");
+    assert!(second.status.success());
+
+    let status = qbo_local(&["status", "--db", db.to_str().unwrap()]);
+    let text = stdout(&status);
+    assert!(
+        text.contains("realms registered : 1"),
+        "re-registering must not duplicate the realm:\n{text}"
+    );
+    assert!(text.contains("Aquamentor (renamed)"));
+}
+
+#[test]
+fn daemon_once_mock_exits_ok_and_prints_a_tick_line() {
+    let directory = tempfile::tempdir().unwrap();
+    let db = directory.path().join("replica.db");
+    init(&db, REALM, "Aquamentor, Inc.");
+
+    let output = qbo_local(&[
+        "daemon",
+        "--db",
+        db.to_str().unwrap(),
+        "--realm",
+        REALM,
+        "--once",
+        "--mock",
+    ]);
+
+    assert!(
+        output.status.success(),
+        "daemon --once --mock failed: {}",
+        stderr(&output)
+    );
+    let text = stdout(&output);
+    assert!(
+        text.contains("next_delay="),
+        "expected a tick line:\n{text}"
+    );
+    assert!(text.contains("snapshot="), "expected a tick line:\n{text}");
+    // The per-entity SyncReport table.
+    assert!(
+        text.contains("entity"),
+        "expected the sync report table:\n{text}"
+    );
+    assert!(
+        text.contains("next delay:"),
+        "expected the next-delay line:\n{text}"
+    );
+}
+
+#[test]
+fn sweep_mock_exits_ok_and_prints_a_clean_report() {
+    let directory = tempfile::tempdir().unwrap();
+    let db = directory.path().join("replica.db");
+    init(&db, REALM, "Aquamentor, Inc.");
+
+    let output = qbo_local(&[
+        "sweep",
+        "--db",
+        db.to_str().unwrap(),
+        "--realm",
+        REALM,
+        "--mock",
+    ]);
+
+    assert!(
+        output.status.success(),
+        "sweep --mock failed: {}",
+        stderr(&output)
+    );
+    let text = stdout(&output);
+    assert!(
+        text.contains("entity"),
+        "expected the reconcile report table:\n{text}"
+    );
+    assert!(
+        text.contains("clean                   : true"),
+        "expected a clean report:\n{text}"
+    );
+}
+
+#[test]
+fn snapshot_creates_a_file() {
+    let directory = tempfile::tempdir().unwrap();
+    let db = directory.path().join("replica.db");
+    init(&db, REALM, "Aquamentor, Inc.");
+    let snapshot_dir = directory.path().join("snapshots");
+
+    let output = qbo_local(&[
+        "snapshot",
+        "--db",
+        db.to_str().unwrap(),
+        "--dir",
+        snapshot_dir.to_str().unwrap(),
+    ]);
+
+    assert!(
+        output.status.success(),
+        "snapshot failed: {}",
+        stderr(&output)
+    );
+    let entries: Vec<_> = std::fs::read_dir(&snapshot_dir)
+        .expect("snapshot directory should have been created")
+        .filter_map(Result::ok)
+        .collect();
+    assert_eq!(entries.len(), 1, "expected exactly one snapshot file");
+    assert!(entries[0].path().exists());
+}
+
+#[test]
+fn daemon_without_live_or_mock_exits_2_with_the_exact_message() {
+    let directory = tempfile::tempdir().unwrap();
+    let db = directory.path().join("replica.db");
+    init(&db, REALM, "Aquamentor, Inc.");
+
+    let output = qbo_local(&["daemon", "--db", db.to_str().unwrap(), "--realm", REALM]);
+
+    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(stderr(&output).trim_end(), NO_CLIENT_SELECTED);
+    assert!(
+        stdout(&output).is_empty(),
+        "no tick output should have been printed"
+    );
+}
+
+#[test]
+fn sweep_without_live_or_mock_exits_2_with_the_exact_message() {
+    let directory = tempfile::tempdir().unwrap();
+    let db = directory.path().join("replica.db");
+    init(&db, REALM, "Aquamentor, Inc.");
+
+    let output = qbo_local(&["sweep", "--db", db.to_str().unwrap(), "--realm", REALM]);
+
+    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(stderr(&output).trim_end(), NO_CLIENT_SELECTED);
+}
+
+#[test]
+fn sweep_rejects_mock_and_live_together_as_a_usage_error() {
+    let directory = tempfile::tempdir().unwrap();
+    let db = directory.path().join("replica.db");
+    init(&db, REALM, "Aquamentor, Inc.");
+
+    let output = qbo_local(&[
+        "sweep",
+        "--db",
+        db.to_str().unwrap(),
+        "--realm",
+        REALM,
+        "--mock",
+        "--live",
+    ]);
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        stderr(&output).contains("--mock and --live cannot both be given"),
+        "expected the conflicting-flags message:\n{}",
+        stderr(&output)
+    );
+}
+
+#[test]
+fn sweep_live_without_a_config_file_is_a_runtime_error_not_a_panic() {
+    let directory = tempfile::tempdir().unwrap();
+    let db = directory.path().join("replica.db");
+    init(&db, REALM, "Aquamentor, Inc.");
+
+    let output = qbo_local(&[
+        "sweep",
+        "--db",
+        db.to_str().unwrap(),
+        "--realm",
+        REALM,
+        "--live",
+        "--config",
+        directory
+            .path()
+            .join("does-not-exist.toml")
+            .to_str()
+            .unwrap(),
+    ]);
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        !stderr(&output).is_empty(),
+        "expected a runtime error message on stderr"
+    );
+}
+
+#[test]
+fn record_mock_then_replay_round_trips_through_the_binary() {
+    let directory = tempfile::tempdir().unwrap();
+    let db = directory.path().join("replica.db");
+    init(&db, REALM, "Aquamentor, Inc.");
+    let fixtures = directory.path().join("fixtures");
+
+    let record = qbo_local(&[
+        "record",
+        "--db",
+        db.to_str().unwrap(),
+        "--realm",
+        REALM,
+        "--dir",
+        fixtures.to_str().unwrap(),
+        "--mock",
+    ]);
+    assert!(
+        record.status.success(),
+        "record --mock failed: {}",
+        stderr(&record)
+    );
+    let record_text = stdout(&record);
+    assert!(
+        record_text.contains("manifest entries"),
+        "expected a manifest summary:\n{record_text}"
+    );
+    assert!(
+        fixtures.join("manifest.json").exists(),
+        "expected a manifest.json under {}",
+        fixtures.display()
+    );
+
+    let replay_db = directory.path().join("replay.db");
+    init(&replay_db, REALM, "Aquamentor, Inc.");
+    let replay = qbo_local(&[
+        "replay",
+        "--db",
+        replay_db.to_str().unwrap(),
+        "--realm",
+        REALM,
+        "--dir",
+        fixtures.to_str().unwrap(),
+    ]);
+    assert!(
+        replay.status.success(),
+        "replay failed: {}",
+        stderr(&replay)
+    );
+    let replay_text = stdout(&replay);
+    assert!(
+        replay_text.contains("entity"),
+        "expected the sync report table:\n{replay_text}"
+    );
+}
+
+#[test]
+fn record_without_mock_or_live_exits_2_with_the_exact_message() {
+    let directory = tempfile::tempdir().unwrap();
+    let db = directory.path().join("replica.db");
+    init(&db, REALM, "Aquamentor, Inc.");
+    let fixtures = directory.path().join("fixtures");
+
+    let output = qbo_local(&[
+        "record",
+        "--db",
+        db.to_str().unwrap(),
+        "--realm",
+        REALM,
+        "--dir",
+        fixtures.to_str().unwrap(),
+    ]);
+
+    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(stderr(&output).trim_end(), NO_CLIENT_SELECTED);
+    assert!(!fixtures.exists(), "no fixtures should have been written");
+}
+
+#[test]
+fn record_live_without_a_config_file_is_a_runtime_error_not_a_panic() {
+    let directory = tempfile::tempdir().unwrap();
+    let db = directory.path().join("replica.db");
+    init(&db, REALM, "Aquamentor, Inc.");
+    let fixtures = directory.path().join("fixtures");
+
+    let output = qbo_local(&[
+        "record",
+        "--db",
+        db.to_str().unwrap(),
+        "--realm",
+        REALM,
+        "--dir",
+        fixtures.to_str().unwrap(),
+        "--live",
+        "--config",
+        directory
+            .path()
+            .join("does-not-exist.toml")
+            .to_str()
+            .unwrap(),
+    ]);
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        !stderr(&output).is_empty(),
+        "expected a runtime error naming the missing config"
+    );
+}
+
+#[test]
+fn replay_with_no_fixtures_recorded_fails_naming_the_missing_key() {
+    let directory = tempfile::tempdir().unwrap();
+    let db = directory.path().join("replica.db");
+    init(&db, REALM, "Aquamentor, Inc.");
+    let fixtures = directory.path().join("empty-fixtures");
+    std::fs::create_dir_all(&fixtures).unwrap();
+
+    let output = qbo_local(&[
+        "replay",
+        "--db",
+        db.to_str().unwrap(),
+        "--realm",
+        REALM,
+        "--dir",
+        fixtures.to_str().unwrap(),
+    ]);
+
+    assert_eq!(output.status.code(), Some(1));
+    let text = stderr(&output);
+    assert!(
+        text.contains("no fixture for"),
+        "expected the missing-fixture message:\n{text}"
+    );
+}
+
+#[test]
+fn no_arguments_exits_2_with_usage() {
+    let output = qbo_local(&[]);
+
+    assert_eq!(output.status.code(), Some(2));
+    let text = stderr(&output);
+    assert!(
+        text.contains("USAGE"),
+        "expected usage text on stderr:\n{text}"
+    );
+    assert!(
+        text.contains("qbo-local status"),
+        "expected usage text on stderr:\n{text}"
+    );
+}
+
+#[test]
+fn help_exits_2_and_lists_every_subcommand() {
+    let output = qbo_local(&["--help"]);
+
+    assert_eq!(output.status.code(), Some(2));
+    let text = stderr(&output);
+    for subcommand in [
+        "status", "init", "auth", "daemon", "sweep", "snapshot", "record", "replay",
+    ] {
+        assert!(
+            text.contains(subcommand),
+            "expected {subcommand:?} in --help output:\n{text}"
+        );
+    }
+}
+
+#[test]
+fn status_without_db_runs_in_memory() {
+    let output = qbo_local(&["status"]);
+
+    assert!(output.status.success());
+    let text = stdout(&output);
+    assert!(
+        text.contains("in-memory"),
+        "expected the in-memory note:\n{text}"
+    );
+}

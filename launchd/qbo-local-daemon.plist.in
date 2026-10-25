@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- The qbo-local CDC daemon, kept up by launchd (docs/NIGHTLY.md, "Switching
+     it on"). A template: its dry run (`tools/nightly.sh plists`) fills in every
+     placeholder from .local/nightly.conf and prints the result. Never commit
+     a filled copy; it carries the realm id. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>@DAEMON_LABEL@</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>@QBO_LOCAL@</string>
+    <string>daemon</string>
+    <string>--db</string>
+    <string>@REPLICA@</string>
+    <string>--realm</string>
+    <string>@REALM@</string>
+    <string>--live</string>
+    <string>--config</string>
+    <string>@QBO_CONFIG@</string>
+    <string>--snapshot-dir</string>
+    <string>@DAEMON_SNAPSHOT_DIR@</string>
+    <string>--keep</string>
+    <string>@DAEMON_SNAPSHOT_KEEP@</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>@ROOT@</string>
+  <!-- Restarted whenever it exits, for any reason; at most once a minute, so
+       a daemon that dies at start (a lockout, a bad config) cannot spin. -->
+  <key>KeepAlive</key>
+  <true/>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>60</integer>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>StandardOutPath</key>
+  <string>@LOG_DIR@/qbo-local-daemon.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>@LOG_DIR@/qbo-local-daemon.err.log</string>
+</dict>
+</plist>

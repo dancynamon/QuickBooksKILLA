@@ -1,0 +1,69 @@
+//! `ledger` — the double-entry book that replaces QuickBooks. `LEDGER-DESIGN.md`.
+//!
+//! Documents describe what happened; the ledger is what happened. One function
+//! turns a document into a balanced entry ([`post`]), one store holds the
+//! entries behind a period gate ([`store`]), and one importer replays the
+//! `qbo-local` replica through that same function ([`import`]) so history in
+//! this book is derived rather than copied.
+//!
+//! Module layout follows the design document's sections:
+//!
+//! - [`types`]  — the document and entry shapes every module shares
+//! - [`chart`]  — §2: account numbers and the seed chart
+//! - [`books`]  — D28: customers, vendors, items, document numbering, the
+//!   standalone entry path, and open documents with AR/AP aging
+//! - [`post`]   — §1: the posting-rules table as code
+//! - [`store`]  — §4, §5: schema, invariants, period close, oplog
+//! - [`report`] — §7, §9: trial balance, P&L, balance sheet, the tax lines
+//! - [`import`]   — §6: replica to documents, chart mapping, opening balances
+//! - [`item_classes`] — D33: the item → class worksheet (rule suggestions
+//!   out, Dan's reviewed classes in) and the map the importer reads
+//! - [`pipeline`] — §6: the importer wired to [`post`] and [`store`] —
+//!   replica in, posted entries out
+//! - [`accountant`] — §8: the accountant's read-only role, GL detail and
+//!   exports, and the adjusting-entry request queue
+//! - [`handoff`]  — §8 W24: the accountant handoff pack — a dated, read-only
+//!   SQLite snapshot plus every CSV and a hashed manifest
+//! - [`bank`]     — §10: statement import, matching, proposals, the
+//!   per-statement close
+//! - [`authnet`]  — D15, §1, §10: the Authorize.net settlement import and
+//!   the fee-aware settlement match it feeds in [`bank`]
+//! - [`mfg`]      — §11: manufacturing costing, built after cutover. Landed
+//!   cost by board foot, build sheets with yield as a divisor, builds with
+//!   priced variance, sensitivity, and the three §1 posting rows this
+//!   unblocks in [`post`]
+//! - [`mcp`]      — `ROADMAP.md` §G, §D: the MCP server over this ledger —
+//!   every report above as a read tool, plus gated writes through
+//!   [`post`] and [`store`]
+//! - [`render`]   — D39: invoice, estimate, sales receipt, credit memo,
+//!   purchase order and customer statement PDFs from saved documents and
+//!   master data, with the D30 pay link on an open invoice
+//! - [`verify`]   — §4, §5: an invariants sweep recomputed independently of
+//!   the schema's own triggers and foreign keys
+//! - [`payroll`]  — §12: the SurePayroll pay-run journal, one flagged
+//!   entry per run, wages by class
+//! - [`nightly`]  — ROADMAP.md §E: the parallel-run command — import, diff
+//!   against a QBO trial balance CSV, write the §7 report, and the launchd
+//!   plist that schedules it
+
+pub mod accountant;
+pub mod authnet;
+pub mod bank;
+pub mod books;
+pub mod chart;
+pub mod handoff;
+pub mod import;
+pub mod item_classes;
+pub mod mcp;
+pub mod mfg;
+pub mod nightly;
+pub mod payroll;
+pub mod pipeline;
+pub mod post;
+pub mod render;
+pub mod report;
+pub mod sales_orders;
+pub mod slim;
+pub mod store;
+pub mod types;
+pub mod verify;

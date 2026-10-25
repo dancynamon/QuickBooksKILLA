@@ -8,14 +8,65 @@
 
 use std::collections::HashMap;
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDate, Utc};
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
 
 use crate::domain::{EntityType, RealmId};
 
+pub mod journal;
+
+// ---------------------------------------------------------------------------
+// The Reports API (LEDGER-DESIGN.md §6, §7)
+// ---------------------------------------------------------------------------
+
+/// One of the reports the Reports API serves under
+/// `GET /v3/company/<realm>/reports/<Name>`. The variant is the URL path
+/// segment via [`ReportName::as_str`].
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub enum ReportName {
+    TrialBalance,
+    AgedReceivables,
+    AgedPayables,
+    ProfitAndLoss,
+    BalanceSheet,
+}
+
+impl ReportName {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            ReportName::TrialBalance => "TrialBalance",
+            ReportName::AgedReceivables => "AgedReceivables",
+            ReportName::AgedPayables => "AgedPayables",
+            ReportName::ProfitAndLoss => "ProfitAndLoss",
+            ReportName::BalanceSheet => "BalanceSheet",
+        }
+    }
+}
+
+/// The query parameters a Reports API call may carry. Every field is
+/// optional because which ones apply depends on the report — a trial balance
+/// takes `start_date`/`end_date`/`accounting_method`; an aging report takes
+/// `end_date` (as of) and `aging_method` instead. A caller passes only the
+/// fields the report it is asking for actually uses; [`crate::http::HttpQboClient`]
+/// puts only the `Some` ones on the wire.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ReportParams {
+    pub start_date: Option<NaiveDate>,
+    pub end_date: Option<NaiveDate>,
+    /// `"Accrual"` or `"Cash"`.
+    pub accounting_method: Option<String>,
+    /// QBO's canned date ranges (`"This Fiscal Year"`, and so on) — an
+    /// alternative to `start_date`/`end_date` this codebase does not
+    /// generate itself but a fixture or a caller may still supply.
+    pub date_macro: Option<String>,
+    /// Aging reports only: `"Current"` or `"Report_Date"`.
+    pub aging_method: Option<String>,
+}
+
 /// One entity as QBO returns it.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct EntityPayload {
     pub entity_type: EntityType,
     pub qbo_id: String,
@@ -23,6 +74,17 @@ pub struct EntityPayload {
     pub last_updated_utc: DateTime<Utc>,
     pub is_deleted: bool,
     pub raw_json: serde_json::Value,
+}
+
+/// One row of the id + `MetaData.LastUpdatedTime` index the reconciliation
+/// sweep reads (`DESIGN.md` §7 step 1) — everything [`EntityPayload`] carries
+/// except the payload itself, which the sweep does not need until it decides
+/// something must be healed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IndexEntry {
+    pub qbo_id: String,
+    pub last_updated_utc: DateTime<Utc>,
+    pub is_deleted: bool,
 }
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
@@ -111,6 +173,64 @@ pub trait QboClient {
         entity_type: EntityType,
         name: &str,
     ) -> Result<Option<EntityPayload>, QboError>;
+
+    /// Paged id + `MetaData.LastUpdatedTime` read, for the reconciliation
+    /// sweep's first step (`DESIGN.md` §7 step 1): who exists, and when they
+    /// last changed, without pulling every payload.
+    ///
+    /// The default projects a full [`QboClient::query`] page down to the index
+    /// fields, which is correct but wasteful. A real HTTP client should
+    /// override this with a projected `SELECT Id, MetaData FROM <Entity>` so
+    /// the sweep pulls ids and timestamps only rather than whole payloads.
+    fn index(
+        &mut self,
+        realm: &RealmId,
+        entity_type: EntityType,
+        start_position: usize,
+        max_results: usize,
+    ) -> Result<Vec<IndexEntry>, QboError> {
+        Ok(self
+            .query(realm, entity_type, None, start_position, max_results)?
+            .into_iter()
+            .map(|payload| IndexEntry {
+                qbo_id: payload.qbo_id,
+                last_updated_utc: payload.last_updated_utc,
+                is_deleted: payload.is_deleted,
+            })
+            .collect())
+    }
+
+    /// One entity by id, or `None` if QBO no longer serves it at all — the
+    /// reconciliation sweep's signal that a record it still holds locally was
+    /// deleted there (`DESIGN.md` §7 step 3).
+    fn fetch(
+        &mut self,
+        realm: &RealmId,
+        entity_type: EntityType,
+        qbo_id: &str,
+    ) -> Result<Option<EntityPayload>, QboError>;
+
+    /// One Reports API call: `GET /v3/company/<realm>/reports/<name>` with
+    /// whatever of `params` applies (`LEDGER-DESIGN.md` §6, §7). The raw JSON
+    /// comes back whole — `crate::reports` is what turns it into rows — so
+    /// this trait stays ignorant of any one report's shape.
+    ///
+    /// The default refuses: most implementors of this trait ([`MockQbo`]) are
+    /// exercising sync, not reports, and a client that does not really talk
+    /// to Intuit has no business inventing report data. [`crate::http::HttpQboClient`],
+    /// [`crate::fixture::RecordingQbo`] and [`crate::fixture::FixtureQbo`]
+    /// override this with the real thing.
+    fn report(
+        &mut self,
+        realm: &RealmId,
+        name: ReportName,
+        params: &ReportParams,
+    ) -> Result<serde_json::Value, QboError> {
+        let _ = (realm, name, params);
+        Err(QboError::Validation(
+            "reports not supported by this client".to_string(),
+        ))
+    }
 }
 
 /// The field carrying a master's unique name, per entity type.
@@ -226,15 +346,67 @@ impl MockQbo {
     /// Simulate someone editing a record in the QBO web UI: the `SyncToken`
     /// moves on, so any queued update built on the old one now conflicts.
     pub fn bump_sync_token(&mut self, realm: &RealmId, entity_type: EntityType, qbo_id: &str) {
-        if let Some(entity) = self.entities.get_mut(&(
-            realm.as_str().to_string(),
-            entity_type,
-            qbo_id.to_string(),
-        )) {
+        if let Some(entity) =
+            self.entities
+                .get_mut(&(realm.as_str().to_string(), entity_type, qbo_id.to_string()))
+        {
             let next: u64 = entity.sync_token.parse::<u64>().unwrap_or(0) + 1;
             entity.sync_token = next.to_string();
         }
     }
+
+    /// A serialisable snapshot of everything that makes this double behave
+    /// like the real QBO — not just the entities it holds, but the
+    /// `RequestId` log that gives idempotency and the id counter that keeps
+    /// new ids from colliding with ones a previous process already handed
+    /// out.
+    ///
+    /// This is what [`journal::JournalledMock`] persists to disk after every
+    /// mutating call, so that a second process picks up exactly what the
+    /// first one actually did to "QBO" rather than an approximation of it.
+    pub fn snapshot(&self) -> MockQboSnapshot {
+        MockQboSnapshot {
+            entities: self
+                .entities
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
+            request_log: self
+                .request_log
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
+            next_id: self.next_id,
+            clock: self.clock,
+            cdc_cap: self.cdc_cap,
+        }
+    }
+
+    /// The inverse of [`Self::snapshot`]. Scripted failures and call counters
+    /// are deliberately not part of the snapshot — they are per-process test
+    /// instrumentation, not state QBO itself would remember.
+    pub fn restore(snapshot: MockQboSnapshot) -> Self {
+        MockQbo {
+            entities: snapshot.entities.into_iter().collect(),
+            request_log: snapshot.request_log.into_iter().collect(),
+            next_id: snapshot.next_id,
+            clock: snapshot.clock,
+            scripted_failures: Vec::new(),
+            create_calls: 0,
+            query_calls: 0,
+            cdc_cap: snapshot.cdc_cap,
+        }
+    }
+}
+
+/// See [`MockQbo::snapshot`].
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct MockQboSnapshot {
+    entities: Vec<(EntityKey, EntityPayload)>,
+    request_log: Vec<((String, Uuid), EntityPayload)>,
+    next_id: u64,
+    clock: DateTime<Utc>,
+    cdc_cap: usize,
 }
 
 impl QboClient for MockQbo {
@@ -263,15 +435,19 @@ impl QboClient for MockQbo {
             })
             .map(|(_, payload)| payload.clone())
             .collect();
-        // Ordered by update time, then id, so a paged read is stable — which is
-        // what STARTPOSITION paging assumes and what the real endpoint gives
-        // with an explicit ORDERBY.
+        // A total order, so a paged read is stable — which is what
+        // STARTPOSITION paging assumes. The real endpoint only gives that when
+        // the ORDERBY key is unique, hence `ORDERBY Id` in `http.rs`.
         matches.sort_by(|a, b| {
             a.last_updated_utc
                 .cmp(&b.last_updated_utc)
                 .then(a.qbo_id.cmp(&b.qbo_id))
         });
-        Ok(matches.into_iter().skip(start_position).take(max_results).collect())
+        Ok(matches
+            .into_iter()
+            .skip(start_position)
+            .take(max_results)
+            .collect())
     }
 
     fn cdc(
@@ -410,6 +586,26 @@ impl QboClient for MockQbo {
             })
             .map(|(_, payload)| payload.clone()))
     }
+
+    fn fetch(
+        &mut self,
+        realm: &RealmId,
+        entity_type: EntityType,
+        qbo_id: &str,
+    ) -> Result<Option<EntityPayload>, QboError> {
+        self.query_calls += 1;
+        if let Some(error) = self.take_failure() {
+            return Err(error);
+        }
+        // A record QBO has soft-deleted no longer comes back from a direct
+        // read, even though `query`/`cdc` still surface its id with
+        // `is_deleted` set — that gap is what tells the sweep a stale id was
+        // deleted rather than merely edited.
+        Ok(self
+            .get(realm, entity_type, qbo_id)
+            .filter(|e| !e.is_deleted)
+            .cloned())
+    }
 }
 
 #[cfg(test)]
@@ -430,8 +626,12 @@ mod tests {
         let request_id = Uuid::now_v7();
         let payload = serde_json::json!({ "DocNumber": "21234" });
 
-        let first = qbo.create(&realm(), EntityType::Invoice, &payload, request_id).unwrap();
-        let second = qbo.create(&realm(), EntityType::Invoice, &payload, request_id).unwrap();
+        let first = qbo
+            .create(&realm(), EntityType::Invoice, &payload, request_id)
+            .unwrap();
+        let second = qbo
+            .create(&realm(), EntityType::Invoice, &payload, request_id)
+            .unwrap();
 
         assert_eq!(first.qbo_id, second.qbo_id);
         assert_eq!(qbo.count(&realm(), EntityType::Invoice), 1);
@@ -467,7 +667,12 @@ mod tests {
     fn a_stale_sync_token_is_refused() {
         let mut qbo = MockQbo::new(at(0));
         let created = qbo
-            .create(&realm(), EntityType::Invoice, &serde_json::json!({}), Uuid::now_v7())
+            .create(
+                &realm(),
+                EntityType::Invoice,
+                &serde_json::json!({}),
+                Uuid::now_v7(),
+            )
             .unwrap();
 
         // Someone edits it in the QBO web UI.
@@ -488,7 +693,12 @@ mod tests {
     fn an_update_on_the_current_token_succeeds_and_advances_it() {
         let mut qbo = MockQbo::new(at(0));
         let created = qbo
-            .create(&realm(), EntityType::Invoice, &serde_json::json!({}), Uuid::now_v7())
+            .create(
+                &realm(),
+                EntityType::Invoice,
+                &serde_json::json!({}),
+                Uuid::now_v7(),
+            )
             .unwrap();
         let updated = qbo
             .update(
@@ -529,8 +739,13 @@ mod tests {
     fn realms_are_isolated_in_the_double_too() {
         let mut qbo = MockQbo::new(at(0));
         let waterline = RealmId::parse("1234567890123457").unwrap();
-        qbo.create(&realm(), EntityType::Invoice, &serde_json::json!({}), Uuid::now_v7())
-            .unwrap();
+        qbo.create(
+            &realm(),
+            EntityType::Invoice,
+            &serde_json::json!({}),
+            Uuid::now_v7(),
+        )
+        .unwrap();
         assert_eq!(qbo.count(&realm(), EntityType::Invoice), 1);
         assert_eq!(qbo.count(&waterline, EntityType::Invoice), 0);
     }
@@ -547,19 +762,44 @@ mod tests {
             )
             .unwrap();
         }
-        assert_eq!(qbo.query(&realm(), EntityType::Invoice, None, 0, 2).unwrap().len(), 2);
-        assert_eq!(qbo.query(&realm(), EntityType::Invoice, None, 4, 2).unwrap().len(), 1);
-        assert_eq!(qbo.query(&realm(), EntityType::Invoice, None, 9, 2).unwrap().len(), 0);
+        assert_eq!(
+            qbo.query(&realm(), EntityType::Invoice, None, 0, 2)
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(
+            qbo.query(&realm(), EntityType::Invoice, None, 4, 2)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            qbo.query(&realm(), EntityType::Invoice, None, 9, 2)
+                .unwrap()
+                .len(),
+            0
+        );
     }
 
     #[test]
     fn cdc_returns_only_what_changed_since_the_cursor() {
         let mut qbo = MockQbo::new(at(0));
-        qbo.create(&realm(), EntityType::Invoice, &serde_json::json!({ "n": 1 }), Uuid::now_v7())
-            .unwrap();
+        qbo.create(
+            &realm(),
+            EntityType::Invoice,
+            &serde_json::json!({ "n": 1 }),
+            Uuid::now_v7(),
+        )
+        .unwrap();
         qbo.advance(at(100));
-        qbo.create(&realm(), EntityType::Invoice, &serde_json::json!({ "n": 2 }), Uuid::now_v7())
-            .unwrap();
+        qbo.create(
+            &realm(),
+            EntityType::Invoice,
+            &serde_json::json!({ "n": 2 }),
+            Uuid::now_v7(),
+        )
+        .unwrap();
 
         let changed = qbo.cdc(&realm(), &[EntityType::Invoice], at(50)).unwrap();
         assert_eq!(changed.len(), 1);
@@ -573,16 +813,83 @@ mod tests {
         qbo.fail_next(QboError::RateLimited);
 
         assert!(matches!(
-            qbo.create(&realm(), EntityType::Invoice, &serde_json::json!({}), Uuid::now_v7()),
+            qbo.create(
+                &realm(),
+                EntityType::Invoice,
+                &serde_json::json!({}),
+                Uuid::now_v7()
+            ),
             Err(QboError::Network(_))
         ));
         assert_eq!(
-            qbo.create(&realm(), EntityType::Invoice, &serde_json::json!({}), Uuid::now_v7()),
+            qbo.create(
+                &realm(),
+                EntityType::Invoice,
+                &serde_json::json!({}),
+                Uuid::now_v7()
+            ),
             Err(QboError::RateLimited)
         );
         assert!(qbo
-            .create(&realm(), EntityType::Invoice, &serde_json::json!({}), Uuid::now_v7())
+            .create(
+                &realm(),
+                EntityType::Invoice,
+                &serde_json::json!({}),
+                Uuid::now_v7()
+            )
             .is_ok());
+    }
+
+    #[test]
+    fn a_snapshot_round_trips_through_json_and_restores_full_behaviour() {
+        let mut qbo = MockQbo::new(at(0));
+        let request_id = Uuid::now_v7();
+        qbo.create(
+            &realm(),
+            EntityType::Customer,
+            &serde_json::json!({ "DisplayName": "BLUE HARBOR SWIM" }),
+            request_id,
+        )
+        .unwrap();
+        qbo.create(
+            &realm(),
+            EntityType::Invoice,
+            &serde_json::json!({}),
+            Uuid::now_v7(),
+        )
+        .unwrap();
+
+        let json = serde_json::to_string(&qbo.snapshot()).unwrap();
+        let snapshot: MockQboSnapshot = serde_json::from_str(&json).unwrap();
+        let mut restored = MockQbo::restore(snapshot);
+
+        assert_eq!(restored.count(&realm(), EntityType::Customer), 1);
+        assert_eq!(restored.count(&realm(), EntityType::Invoice), 1);
+
+        // The RequestId log survived, so a retry against the restored double
+        // still replays rather than duplicating.
+        let replayed = restored
+            .create(
+                &realm(),
+                EntityType::Invoice,
+                &serde_json::json!({}),
+                Uuid::now_v7(),
+            )
+            .unwrap();
+        assert_eq!(restored.count(&realm(), EntityType::Invoice), 2);
+        assert_eq!(
+            replayed.qbo_id, "3",
+            "the id counter must not restart and collide"
+        );
+    }
+
+    #[test]
+    fn the_default_report_impl_refuses() {
+        let mut qbo = MockQbo::new(at(0));
+        let err = qbo
+            .report(&realm(), ReportName::TrialBalance, &ReportParams::default())
+            .unwrap_err();
+        assert!(matches!(err, QboError::Validation(_)));
     }
 
     #[test]

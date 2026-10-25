@@ -1,13 +1,44 @@
-//! `qbo-local` — status entry point.
+//! `qbo-local` — the subcommand binary. `HANDOFF.md` §2.5, `ROADMAP.md` §A.
 //!
-//! The Tauri shell and React UI are not built yet. This binary reports what the
-//! M0 foundations currently hold, so the build is inspectable before there is
-//! anything to look at.
+//! Wires the pieces built so far — [`Store`], [`Daemon`], [`Reconciler`],
+//! [`HttpQboClient`] — into something runnable against a file database and,
+//! with `--live`, against a real QBO realm. Every subcommand that would need
+//! Intuit credentials accepts either `--live` (backed by [`HttpQboClient`],
+//! built from `--config`; `HANDOFF.md` §2.3, §2.1) or `--mock` (backed by
+//! [`MockQbo`]); without either, each refuses with the same exact message
+//! rather than guessing which the caller meant.
+//!
+//! No `clap`: `std::env::args` and a hand-rolled [`parse`], matching the rest
+//! of this crate's no-new-dependencies discipline.
 
-use chrono::Utc;
+use std::env;
+use std::io::BufRead;
+use std::path::{Path, PathBuf};
+use std::process::ExitCode;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
+
+use chrono::{NaiveDate, Utc};
+use uuid::Uuid;
+
+use qbo_local::auth::{FileTokenStore, TokenGenerations, TokenStore};
+use qbo_local::client::{MockQbo, QboClient, ReportName, ReportParams};
+use qbo_local::clock::{Clock, SystemClock};
+use qbo_local::config::{LocalConfig, TokenStoreKind};
+use qbo_local::daemon::{Cadence, Daemon, DaemonOptions, Tick};
 use qbo_local::domain::{EntityType, RealmId, SyncTier};
+use qbo_local::driver::{SyncDriver, SyncOptions, SyncPath, SyncReport};
+use qbo_local::fixture::{FixtureQbo, RecordingQbo};
+use qbo_local::http::{HttpQboClient, TokenSource};
+use qbo_local::oauth::{self, OAuthConfig};
 use qbo_local::ratelimit::RealmLimits;
-use qbo_local::store::{latest_version, ProjectedTable, Store};
+use qbo_local::reconcile::{ReconcileOptions, ReconcileReport, Reconciler};
+use qbo_local::reports;
+use qbo_local::sales_orders;
+use qbo_local::slice::{self, SliceOptions};
+use qbo_local::store::backup::SnapshotPolicy;
+use qbo_local::store::{latest_version, ProjectedTable, RealmSummary, Store};
 use qbo_local::sync::{CDC_LOOKBACK_DAYS, DEFAULT_CDC_MAX_AGE_DAYS};
 
 const PROJECTED_TABLES: &[ProjectedTable] = &[
@@ -20,23 +51,1139 @@ const PROJECTED_TABLES: &[ProjectedTable] = &[
     ProjectedTable::DocumentLinks,
 ];
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let store = Store::open_in_memory()?;
-    // Nothing is mirrored yet; this exists so the counts below have a realm to
-    // be zero for, rather than being printed as an unexplained blank.
-    let realm = RealmId::parse("0000000000000000")?;
-    store.register_realm(&realm, "empty replica", Utc::now())?;
-    let limits = RealmLimits::default();
+/// A snapshot rotation depth used when a caller gives `--snapshot-dir` /
+/// `--dir` without an explicit `--keep`. Not specified anywhere as a fixed
+/// value (`DESIGN.md` §8 says only "N-deep"); a week of nightly snapshots is a
+/// reasonable default that costs little disk and covers "someone doesn't
+/// notice for a few days".
+const DEFAULT_SNAPSHOT_KEEP: usize = 7;
 
+/// Every subcommand that talks to QBO needs a client, and there are exactly
+/// two ways to get one: `--live` (real HTTP, `HANDOFF.md` §2.3) or `--mock`
+/// ([`MockQbo`]). Neither given is a usage error, not a guess.
+const NO_CLIENT_SELECTED: &str =
+    "no QBO client selected: pass --live (see `qbo-local auth`) or --mock to exercise the loop";
+
+/// `report` and `snapshots` read the Reports API rather than syncing entities,
+/// so their choice of source is `--live` or `--replay DIR`, never `--mock` —
+/// there is no report-shaped double to fall back on.
+const NO_REPORT_SOURCE: &str = "no report source selected: pass --live (see `qbo-local auth`) or \
+     --replay DIR to read from fixtures recorded earlier";
+
+/// Where `--live` looks for its config when `--config` is not given.
+/// `HANDOFF.md` §0: `.local/` is gitignored in full.
+const DEFAULT_CONFIG_PATH: &str = ".local/config.toml";
+
+fn main() -> ExitCode {
+    let args: Vec<String> = env::args().skip(1).collect();
+    let command = match parse(&args) {
+        Ok(command) => command,
+        Err(usage_error) => {
+            eprint!("{usage_error}");
+            return ExitCode::from(2);
+        }
+    };
+
+    match execute(command) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(CommandError::NoClientSelected) => {
+            eprintln!("{NO_CLIENT_SELECTED}");
+            ExitCode::from(2)
+        }
+        Err(CommandError::NoReportSource) => {
+            eprintln!("{NO_REPORT_SOURCE}");
+            ExitCode::from(2)
+        }
+        Err(CommandError::Runtime(message)) => {
+            eprintln!("{message}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Command line
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Debug, PartialEq)]
+enum Command {
+    Status {
+        db: Option<PathBuf>,
+        config: Option<PathBuf>,
+    },
+    Init {
+        db: PathBuf,
+        realm: RealmId,
+        name: String,
+    },
+    Auth {
+        realm: RealmId,
+        port: Option<u16>,
+        config: Option<PathBuf>,
+    },
+    ImportToken {
+        realm: RealmId,
+        config: Option<PathBuf>,
+        force: bool,
+    },
+    Daemon {
+        db: PathBuf,
+        realm: RealmId,
+        focused_secs: Option<u64>,
+        idle_secs: Option<u64>,
+        snapshot_dir: Option<PathBuf>,
+        keep: Option<usize>,
+        snapshot_hour_utc: Option<u32>,
+        once: bool,
+        mock: bool,
+        live: bool,
+        config: Option<PathBuf>,
+    },
+    Sweep {
+        db: PathBuf,
+        realm: RealmId,
+        mock: bool,
+        live: bool,
+        config: Option<PathBuf>,
+    },
+    Snapshot {
+        db: PathBuf,
+        dir: PathBuf,
+        keep: Option<usize>,
+    },
+    Record {
+        db: PathBuf,
+        realm: RealmId,
+        dir: PathBuf,
+        mock: bool,
+        live: bool,
+        config: Option<PathBuf>,
+    },
+    Replay {
+        db: PathBuf,
+        realm: RealmId,
+        dir: PathBuf,
+    },
+    Slice {
+        db: PathBuf,
+        realm: RealmId,
+        dir: PathBuf,
+        options: SliceOptions,
+    },
+    Report {
+        realm: RealmId,
+        name: ReportKind,
+        as_of: NaiveDate,
+        start: Option<NaiveDate>,
+        out: PathBuf,
+        live: bool,
+        replay: Option<PathBuf>,
+        record: Option<PathBuf>,
+        config: Option<PathBuf>,
+    },
+    SyncSalesOrders {
+        db: PathBuf,
+        realm: RealmId,
+        feed: String,
+    },
+    SalesOrders {
+        db: PathBuf,
+        realm: RealmId,
+        all: bool,
+    },
+    Snapshots {
+        realm: RealmId,
+        from_year: i32,
+        to_year: i32,
+        dir: PathBuf,
+        live: bool,
+        replay: Option<PathBuf>,
+        record: Option<PathBuf>,
+        config: Option<PathBuf>,
+    },
+}
+
+/// `qbo-local report --name`. `LEDGER-DESIGN.md` §7's Reports API call
+/// exposes more report names than this CLI does — `ProfitAndLoss` and
+/// `BalanceSheet` are on [`qbo_local::client::ReportName`] for a caller that
+/// wants them directly, but the ledger's own `tbdiff`/`opening`/`boundary`
+/// track only ever needs a trial balance or an aging report, so those are
+/// the only three spellings this flag accepts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ReportKind {
+    TrialBalance,
+    ArAging,
+    ApAging,
+}
+
+impl ReportKind {
+    fn parse(raw: &str) -> Option<Self> {
+        match raw {
+            "trial-balance" => Some(ReportKind::TrialBalance),
+            "ar-aging" => Some(ReportKind::ArAging),
+            "ap-aging" => Some(ReportKind::ApAging),
+            _ => None,
+        }
+    }
+
+    const fn report_name(self) -> ReportName {
+        match self {
+            ReportKind::TrialBalance => ReportName::TrialBalance,
+            ReportKind::ArAging => ReportName::AgedReceivables,
+            ReportKind::ApAging => ReportName::AgedPayables,
+        }
+    }
+}
+
+const USAGE: &str = "\
+qbo-local — local SQLite replica of QuickBooks Online
+
+USAGE:
+    qbo-local status [--db PATH] [--config PATH]
+    qbo-local init --db PATH --realm ID --name \"Display Name\"
+    qbo-local auth --realm ID [--port N] [--config PATH]
+    qbo-local import-token --realm ID [--config PATH] [--force] < refresh-token
+    qbo-local daemon --db PATH --realm ID [--focused-secs N] [--idle-secs N]
+                      [--snapshot-dir DIR --keep N] [--snapshot-hour-utc H]
+                      [--once] (--live [--config PATH] | --mock)
+    qbo-local sweep --db PATH --realm ID (--live [--config PATH] | --mock)
+    qbo-local snapshot --db PATH --dir DIR [--keep N]
+    qbo-local record --db PATH --realm ID --dir DIR [--mock|--live] [--config PATH]
+    qbo-local replay --db PATH --realm ID --dir DIR
+    qbo-local report --realm ID --name trial-balance|ar-aging|ap-aging
+                      --as-of YYYY-MM-DD [--start YYYY-MM-DD] --out PATH
+                      (--live [--config PATH] | --replay DIR) [--record DIR]
+    qbo-local snapshots --realm ID --from-year YYYY --to-year YYYY --dir DIR
+                      (--live [--config PATH] | --replay DIR) [--record DIR]
+    qbo-local sync-sales-orders --db PATH --realm ID --feed URL|PATH
+    qbo-local sales-orders --db PATH --realm ID [--all]
+    qbo-local --help
+
+SUBCOMMANDS:
+    status      Print the M0 foundations, and sync status per realm with --db.
+                With --config (or when .local/config.toml exists), also
+                whether each configured realm holds tokens — fingerprints
+                and expiry times only, never a token.
+    init        Open (creating if absent) a file store and register a realm.
+                Idempotent — registering an existing realm is not an error.
+    auth        Run the OAuth loopback flow and save generation zero for a
+                realm through the configured token store: the macOS
+                keychain by default on a Mac (HANDOFF.md §2.1), the file
+                store elsewhere or with token_store = \"file\".
+    import-token
+                Read a refresh token for this app from stdin (one line, e.g.
+                from the Intuit OAuth Playground), exchange it once for a
+                fresh token set, and save that as generation zero. Prints a
+                fingerprint only. Refuses to overwrite existing tokens
+                without --force.
+    daemon      Run the CDC poll loop against a realm until stopped.
+    sweep       Run one reconciliation sweep against QBO's index.
+    snapshot    Take one nightly-style backup of the replica, with rotation.
+    record      Record every QBO response for a realm's sync into DIR as
+                fixtures (HANDOFF.md §2.6). Scrub before committing any of
+                it — see tools/scrub-fixtures.py.
+    replay      Sync a realm from fixtures previously recorded into DIR,
+                touching no network at all.
+    slice       Record a small, referentially closed slice of the replica
+                (--db, opened read-only) into DIR as fixtures, plus
+                DIR/deny-names.txt for the scrubber. Starts from --customers
+                N / --vendors N picked by --pick-seed (or --customer ID /
+                --vendor ID, repeatable), their --max-docs newest documents
+                since --since, and closes over every reference. Real data:
+                scrub before committing (tools/make-real-fixture.sh, D31).
+    report      Pull one Reports API report (LEDGER-DESIGN.md §6, §7) and
+                write it as CSV to --out: trial-balance in the
+                qbo_account_id,name,balance shape `ledger tbdiff`/`opening`/
+                `boundary` read; ar-aging/ap-aging in this crate's own
+                entity_id,name,current,1-30,31-60,61-90,over_90,total shape.
+    snapshots   Pull a year-end (31 December) trial balance for every year
+                from --from-year to --to-year and write tb-YYYY.csv into
+                --dir — exactly the directory `ledger boundary --snapshots`
+                reads.
+    sync-sales-orders
+                Mirror QBO sales orders from a qbo-sales-orders/1 feed (a file
+                or an http(s) URL; DECISIONS.md D42). Sales orders are not a v3
+                entity, so CDC and the daemon never see them: run this on a
+                schedule. A complete feed marks orders it lacks deleted.
+    sales-orders
+                List the mirrored sales orders still open (--all: every one),
+                with what is left to invoice. Opens the replica read-only.
+
+FLAGS:
+    --db PATH               Path to the SQLite replica file.
+    --realm ID              A QBO realm id (digits only).
+    --name \"Display Name\"   The realm's display name (init only).
+    --port N                Loopback redirect port (auth; default from config).
+    --config PATH           Path to the local config file (default: .local/config.toml).
+    --focused-secs N        Focused-cadence poll interval, in seconds (daemon).
+    --idle-secs N           Idle-cadence poll interval, in seconds (daemon).
+    --snapshot-dir DIR      Where nightly snapshots go (daemon; pair with --keep).
+    --keep N                Snapshots to retain (daemon, snapshot).
+    --snapshot-hour-utc H   UTC hour at or after which a snapshot may fire (daemon).
+    --dir DIR               Where a snapshot is written (snapshot); where
+                            fixtures are recorded to / replayed from (record,
+                            replay); or where tb-YYYY.csv files are written
+                            (snapshots).
+    --once                  Run a single tick and exit (daemon).
+    --live                  Use HttpQboClient against a real QBO realm (HANDOFF.md §2.3).
+    --mock                  Use an empty in-memory MockQbo instead of live QBO.
+    --name NAME             Which report: trial-balance, ar-aging or ap-aging (report only).
+    --as-of YYYY-MM-DD      End date / as-of date (report only).
+    --start YYYY-MM-DD      Start date, when the report takes one (report only).
+    --out PATH              Where the report's CSV is written (report only).
+    --replay DIR            Read the report from fixtures previously recorded
+                            into DIR instead of a live call (report, snapshots).
+    --record DIR            Also record the report response(s) into DIR, the
+                            same shape `qbo-local record` writes for a sync
+                            (report, snapshots).
+    --customers N, --vendors N
+                            Contacts to pick for a slice (default 8 and 4).
+    --customer ID, --vendor ID
+                            A contact to include in a slice, by id (repeatable).
+    --since YYYY-MM-DD      Seed a slice with documents from this date on.
+    --max-docs N            Newest documents per contact to seed with (default 12).
+    --max-records N         Refuse a slice larger than this (default 1500).
+    --pick-seed S           Which contacts a slice picks (default \"slice\").
+    --from-year YYYY        First year to snapshot, inclusive (snapshots only).
+    --to-year YYYY          Last year to snapshot, inclusive (snapshots only).
+    --feed URL|PATH         Where the sales-order feed is (sync-sales-orders).
+    --all                   Every sales order, not only open ones (sales-orders).
+
+Without --live or --mock, daemon, sweep and record exit 2: choose one.
+Without --live or --replay DIR, report and snapshots exit 2: choose one.
+Ctrl-C is safe to stop `daemon` with — every write is transactional — or type
+\"stop\" and press Enter on its stdin for a clean exit.
+
+EXIT CODES:
+    0   ok
+    1   runtime error
+    2   usage error (this message), or neither --live nor --mock given (daemon, sweep)
+";
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct UsageError {
+    reason: Option<String>,
+}
+
+impl UsageError {
+    fn usage() -> Self {
+        UsageError { reason: None }
+    }
+
+    fn new(reason: impl Into<String>) -> Self {
+        UsageError {
+            reason: Some(reason.into()),
+        }
+    }
+
+    fn missing_flag(flag: &str) -> Self {
+        Self::new(format!("missing required flag {flag}"))
+    }
+
+    fn missing_value(flag: &str) -> Self {
+        Self::new(format!("{flag} requires a value"))
+    }
+
+    fn unknown_flag(flag: &str) -> Self {
+        Self::new(format!("unknown flag {flag}"))
+    }
+
+    fn unknown_subcommand(name: &str) -> Self {
+        Self::new(format!("unknown subcommand {name:?}"))
+    }
+
+    fn invalid_value(flag: &str, value: &str) -> Self {
+        Self::new(format!("invalid value for {flag}: {value:?}"))
+    }
+}
+
+impl std::fmt::Display for UsageError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if let Some(reason) = &self.reason {
+            writeln!(f, "error: {reason}")?;
+            writeln!(f)?;
+        }
+        write!(f, "{USAGE}")
+    }
+}
+
+/// Parse `args` — the process arguments with the program name already
+/// stripped — into a [`Command`].
+fn parse(args: &[String]) -> Result<Command, UsageError> {
+    let mut args = args.iter();
+    let Some(subcommand) = args.next() else {
+        return Err(UsageError::usage());
+    };
+
+    match subcommand.as_str() {
+        "--help" | "-h" => Err(UsageError::usage()),
+        "status" => parse_status(args),
+        "init" => parse_init(args),
+        "auth" => parse_auth(args),
+        "import-token" => parse_import_token(args),
+        "daemon" => parse_daemon(args),
+        "sweep" => parse_sweep(args),
+        "snapshot" => parse_snapshot(args),
+        "record" => parse_record(args),
+        "replay" => parse_replay(args),
+        "slice" => parse_slice(args),
+        "report" => parse_report(args),
+        "snapshots" => parse_snapshots(args),
+        "sync-sales-orders" => parse_sync_sales_orders(args),
+        "sales-orders" => parse_sales_orders(args),
+        other => Err(UsageError::unknown_subcommand(other)),
+    }
+}
+
+type Args<'a> = std::slice::Iter<'a, String>;
+
+fn next_value(args: &mut Args<'_>, flag: &str) -> Result<String, UsageError> {
+    args.next()
+        .cloned()
+        .ok_or_else(|| UsageError::missing_value(flag))
+}
+
+fn parse_realm(raw: &str) -> Result<RealmId, UsageError> {
+    RealmId::parse(raw).map_err(|_| UsageError::invalid_value("--realm", raw))
+}
+
+fn parse_u32(raw: &str, flag: &str) -> Result<u32, UsageError> {
+    raw.parse()
+        .map_err(|_| UsageError::invalid_value(flag, raw))
+}
+
+fn parse_u64(raw: &str, flag: &str) -> Result<u64, UsageError> {
+    raw.parse()
+        .map_err(|_| UsageError::invalid_value(flag, raw))
+}
+
+fn parse_usize(raw: &str, flag: &str) -> Result<usize, UsageError> {
+    raw.parse()
+        .map_err(|_| UsageError::invalid_value(flag, raw))
+}
+
+fn parse_u16(raw: &str, flag: &str) -> Result<u16, UsageError> {
+    raw.parse()
+        .map_err(|_| UsageError::invalid_value(flag, raw))
+}
+
+fn parse_i32(raw: &str, flag: &str) -> Result<i32, UsageError> {
+    raw.parse()
+        .map_err(|_| UsageError::invalid_value(flag, raw))
+}
+
+fn parse_date(raw: &str, flag: &str) -> Result<NaiveDate, UsageError> {
+    NaiveDate::parse_from_str(raw, "%Y-%m-%d").map_err(|_| UsageError::invalid_value(flag, raw))
+}
+
+fn parse_status(mut args: Args<'_>) -> Result<Command, UsageError> {
+    let mut db = None;
+    let mut config = None;
+    while let Some(flag) = args.next() {
+        match flag.as_str() {
+            "--db" => db = Some(PathBuf::from(next_value(&mut args, "--db")?)),
+            "--config" => config = Some(PathBuf::from(next_value(&mut args, "--config")?)),
+            other => return Err(UsageError::unknown_flag(other)),
+        }
+    }
+    Ok(Command::Status { db, config })
+}
+
+fn parse_import_token(mut args: Args<'_>) -> Result<Command, UsageError> {
+    let mut realm = None;
+    let mut config = None;
+    let mut force = false;
+    while let Some(flag) = args.next() {
+        match flag.as_str() {
+            "--realm" => realm = Some(parse_realm(&next_value(&mut args, "--realm")?)?),
+            "--config" => config = Some(PathBuf::from(next_value(&mut args, "--config")?)),
+            "--force" => force = true,
+            other => return Err(UsageError::unknown_flag(other)),
+        }
+    }
+    Ok(Command::ImportToken {
+        realm: realm.ok_or_else(|| UsageError::missing_flag("--realm"))?,
+        config,
+        force,
+    })
+}
+
+fn parse_init(mut args: Args<'_>) -> Result<Command, UsageError> {
+    let mut db = None;
+    let mut realm = None;
+    let mut name = None;
+    while let Some(flag) = args.next() {
+        match flag.as_str() {
+            "--db" => db = Some(PathBuf::from(next_value(&mut args, "--db")?)),
+            "--realm" => realm = Some(parse_realm(&next_value(&mut args, "--realm")?)?),
+            "--name" => name = Some(next_value(&mut args, "--name")?),
+            other => return Err(UsageError::unknown_flag(other)),
+        }
+    }
+    Ok(Command::Init {
+        db: db.ok_or_else(|| UsageError::missing_flag("--db"))?,
+        realm: realm.ok_or_else(|| UsageError::missing_flag("--realm"))?,
+        name: name.ok_or_else(|| UsageError::missing_flag("--name"))?,
+    })
+}
+
+fn parse_auth(mut args: Args<'_>) -> Result<Command, UsageError> {
+    let mut realm = None;
+    let mut port = None;
+    let mut config = None;
+    while let Some(flag) = args.next() {
+        match flag.as_str() {
+            "--realm" => realm = Some(parse_realm(&next_value(&mut args, "--realm")?)?),
+            "--port" => port = Some(parse_u16(&next_value(&mut args, "--port")?, "--port")?),
+            "--config" => config = Some(PathBuf::from(next_value(&mut args, "--config")?)),
+            other => return Err(UsageError::unknown_flag(other)),
+        }
+    }
+    Ok(Command::Auth {
+        realm: realm.ok_or_else(|| UsageError::missing_flag("--realm"))?,
+        port,
+        config,
+    })
+}
+
+fn parse_daemon(mut args: Args<'_>) -> Result<Command, UsageError> {
+    let mut db = None;
+    let mut realm = None;
+    let mut focused_secs = None;
+    let mut idle_secs = None;
+    let mut snapshot_dir = None;
+    let mut keep = None;
+    let mut snapshot_hour_utc = None;
+    let mut once = false;
+    let mut mock = false;
+    let mut live = false;
+    let mut config = None;
+
+    while let Some(flag) = args.next() {
+        match flag.as_str() {
+            "--db" => db = Some(PathBuf::from(next_value(&mut args, "--db")?)),
+            "--realm" => realm = Some(parse_realm(&next_value(&mut args, "--realm")?)?),
+            "--focused-secs" => {
+                focused_secs = Some(parse_u64(
+                    &next_value(&mut args, "--focused-secs")?,
+                    "--focused-secs",
+                )?)
+            }
+            "--idle-secs" => {
+                idle_secs = Some(parse_u64(
+                    &next_value(&mut args, "--idle-secs")?,
+                    "--idle-secs",
+                )?)
+            }
+            "--snapshot-dir" => {
+                snapshot_dir = Some(PathBuf::from(next_value(&mut args, "--snapshot-dir")?))
+            }
+            "--keep" => keep = Some(parse_usize(&next_value(&mut args, "--keep")?, "--keep")?),
+            "--snapshot-hour-utc" => {
+                snapshot_hour_utc = Some(parse_u32(
+                    &next_value(&mut args, "--snapshot-hour-utc")?,
+                    "--snapshot-hour-utc",
+                )?)
+            }
+            "--once" => once = true,
+            "--mock" => mock = true,
+            "--live" => live = true,
+            "--config" => config = Some(PathBuf::from(next_value(&mut args, "--config")?)),
+            other => return Err(UsageError::unknown_flag(other)),
+        }
+    }
+
+    if snapshot_dir.is_some() != keep.is_some() {
+        return Err(UsageError::new(
+            "--snapshot-dir and --keep must be given together",
+        ));
+    }
+    if mock && live {
+        return Err(UsageError::new("--mock and --live cannot both be given"));
+    }
+
+    Ok(Command::Daemon {
+        db: db.ok_or_else(|| UsageError::missing_flag("--db"))?,
+        realm: realm.ok_or_else(|| UsageError::missing_flag("--realm"))?,
+        focused_secs,
+        idle_secs,
+        snapshot_dir,
+        keep,
+        snapshot_hour_utc,
+        once,
+        mock,
+        live,
+        config,
+    })
+}
+
+fn parse_sweep(mut args: Args<'_>) -> Result<Command, UsageError> {
+    let mut db = None;
+    let mut realm = None;
+    let mut mock = false;
+    let mut live = false;
+    let mut config = None;
+    while let Some(flag) = args.next() {
+        match flag.as_str() {
+            "--db" => db = Some(PathBuf::from(next_value(&mut args, "--db")?)),
+            "--realm" => realm = Some(parse_realm(&next_value(&mut args, "--realm")?)?),
+            "--mock" => mock = true,
+            "--live" => live = true,
+            "--config" => config = Some(PathBuf::from(next_value(&mut args, "--config")?)),
+            other => return Err(UsageError::unknown_flag(other)),
+        }
+    }
+    if mock && live {
+        return Err(UsageError::new("--mock and --live cannot both be given"));
+    }
+    Ok(Command::Sweep {
+        db: db.ok_or_else(|| UsageError::missing_flag("--db"))?,
+        realm: realm.ok_or_else(|| UsageError::missing_flag("--realm"))?,
+        mock,
+        live,
+        config,
+    })
+}
+
+fn parse_snapshot(mut args: Args<'_>) -> Result<Command, UsageError> {
+    let mut db = None;
+    let mut dir = None;
+    let mut keep = None;
+    while let Some(flag) = args.next() {
+        match flag.as_str() {
+            "--db" => db = Some(PathBuf::from(next_value(&mut args, "--db")?)),
+            "--dir" => dir = Some(PathBuf::from(next_value(&mut args, "--dir")?)),
+            "--keep" => keep = Some(parse_usize(&next_value(&mut args, "--keep")?, "--keep")?),
+            other => return Err(UsageError::unknown_flag(other)),
+        }
+    }
+    Ok(Command::Snapshot {
+        db: db.ok_or_else(|| UsageError::missing_flag("--db"))?,
+        dir: dir.ok_or_else(|| UsageError::missing_flag("--dir"))?,
+        keep,
+    })
+}
+
+fn parse_record(mut args: Args<'_>) -> Result<Command, UsageError> {
+    let mut db = None;
+    let mut realm = None;
+    let mut dir = None;
+    let mut mock = false;
+    let mut live = false;
+    let mut config = None;
+    while let Some(flag) = args.next() {
+        match flag.as_str() {
+            "--db" => db = Some(PathBuf::from(next_value(&mut args, "--db")?)),
+            "--realm" => realm = Some(parse_realm(&next_value(&mut args, "--realm")?)?),
+            "--dir" => dir = Some(PathBuf::from(next_value(&mut args, "--dir")?)),
+            "--mock" => mock = true,
+            "--live" => live = true,
+            "--config" => config = Some(PathBuf::from(next_value(&mut args, "--config")?)),
+            other => return Err(UsageError::unknown_flag(other)),
+        }
+    }
+    if mock && live {
+        return Err(UsageError::new("--mock and --live are mutually exclusive"));
+    }
+    Ok(Command::Record {
+        db: db.ok_or_else(|| UsageError::missing_flag("--db"))?,
+        realm: realm.ok_or_else(|| UsageError::missing_flag("--realm"))?,
+        dir: dir.ok_or_else(|| UsageError::missing_flag("--dir"))?,
+        mock,
+        live,
+        config,
+    })
+}
+
+fn parse_replay(mut args: Args<'_>) -> Result<Command, UsageError> {
+    let mut db = None;
+    let mut realm = None;
+    let mut dir = None;
+    while let Some(flag) = args.next() {
+        match flag.as_str() {
+            "--db" => db = Some(PathBuf::from(next_value(&mut args, "--db")?)),
+            "--realm" => realm = Some(parse_realm(&next_value(&mut args, "--realm")?)?),
+            "--dir" => dir = Some(PathBuf::from(next_value(&mut args, "--dir")?)),
+            other => return Err(UsageError::unknown_flag(other)),
+        }
+    }
+    Ok(Command::Replay {
+        db: db.ok_or_else(|| UsageError::missing_flag("--db"))?,
+        realm: realm.ok_or_else(|| UsageError::missing_flag("--realm"))?,
+        dir: dir.ok_or_else(|| UsageError::missing_flag("--dir"))?,
+    })
+}
+
+fn parse_sync_sales_orders(mut args: Args<'_>) -> Result<Command, UsageError> {
+    let mut db = None;
+    let mut realm = None;
+    let mut feed = None;
+    while let Some(flag) = args.next() {
+        match flag.as_str() {
+            "--db" => db = Some(PathBuf::from(next_value(&mut args, "--db")?)),
+            "--realm" => realm = Some(parse_realm(&next_value(&mut args, "--realm")?)?),
+            "--feed" => feed = Some(next_value(&mut args, "--feed")?),
+            other => return Err(UsageError::unknown_flag(other)),
+        }
+    }
+    Ok(Command::SyncSalesOrders {
+        db: db.ok_or_else(|| UsageError::missing_flag("--db"))?,
+        realm: realm.ok_or_else(|| UsageError::missing_flag("--realm"))?,
+        feed: feed.ok_or_else(|| UsageError::missing_flag("--feed"))?,
+    })
+}
+
+fn parse_sales_orders(mut args: Args<'_>) -> Result<Command, UsageError> {
+    let mut db = None;
+    let mut realm = None;
+    let mut all = false;
+    while let Some(flag) = args.next() {
+        match flag.as_str() {
+            "--db" => db = Some(PathBuf::from(next_value(&mut args, "--db")?)),
+            "--realm" => realm = Some(parse_realm(&next_value(&mut args, "--realm")?)?),
+            "--all" => all = true,
+            other => return Err(UsageError::unknown_flag(other)),
+        }
+    }
+    Ok(Command::SalesOrders {
+        db: db.ok_or_else(|| UsageError::missing_flag("--db"))?,
+        realm: realm.ok_or_else(|| UsageError::missing_flag("--realm"))?,
+        all,
+    })
+}
+
+fn parse_slice(mut args: Args<'_>) -> Result<Command, UsageError> {
+    let mut db = None;
+    let mut realm = None;
+    let mut dir = None;
+    let mut options = SliceOptions::default();
+    while let Some(flag) = args.next() {
+        match flag.as_str() {
+            "--db" => db = Some(PathBuf::from(next_value(&mut args, "--db")?)),
+            "--realm" => realm = Some(parse_realm(&next_value(&mut args, "--realm")?)?),
+            "--dir" => dir = Some(PathBuf::from(next_value(&mut args, "--dir")?)),
+            "--customers" => options.customers = parse_usize(&next_value(&mut args, flag)?, flag)?,
+            "--vendors" => options.vendors = parse_usize(&next_value(&mut args, flag)?, flag)?,
+            "--customer" => options.customer_ids.push(next_value(&mut args, flag)?),
+            "--vendor" => options.vendor_ids.push(next_value(&mut args, flag)?),
+            "--since" => options.since = Some(parse_date(&next_value(&mut args, flag)?, flag)?),
+            "--max-docs" => {
+                options.max_docs_per_contact = parse_usize(&next_value(&mut args, flag)?, flag)?
+            }
+            "--max-records" => {
+                options.max_records = parse_usize(&next_value(&mut args, flag)?, flag)?
+            }
+            "--pick-seed" => options.pick_seed = next_value(&mut args, flag)?,
+            other => return Err(UsageError::unknown_flag(other)),
+        }
+    }
+    Ok(Command::Slice {
+        db: db.ok_or_else(|| UsageError::missing_flag("--db"))?,
+        realm: realm.ok_or_else(|| UsageError::missing_flag("--realm"))?,
+        dir: dir.ok_or_else(|| UsageError::missing_flag("--dir"))?,
+        options,
+    })
+}
+
+/// `--live` xor `--replay DIR`: exactly one, same rule for `report` and
+/// `snapshots`. `--mock` has no equivalent here — there is no report-shaped
+/// double.
+fn require_report_source(live: bool, replay: &Option<PathBuf>) -> Result<(), UsageError> {
+    if live == replay.is_some() {
+        return Err(UsageError::new(
+            "exactly one of --live or --replay DIR is required",
+        ));
+    }
+    Ok(())
+}
+
+fn parse_report(mut args: Args<'_>) -> Result<Command, UsageError> {
+    let mut realm = None;
+    let mut name = None;
+    let mut as_of = None;
+    let mut start = None;
+    let mut out = None;
+    let mut live = false;
+    let mut replay = None;
+    let mut record = None;
+    let mut config = None;
+    while let Some(flag) = args.next() {
+        match flag.as_str() {
+            "--realm" => realm = Some(parse_realm(&next_value(&mut args, "--realm")?)?),
+            "--name" => {
+                let raw = next_value(&mut args, "--name")?;
+                name = Some(
+                    ReportKind::parse(&raw)
+                        .ok_or_else(|| UsageError::invalid_value("--name", &raw))?,
+                );
+            }
+            "--as-of" => as_of = Some(parse_date(&next_value(&mut args, "--as-of")?, "--as-of")?),
+            "--start" => start = Some(parse_date(&next_value(&mut args, "--start")?, "--start")?),
+            "--out" => out = Some(PathBuf::from(next_value(&mut args, "--out")?)),
+            "--live" => live = true,
+            "--replay" => replay = Some(PathBuf::from(next_value(&mut args, "--replay")?)),
+            "--record" => record = Some(PathBuf::from(next_value(&mut args, "--record")?)),
+            "--config" => config = Some(PathBuf::from(next_value(&mut args, "--config")?)),
+            other => return Err(UsageError::unknown_flag(other)),
+        }
+    }
+    require_report_source(live, &replay)?;
+    Ok(Command::Report {
+        realm: realm.ok_or_else(|| UsageError::missing_flag("--realm"))?,
+        name: name.ok_or_else(|| UsageError::missing_flag("--name"))?,
+        as_of: as_of.ok_or_else(|| UsageError::missing_flag("--as-of"))?,
+        start,
+        out: out.ok_or_else(|| UsageError::missing_flag("--out"))?,
+        live,
+        replay,
+        record,
+        config,
+    })
+}
+
+fn parse_snapshots(mut args: Args<'_>) -> Result<Command, UsageError> {
+    let mut realm = None;
+    let mut from_year = None;
+    let mut to_year = None;
+    let mut dir = None;
+    let mut live = false;
+    let mut replay = None;
+    let mut record = None;
+    let mut config = None;
+    while let Some(flag) = args.next() {
+        match flag.as_str() {
+            "--realm" => realm = Some(parse_realm(&next_value(&mut args, "--realm")?)?),
+            "--from-year" => {
+                from_year = Some(parse_i32(
+                    &next_value(&mut args, "--from-year")?,
+                    "--from-year",
+                )?)
+            }
+            "--to-year" => {
+                to_year = Some(parse_i32(
+                    &next_value(&mut args, "--to-year")?,
+                    "--to-year",
+                )?)
+            }
+            "--dir" => dir = Some(PathBuf::from(next_value(&mut args, "--dir")?)),
+            "--live" => live = true,
+            "--replay" => replay = Some(PathBuf::from(next_value(&mut args, "--replay")?)),
+            "--record" => record = Some(PathBuf::from(next_value(&mut args, "--record")?)),
+            "--config" => config = Some(PathBuf::from(next_value(&mut args, "--config")?)),
+            other => return Err(UsageError::unknown_flag(other)),
+        }
+    }
+    require_report_source(live, &replay)?;
+    let from_year = from_year.ok_or_else(|| UsageError::missing_flag("--from-year"))?;
+    let to_year = to_year.ok_or_else(|| UsageError::missing_flag("--to-year"))?;
+    if from_year > to_year {
+        return Err(UsageError::new(format!(
+            "--from-year {from_year} is after --to-year {to_year}"
+        )));
+    }
+    Ok(Command::Snapshots {
+        realm: realm.ok_or_else(|| UsageError::missing_flag("--realm"))?,
+        from_year,
+        to_year,
+        dir: dir.ok_or_else(|| UsageError::missing_flag("--dir"))?,
+        live,
+        replay,
+        record,
+        config,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Execution
+// ---------------------------------------------------------------------------
+
+enum CommandError {
+    /// Neither `--live` nor `--mock` was given to a subcommand that needs a
+    /// QBO client.
+    NoClientSelected,
+    /// Neither `--live` nor `--replay DIR` was given to `report`/`snapshots`.
+    NoReportSource,
+    Runtime(String),
+}
+
+fn runtime<E: std::fmt::Display>(error: E) -> CommandError {
+    CommandError::Runtime(error.to_string())
+}
+
+fn execute(command: Command) -> Result<(), CommandError> {
+    match command {
+        Command::Status { db, config } => run_status(db, config.as_deref()),
+        Command::Init { db, realm, name } => run_init(&db, &realm, &name),
+        Command::Auth {
+            realm,
+            port,
+            config,
+        } => run_auth(&realm, port, config.as_deref()),
+        Command::ImportToken {
+            realm,
+            config,
+            force,
+        } => run_import_token(&realm, config.as_deref(), force),
+        Command::Daemon {
+            db,
+            realm,
+            focused_secs,
+            idle_secs,
+            snapshot_dir,
+            keep,
+            snapshot_hour_utc,
+            once,
+            mock,
+            live,
+            config,
+        } => run_daemon(
+            &db,
+            &realm,
+            focused_secs,
+            idle_secs,
+            snapshot_dir,
+            keep,
+            snapshot_hour_utc,
+            once,
+            mock,
+            live,
+            config.as_deref(),
+        ),
+        Command::Sweep {
+            db,
+            realm,
+            mock,
+            live,
+            config,
+        } => run_sweep(&db, &realm, mock, live, config.as_deref()),
+        Command::Snapshot { db, dir, keep } => run_snapshot(&db, &dir, keep),
+        Command::Record {
+            db,
+            realm,
+            dir,
+            mock,
+            live,
+            config,
+        } => run_record(&db, &realm, &dir, mock, live, config.as_deref()),
+        Command::Replay { db, realm, dir } => run_replay(&db, &realm, &dir),
+        Command::SyncSalesOrders { db, realm, feed } => run_sync_sales_orders(&db, &realm, &feed),
+        Command::SalesOrders { db, realm, all } => run_sales_orders(&db, &realm, all),
+        Command::Slice {
+            db,
+            realm,
+            dir,
+            options,
+        } => run_slice(&db, &realm, &dir, &options),
+        Command::Report {
+            realm,
+            name,
+            as_of,
+            start,
+            out,
+            live,
+            replay,
+            record,
+            config,
+        } => run_report(
+            &realm,
+            name,
+            as_of,
+            start,
+            &out,
+            live,
+            replay.as_deref(),
+            record.as_deref(),
+            config.as_deref(),
+        ),
+        Command::Snapshots {
+            realm,
+            from_year,
+            to_year,
+            dir,
+            live,
+            replay,
+            record,
+            config,
+        } => run_snapshots(
+            &realm,
+            from_year,
+            to_year,
+            &dir,
+            live,
+            replay.as_deref(),
+            record.as_deref(),
+            config.as_deref(),
+        ),
+    }
+}
+
+/// Build an [`HttpQboClient`] from `--config` (or [`DEFAULT_CONFIG_PATH`])
+/// for `realm`. Shared by `daemon --live` and `sweep --live` so the two
+/// don't drift on how a config file becomes a client.
+fn build_http_client(
+    config_path: Option<&Path>,
+    realm: &RealmId,
+) -> Result<HttpQboClient, CommandError> {
+    let path = config_path.unwrap_or(Path::new(DEFAULT_CONFIG_PATH));
+    let config = LocalConfig::load(path).map_err(runtime)?;
+    // Validates that `realm` is one this config file actually lists, so a
+    // typo'd --realm fails loudly here rather than as a confusing empty sync.
+    config.realm(realm.as_str()).map_err(runtime)?;
+    let secret = config.client_secret().map_err(runtime)?;
+    let redirect_uri = format!("http://localhost:{}/callback", config.intuit.redirect_port);
+    let oauth_config = OAuthConfig::intuit(config.intuit.client_id.clone(), secret, redirect_uri);
+    let (token_store, _) = open_token_store(&config)?;
+    let tokens = TokenSource::new(token_store, oauth_config, realm.clone());
+    Ok(HttpQboClient::new(
+        config.base_url(),
+        tokens,
+        config.rotation_log.clone(),
+    ))
+}
+
+/// The token store `config` selects (`token_store`, defaulting to the
+/// keychain on macOS), plus a one-line description for messages. Every path
+/// that reads or writes tokens goes through here so `auth`, `import-token`,
+/// `status` and `--live` can never disagree about where tokens live.
+fn open_token_store(config: &LocalConfig) -> Result<(Box<dyn TokenStore>, String), CommandError> {
+    match config.token_store_kind() {
+        TokenStoreKind::File => Ok((
+            Box::new(FileTokenStore::new(&config.tokens_dir)),
+            format!("file store {}", config.tokens_dir.display()),
+        )),
+        #[cfg(target_os = "macos")]
+        TokenStoreKind::Keychain => {
+            let store = qbo_local::keychain::KeychainTokenStore::new();
+            let description = format!("macOS keychain, service {}", store.service());
+            Ok((Box::new(store), description))
+        }
+        #[cfg(not(target_os = "macos"))]
+        TokenStoreKind::Keychain => Err(CommandError::Runtime(
+            "token_store = \"keychain\" needs macOS; use token_store = \"file\" here".to_string(),
+        )),
+    }
+}
+
+// -- status -------------------------------------------------------------
+
+fn run_status(db: Option<PathBuf>, config: Option<&Path>) -> Result<(), CommandError> {
     println!("qbo-local — M0 foundations");
     println!();
-    println!("  replica schema version : {}", store.schema_version()?);
+
+    match db {
+        None => {
+            // Nothing is mirrored yet; register a throwaway realm so the
+            // projection counts below have something to be zero for, rather
+            // than being printed as an unexplained blank.
+            let store = Store::open_in_memory().map_err(runtime)?;
+            let realm = RealmId::parse("0000000000000000").map_err(runtime)?;
+            store
+                .register_realm(&realm, "empty replica", Utc::now())
+                .map_err(runtime)?;
+
+            print_foundations(store.schema_version().map_err(runtime)?);
+
+            let projected: i64 = PROJECTED_TABLES
+                .iter()
+                .map(|table| store.count_projected(&realm, *table).unwrap_or(0))
+                .sum();
+            println!("  projection (§3.2)");
+            println!("    tables       : {}", PROJECTED_TABLES.len());
+            println!("    rows         : {projected}");
+            println!("    rebuilt from : entities.raw_json, no Intuit round-trip");
+            println!();
+            println!("  replica: in-memory (no --db given)");
+        }
+        Some(path) => {
+            let store = Store::open(&path).map_err(runtime)?;
+            print_foundations(store.schema_version().map_err(runtime)?);
+
+            let realms = store.list_realms().map_err(runtime)?;
+            println!("  replica           : {}", path.display());
+            println!("  realms registered : {}", realms.len());
+            println!();
+
+            if realms.is_empty() {
+                println!(
+                    "  (none — run `qbo-local init --db {} --realm ID --name \"Display Name\"`)",
+                    path.display()
+                );
+                println!();
+            }
+            for realm in &realms {
+                print_realm_sync_status(&store, realm)?;
+            }
+        }
+    }
+
+    print_token_status(config)?;
+
+    println!("  writes: disabled for every realm until explicitly enabled");
+    println!("  generated at {}", Utc::now().to_rfc3339());
+    Ok(())
+}
+
+/// Whether each configured realm is authorised: which store, and for the
+/// current generation its fingerprint and expiry times. Never a token. Runs
+/// when `--config` is given, or silently when the default config exists.
+fn print_token_status(config: Option<&Path>) -> Result<(), CommandError> {
+    let path = match config {
+        Some(path) => path.to_path_buf(),
+        None if Path::new(DEFAULT_CONFIG_PATH).exists() => PathBuf::from(DEFAULT_CONFIG_PATH),
+        None => return Ok(()),
+    };
+    let config = LocalConfig::load(&path).map_err(runtime)?;
+    let (store, description) = open_token_store(&config)?;
+    let now = Utc::now();
+    println!("  tokens ({description})");
+    for configured in &config.realms {
+        let realm = config.realm(&configured.id).map_err(runtime)?;
+        match store.load(&realm).map_err(runtime)? {
+            None => println!("    {realm} : NOT AUTHORISED (no tokens)"),
+            Some(generations) => {
+                let state = match generations.newest_usable(now) {
+                    Ok(_) => "authorised",
+                    Err(_) => "LOCKED OUT (every refresh token expired)",
+                };
+                let current = &generations.current;
+                println!("    {realm} : {state}");
+                println!("      refresh token     : {}", current.fingerprint());
+                println!(
+                    "      access expires    : {}",
+                    current.access_expires_at().to_rfc3339()
+                );
+                println!(
+                    "      refresh expires   : {}",
+                    current.refresh_expires_at().to_rfc3339()
+                );
+                println!(
+                    "      generations kept  : {}",
+                    1 + generations.previous.len()
+                );
+            }
+        }
+    }
+    println!();
+    Ok(())
+}
+
+fn print_foundations(schema_version: i64) {
+    println!("  replica schema version : {schema_version}");
     println!("  latest migration       : {}", latest_version());
     println!();
 
-    let masters = EntityType::ALL.iter().filter(|e| e.tier() == SyncTier::Masters).count();
-    let documents = EntityType::ALL.iter().filter(|e| e.tier() == SyncTier::Documents).count();
-    let peripheral = EntityType::ALL.iter().filter(|e| e.tier() == SyncTier::Peripheral).count();
+    let masters = EntityType::ALL
+        .iter()
+        .filter(|e| e.tier() == SyncTier::Masters)
+        .count();
+    let documents = EntityType::ALL
+        .iter()
+        .filter(|e| e.tier() == SyncTier::Documents)
+        .count();
+    let peripheral = EntityType::ALL
+        .iter()
+        .filter(|e| e.tier() == SyncTier::Peripheral)
+        .count();
 
     println!("  entity types           : {} total", EntityType::ALL.len());
     println!("    masters (M0)         : {masters}");
@@ -44,31 +1191,1545 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("    peripheral (later)   : {peripheral}");
     println!();
 
+    let limits = RealmLimits::default();
     println!("  rate budgets per realm");
-    println!("    general              : {}/min", limits.general.refill_per_minute);
-    println!("    batch                : {}/min", limits.batch.refill_per_minute);
-    println!("    reports              : {}/min", limits.reports.refill_per_minute);
+    println!(
+        "    general              : {}/min",
+        limits.general.refill_per_minute
+    );
+    println!(
+        "    batch                : {}/min",
+        limits.batch.refill_per_minute
+    );
+    println!(
+        "    reports              : {}/min",
+        limits.reports.refill_per_minute
+    );
     println!("    max concurrent       : {}", limits.max_concurrent);
     println!();
 
     println!("  cdc lookback (documented) : {CDC_LOOKBACK_DAYS} days");
     println!("  cdc cursor max age (ours) : {DEFAULT_CDC_MAX_AGE_DAYS} days");
     println!();
-    // An empty replica: the interesting figure is that these are all derived,
-    // so every one of them can be thrown away and rebuilt from `entities`.
-    let projected: i64 = PROJECTED_TABLES
-        .iter()
-        .map(|table| store.count_projected(&realm, *table).unwrap_or(0))
-        .sum();
+}
 
-    println!("  projection (§3.2)");
-    println!("    tables       : {}", PROJECTED_TABLES.len());
-    println!("    rows         : {projected}");
-    println!("    rebuilt from : entities.raw_json, no Intuit round-trip");
+/// [`qbo_local::store::query::SyncStatus`] for one realm, as a small table —
+/// `DESIGN.md` §6.6's "last successful sync per realm, always visible", on a
+/// terminal instead of in the chrome.
+fn print_realm_sync_status(store: &Store, realm: &RealmSummary) -> Result<(), CommandError> {
+    let status = store.sync_status(&realm.realm_id).map_err(runtime)?;
+
+    println!("  realm {} — {}", realm.realm_id, realm.display_name);
+    println!("    write enabled     : {}", status.write_enabled);
+    println!("    quarantined total : {}", status.quarantined_total);
+    println!(
+        "    {:<14} {:>9} {:>26} {:>26}",
+        "entity", "mirrored", "last cdc cursor", "last full sweep"
+    );
+    for entity in &status.entities {
+        println!(
+            "    {:<14} {:>9} {:>26} {:>26}",
+            entity.entity_type.as_str(),
+            entity.mirrored,
+            entity
+                .last_cdc_cursor
+                .map(|at| at.to_rfc3339())
+                .unwrap_or_else(|| "-".into()),
+            entity
+                .last_full_sweep
+                .map(|at| at.to_rfc3339())
+                .unwrap_or_else(|| "-".into()),
+        );
+    }
     println!();
+    Ok(())
+}
 
-    println!("  writes: disabled for every realm until explicitly enabled");
-    println!("  generated at {}", Utc::now().to_rfc3339());
+// -- init -----------------------------------------------------------------
+
+fn run_init(db: &Path, realm: &RealmId, name: &str) -> Result<(), CommandError> {
+    let store = Store::open(db).map_err(runtime)?;
+    // `register_realm` is `ON CONFLICT ... DO UPDATE`, so registering an
+    // existing realm is not an error — it just refreshes the display name.
+    store
+        .register_realm(realm, name, Utc::now())
+        .map_err(runtime)?;
+    println!("registered realm {realm} ({name:?}) in {}", db.display());
+    Ok(())
+}
+
+// -- auth -------------------------------------------------------------------
+
+/// Run the OAuth loopback flow for one realm and save generation zero
+/// through the configured token store ([`open_token_store`]: the keychain on
+/// macOS, `FileTokenStore` elsewhere). `HANDOFF.md` §2.1, §2.2.
+fn run_auth(
+    realm: &RealmId,
+    port: Option<u16>,
+    config_path: Option<&Path>,
+) -> Result<(), CommandError> {
+    let path = config_path.unwrap_or(Path::new(DEFAULT_CONFIG_PATH));
+    let config = LocalConfig::load(path).map_err(runtime)?;
+    let secret = config.client_secret().map_err(runtime)?;
+    let port = port.unwrap_or(config.intuit.redirect_port);
+    let redirect_uri = format!("http://localhost:{port}/callback");
+    let oauth_config = OAuthConfig::intuit(config.intuit.client_id.clone(), secret, redirect_uri);
+
+    let state = Uuid::now_v7().to_string();
+    println!("Open this URL to authorize qbo-local for realm {realm}:\n");
+    println!("  {}\n", oauth_config.authorize_url(&state));
+    println!("Waiting for the redirect on http://localhost:{port}/callback ...");
+
+    let auth_code = oauth::run_loopback(port, Duration::from_secs(300)).map_err(runtime)?;
+    if auth_code.state != state {
+        return Err(CommandError::Runtime(
+            "state mismatch on the OAuth callback (possible CSRF) — aborting without saving anything".to_string(),
+        ));
+    }
+    if !auth_code.realm_id.is_empty() && auth_code.realm_id != realm.as_str() {
+        eprintln!(
+            "warning: the callback's realmId ({}) does not match --realm {realm}; saving under --realm as given",
+            auth_code.realm_id
+        );
+    }
+
+    let agent = ureq::AgentBuilder::new().build();
+    let token_set =
+        oauth::exchange_code(&oauth_config, &auth_code.code, &agent).map_err(runtime)?;
+
+    let generations = TokenGenerations::new(realm.clone(), token_set);
+    let (store, description) = open_token_store(&config)?;
+    store.save(&generations).map_err(runtime)?;
+
+    println!(
+        "Saved generation zero for realm {realm} ({}) to the {description}",
+        generations.current.fingerprint()
+    );
+    Ok(())
+}
+
+// -- import-token -------------------------------------------------------------
+
+/// Import a refresh token obtained elsewhere for this same Intuit app — the
+/// OAuth Playground, or another tool's store — as generation zero
+/// (`HANDOFF.md` §0, `ROADMAP.md` decision 4).
+///
+/// The token is read from stdin so it never appears in argv, shell history
+/// or `ps`. It is exchanged once straight away: that proves it is live for
+/// this client id and yields a complete [`TokenSet`] (access token and both
+/// expiries) rather than a half-filled one. **The exchange rotates it** — if
+/// another tool still holds the same refresh token, that tool's copy goes
+/// stale on Intuit's schedule, so import a token minted for qbo-local, not a
+/// shared one.
+fn run_import_token(
+    realm: &RealmId,
+    config_path: Option<&Path>,
+    force: bool,
+) -> Result<(), CommandError> {
+    let path = config_path.unwrap_or(Path::new(DEFAULT_CONFIG_PATH));
+    let config = LocalConfig::load(path).map_err(runtime)?;
+    config.realm(realm.as_str()).map_err(runtime)?;
+    let (store, description) = open_token_store(&config)?;
+    if !force && store.load(realm).map_err(runtime)?.is_some() {
+        return Err(CommandError::Runtime(format!(
+            "realm {realm} already has tokens in the {description}; pass --force to replace them"
+        )));
+    }
+
+    let mut line = String::new();
+    std::io::stdin()
+        .lock()
+        .read_line(&mut line)
+        .map_err(runtime)?;
+    let refresh_token = line.trim();
+    if refresh_token.is_empty() {
+        return Err(CommandError::Runtime(
+            "no refresh token on stdin".to_string(),
+        ));
+    }
+
+    let secret = config.client_secret().map_err(runtime)?;
+    let redirect_uri = format!("http://localhost:{}/callback", config.intuit.redirect_port);
+    let oauth_config = OAuthConfig::intuit(config.intuit.client_id.clone(), secret, redirect_uri);
+    let agent = ureq::AgentBuilder::new().build();
+    let token_set = oauth::refresh(&oauth_config, refresh_token, &agent).map_err(runtime)?;
+
+    let generations = TokenGenerations::new(realm.clone(), token_set);
+    store.save(&generations).map_err(runtime)?;
+    println!(
+        "Imported generation zero for realm {realm} ({}) into the {description}; refresh expires {}",
+        generations.current.fingerprint(),
+        generations.current.refresh_expires_at().to_rfc3339()
+    );
+    Ok(())
+}
+
+// -- sweep ------------------------------------------------------------------
+
+fn run_sweep(
+    db: &Path,
+    realm: &RealmId,
+    mock: bool,
+    live: bool,
+    config: Option<&Path>,
+) -> Result<(), CommandError> {
+    match (mock, live) {
+        (true, _) => run_sweep_with_client(db, realm, MockQbo::new(Utc::now())),
+        (false, true) => run_sweep_with_client(db, realm, build_http_client(config, realm)?),
+        (false, false) => Err(CommandError::NoClientSelected),
+    }
+}
+
+fn run_sweep_with_client<C: QboClient>(
+    db: &Path,
+    realm: &RealmId,
+    client: C,
+) -> Result<(), CommandError> {
+    let store = Store::open(db).map_err(runtime)?;
+    let now = Utc::now();
+    let mut reconciler = Reconciler::new(client, ReconcileOptions::default(), now);
+    let report = reconciler
+        .sweep_realm(&store, realm, EntityType::m0_scope(), now)
+        .map_err(runtime)?;
+
+    print_reconcile_report(&report);
+    Ok(())
+}
+
+fn print_reconcile_report(report: &ReconcileReport) {
+    println!(
+        "{:<14} {:>8} {:>8} {:>9} {:>7} {:>7} {:>8} {:>12} {:>9}",
+        "entity",
+        "remote",
+        "local",
+        "missing",
+        "stale",
+        "extra",
+        "healed",
+        "quarantined",
+        "requests"
+    );
+    for entity in &report.entities {
+        println!(
+            "{:<14} {:>8} {:>8} {:>9} {:>7} {:>7} {:>8} {:>12} {:>9}",
+            entity.entity_type.as_str(),
+            entity.checked_remote,
+            entity.checked_local,
+            entity.missing.len(),
+            entity.stale.len(),
+            entity.extra.len(),
+            entity.healed,
+            entity.quarantined,
+            entity.requests,
+        );
+    }
+    println!();
+    println!("orphaned document lines : {}", report.orphaned_lines.len());
+    println!("clean                   : {}", report.is_clean());
+}
+
+// -- snapshot -----------------------------------------------------------
+
+fn run_snapshot(db: &Path, dir: &Path, keep: Option<usize>) -> Result<(), CommandError> {
+    let store = Store::open(db).map_err(runtime)?;
+    let policy = SnapshotPolicy {
+        directory: dir.to_path_buf(),
+        keep: keep.unwrap_or(DEFAULT_SNAPSHOT_KEEP),
+    };
+    let report = store.take_snapshot(&policy, Utc::now()).map_err(runtime)?;
+
+    println!("snapshot : {}", report.path.display());
+    println!("pruned   : {}", report.pruned.len());
+    for path in &report.pruned {
+        println!("  {}", path.display());
+    }
+    Ok(())
+}
+
+// -- record -----------------------------------------------------------------
+
+/// `HANDOFF.md` §2.6: record every response a sync makes into `dir` as
+/// offline fixtures, via [`RecordingQbo`].
+///
+/// `--live` is deliberately its own arm rather than falling through to the
+/// `!mock` case below, even though both exit the same way today: the day
+/// `HttpQboClient` (`HANDOFF.md` §2.3) lands, this arm is the one line that
+/// changes, and every other subcommand here that will eventually take a live
+/// client shares the same shape.
+fn run_record(
+    db: &Path,
+    realm: &RealmId,
+    dir: &Path,
+    mock: bool,
+    live: bool,
+    config: Option<&Path>,
+) -> Result<(), CommandError> {
+    // The parser already rejects --mock together with --live.
+    match (mock, live) {
+        (true, _) => record_with_client(db, realm, dir, MockQbo::new(Utc::now())),
+        (false, true) => record_with_client(db, realm, dir, build_http_client(config, realm)?),
+        (false, false) => Err(CommandError::NoClientSelected),
+    }
+}
+
+/// `HANDOFF.md` §2.6: sweep the realm through a [`RecordingQbo`] wrapped
+/// around whichever client was chosen, so the same code path records from the
+/// mock (proving the plumbing) and from live QBO (the real fixtures).
+fn record_with_client<C: QboClient>(
+    db: &Path,
+    realm: &RealmId,
+    dir: &Path,
+    client: C,
+) -> Result<(), CommandError> {
+    let store = Store::open(db).map_err(runtime)?;
+    let now = Utc::now();
+    let recorder = RecordingQbo::new(client, dir);
+    let mut driver = SyncDriver::new(recorder, SyncOptions::default(), now);
+    let entity_types: Vec<EntityType> = EntityType::m0_scope().collect();
+    let report = driver
+        .sync_realm(&store, realm, &entity_types, now)
+        .map_err(runtime)?;
+
+    print_sync_report_table(&report);
+    println!();
+    println!("recorded to      : {}", dir.display());
+    println!(
+        "manifest entries : {}",
+        driver.client_mut().manifest().len()
+    );
+    Ok(())
+}
+
+// -- replay -------------------------------------------------------------
+
+/// `HANDOFF.md` §2.6: sync a realm entirely from fixtures previously recorded
+/// into `dir`, via [`FixtureQbo`] — no network involved at any point.
+fn run_replay(db: &Path, realm: &RealmId, dir: &Path) -> Result<(), CommandError> {
+    let store = Store::open(db).map_err(runtime)?;
+    let now = Utc::now();
+    let client = FixtureQbo::new(dir);
+    let mut driver = SyncDriver::new(client, SyncOptions::default(), now);
+    let entity_types: Vec<EntityType> = EntityType::m0_scope().collect();
+    let report = driver
+        .sync_realm(&store, realm, &entity_types, now)
+        .map_err(runtime)?;
+
+    print_sync_report_table(&report);
+    Ok(())
+}
+
+// -- sales orders (D42) -----------------------------------------------------
+
+/// Apply one sales-order feed to the replica. The realm must already be
+/// registered (`init`); the feed is read in full and checked before anything
+/// is written.
+fn run_sync_sales_orders(db: &Path, realm: &RealmId, feed: &str) -> Result<(), CommandError> {
+    let parsed = sales_orders::fetch_feed(feed, realm).map_err(runtime)?;
+    let store = Store::open(db).map_err(runtime)?;
+    let summary = store
+        .apply_sales_order_feed(realm, &parsed, feed, Utc::now())
+        .map_err(runtime)?;
+    println!(
+        "sales-order feed captured {}",
+        parsed.captured_at.to_rfc3339()
+    );
+    println!("  complete  : {}", parsed.complete);
+    println!("  seen      : {}", summary.seen);
+    println!("  inserted  : {}", summary.inserted);
+    println!("  updated   : {}", summary.updated);
+    println!("  unchanged : {}", summary.unchanged);
+    println!("  deleted   : {}", summary.deleted);
+    println!("  open now  : {}", summary.open);
+    Ok(())
+}
+
+fn run_sales_orders(db: &Path, realm: &RealmId, all: bool) -> Result<(), CommandError> {
+    let store = Store::open_read_only(db).map_err(runtime)?;
+    match store.sales_order_snapshot(realm).map_err(runtime)? {
+        Some(snapshot) => println!(
+            "last feed: captured {}, synced {}, {} orders{}",
+            snapshot.captured_at.to_rfc3339(),
+            snapshot.synced_at.to_rfc3339(),
+            snapshot.order_count,
+            if snapshot.complete { "" } else { " (partial)" }
+        ),
+        None => {
+            println!("no sales-order feed has been applied to realm {realm}");
+            return Ok(());
+        }
+    }
+    let orders = store.list_sales_orders(realm, !all).map_err(runtime)?;
+    println!(
+        "{:<8} {:<10} {:<10} {:>12} {:>12}  {:<18} customer",
+        "number", "date", "id", "total", "to invoice", "invoice status"
+    );
+    for order in &orders {
+        println!(
+            "{:<8} {:<10} {:<10} {:>12} {:>12}  {:<18} {}",
+            order.doc_number.as_deref().unwrap_or("-"),
+            order.txn_date,
+            order.qbo_id,
+            money_text(order.total),
+            money_text(order.open_amount),
+            order.invoice_status.as_deref().unwrap_or("-"),
+            order.customer_id.as_deref().unwrap_or("-"),
+        );
+    }
+    println!(
+        "{} {}",
+        orders.len(),
+        if all {
+            "sales orders"
+        } else {
+            "open sales orders"
+        }
+    );
+    Ok(())
+}
+
+fn money_text(money: ledger_core::Money) -> String {
+    let minor = money.minor();
+    let sign = if minor < 0 { "-" } else { "" };
+    format!("{sign}{}.{:02}", (minor / 100).abs(), (minor % 100).abs())
+}
+
+// -- slice ------------------------------------------------------------------
+
+/// `HANDOFF.md` §2.6, D31: record a small, referentially closed slice of the
+/// replica into `dir`, ready for `tools/scrub-fixtures.py`. Opens the replica
+/// read-only and touches no network.
+fn run_slice(
+    db: &Path,
+    realm: &RealmId,
+    dir: &Path,
+    options: &SliceOptions,
+) -> Result<(), CommandError> {
+    let store = Store::open_read_only(db).map_err(runtime)?;
+    let report = slice::slice_realm(&store, realm, options).map_err(runtime)?;
+    let entries = slice::record_slice(&report, realm, dir, Utc::now()).map_err(runtime)?;
+
+    println!("replica records  : {}", report.replica_records);
+    println!("slice records    : {}", report.entities.len());
+    for entity_type in EntityType::m0_scope() {
+        let count = report.count(entity_type);
+        if count > 0 {
+            println!("  {:<15}{count}", entity_type.as_str());
+        }
+    }
+    println!("seed contacts    : {}", report.seed_contacts.len());
+    println!(
+        "pruned links     : {} (to deposits outside the slice)",
+        report.pruned_links
+    );
+    println!(
+        "unresolvable refs: {} (targets the replica does not hold)",
+        report.unresolvable_refs
+    );
+    println!("deny-list names  : {}", report.deny_names.len());
+    println!(
+        "recorded to      : {} ({entries} manifest entries)",
+        dir.display()
+    );
+    println!();
+    println!("This is real data. Scrub it before anything leaves .local/ — see");
+    println!("tools/make-real-fixture.sh and HANDOFF.md §2.6.");
+    Ok(())
+}
+
+// -- report -----------------------------------------------------------------
+
+/// `LEDGER-DESIGN.md` §6, §7: one Reports API call, parsed and written as CSV
+/// to `--out`. `--live`/`--replay` choose the client exactly as
+/// `run_record`/`run_replay` above do; `--record DIR` additionally wraps
+/// whichever client in [`RecordingQbo`] so a live pull is captured for later
+/// replay in the same call that uses it.
+#[allow(clippy::too_many_arguments)]
+fn run_report(
+    realm: &RealmId,
+    name: ReportKind,
+    as_of: NaiveDate,
+    start: Option<NaiveDate>,
+    out: &Path,
+    live: bool,
+    replay: Option<&Path>,
+    record: Option<&Path>,
+    config: Option<&Path>,
+) -> Result<(), CommandError> {
+    match (live, replay, record) {
+        (true, None, None) => report_with_client(
+            build_http_client(config, realm)?,
+            realm,
+            name,
+            as_of,
+            start,
+            out,
+        ),
+        (true, None, Some(dir)) => report_with_client(
+            RecordingQbo::new(build_http_client(config, realm)?, dir),
+            realm,
+            name,
+            as_of,
+            start,
+            out,
+        ),
+        (false, Some(replay_dir), None) => {
+            report_with_client(FixtureQbo::new(replay_dir), realm, name, as_of, start, out)
+        }
+        (false, Some(replay_dir), Some(dir)) => report_with_client(
+            RecordingQbo::new(FixtureQbo::new(replay_dir), dir),
+            realm,
+            name,
+            as_of,
+            start,
+            out,
+        ),
+        _ => Err(CommandError::NoReportSource),
+    }
+}
+
+fn report_params(name: ReportKind, as_of: NaiveDate, start: Option<NaiveDate>) -> ReportParams {
+    match name {
+        ReportKind::TrialBalance => ReportParams {
+            start_date: start,
+            end_date: Some(as_of),
+            accounting_method: Some("Accrual".to_string()),
+            date_macro: None,
+            aging_method: None,
+        },
+        ReportKind::ArAging | ReportKind::ApAging => ReportParams {
+            start_date: start,
+            end_date: Some(as_of),
+            accounting_method: None,
+            date_macro: None,
+            aging_method: Some("Report_Date".to_string()),
+        },
+    }
+}
+
+fn report_with_client<C: QboClient>(
+    mut client: C,
+    realm: &RealmId,
+    name: ReportKind,
+    as_of: NaiveDate,
+    start: Option<NaiveDate>,
+    out: &Path,
+) -> Result<(), CommandError> {
+    let params = report_params(name, as_of, start);
+    let value = client
+        .report(realm, name.report_name(), &params)
+        .map_err(runtime)?;
+
+    let csv = match name {
+        ReportKind::TrialBalance => {
+            let rows = reports::parse_trial_balance(&value).map_err(runtime)?;
+            reports::trial_balance_csv(&rows)
+        }
+        ReportKind::ArAging | ReportKind::ApAging => {
+            let rows = reports::parse_aging(&value).map_err(runtime)?;
+            reports::aging_csv(&rows)
+        }
+    };
+    std::fs::write(out, &csv).map_err(runtime)?;
+    println!(
+        "wrote {} ({} bytes, {} rows)",
+        out.display(),
+        csv.len(),
+        csv.lines().count().saturating_sub(1),
+    );
+    Ok(())
+}
+
+// -- snapshots ----------------------------------------------------------
+
+/// `LEDGER-DESIGN.md` §6: a year-end `TrialBalance` per year into
+/// `tb-YYYY.csv`, for `ledger boundary --snapshots DIR` to read.
+#[allow(clippy::too_many_arguments)]
+fn run_snapshots(
+    realm: &RealmId,
+    from_year: i32,
+    to_year: i32,
+    dir: &Path,
+    live: bool,
+    replay: Option<&Path>,
+    record: Option<&Path>,
+    config: Option<&Path>,
+) -> Result<(), CommandError> {
+    match (live, replay, record) {
+        (true, None, None) => snapshots_with_client(
+            build_http_client(config, realm)?,
+            realm,
+            from_year,
+            to_year,
+            dir,
+        ),
+        (true, None, Some(rec_dir)) => snapshots_with_client(
+            RecordingQbo::new(build_http_client(config, realm)?, rec_dir),
+            realm,
+            from_year,
+            to_year,
+            dir,
+        ),
+        (false, Some(replay_dir), None) => {
+            snapshots_with_client(FixtureQbo::new(replay_dir), realm, from_year, to_year, dir)
+        }
+        (false, Some(replay_dir), Some(rec_dir)) => snapshots_with_client(
+            RecordingQbo::new(FixtureQbo::new(replay_dir), rec_dir),
+            realm,
+            from_year,
+            to_year,
+            dir,
+        ),
+        _ => Err(CommandError::NoReportSource),
+    }
+}
+
+fn snapshots_with_client<C: QboClient>(
+    mut client: C,
+    realm: &RealmId,
+    from_year: i32,
+    to_year: i32,
+    dir: &Path,
+) -> Result<(), CommandError> {
+    let written = reports::write_year_end_snapshots(&mut client, realm, from_year..=to_year, dir)
+        .map_err(runtime)?;
+    for path in &written {
+        println!("wrote {}", path.display());
+    }
+    Ok(())
+}
+
+// -- daemon -----------------------------------------------------------------
+
+#[allow(clippy::too_many_arguments)]
+fn run_daemon(
+    db: &Path,
+    realm: &RealmId,
+    focused_secs: Option<u64>,
+    idle_secs: Option<u64>,
+    snapshot_dir: Option<PathBuf>,
+    keep: Option<usize>,
+    snapshot_hour_utc: Option<u32>,
+    once: bool,
+    mock: bool,
+    live: bool,
+    config: Option<&Path>,
+) -> Result<(), CommandError> {
+    let clock = SystemClock;
+    let default_cadence = Cadence::default();
+    let cadence = Cadence {
+        focused: focused_secs
+            .map(Duration::from_secs)
+            .unwrap_or(default_cadence.focused),
+        idle: idle_secs
+            .map(Duration::from_secs)
+            .unwrap_or(default_cadence.idle),
+    };
+    let snapshot = match (snapshot_dir, keep) {
+        (Some(directory), Some(keep)) => Some(SnapshotPolicy { directory, keep }),
+        _ => None,
+    };
+    let options = DaemonOptions {
+        cadence,
+        sync: SyncOptions::default(),
+        snapshot,
+        snapshot_hour_utc: snapshot_hour_utc.unwrap_or(DaemonOptions::default().snapshot_hour_utc),
+    };
+
+    match (mock, live) {
+        (true, _) => {
+            run_daemon_with_client(db, realm, clock, options, once, MockQbo::new(clock.now()))
+        }
+        (false, true) => {
+            let client = build_http_client(config, realm)?;
+            run_daemon_with_client(db, realm, clock, options, once, client)
+        }
+        (false, false) => Err(CommandError::NoClientSelected),
+    }
+}
+
+fn run_daemon_with_client<C: QboClient>(
+    db: &Path,
+    realm: &RealmId,
+    clock: SystemClock,
+    options: DaemonOptions,
+    once: bool,
+    client: C,
+) -> Result<(), CommandError> {
+    let store = Store::open(db).map_err(runtime)?;
+    let mut daemon = Daemon::new(client, clock, options);
+
+    if once {
+        let tick = daemon.tick(&store, realm);
+        print_tick_line(&tick);
+        if let Ok(report) = &tick.report {
+            print_sync_report_table(report);
+        }
+        println!("next delay: {}s", tick.next_delay.as_secs());
+        return Ok(());
+    }
+
+    println!(
+        "daemon running for realm {realm} against {} — Ctrl-C is safe (every write is \
+         transactional); type \"stop\" and press Enter on stdin for a clean exit",
+        db.display()
+    );
+
+    let stop = Arc::new(AtomicBool::new(false));
+    spawn_stdin_stop_watcher(Arc::clone(&stop));
+    daemon.run(&store, realm, &stop, print_tick_line);
 
     Ok(())
+}
+
+/// One line per tick: timestamp, path per entity summarised, next delay, and
+/// the snapshot path when one was taken.
+fn print_tick_line(tick: &Tick) {
+    let path_summary = match &tick.report {
+        Ok(report) => report
+            .entities
+            .iter()
+            .map(|entity| {
+                format!(
+                    "{}={}",
+                    entity.entity_type.as_str(),
+                    sync_path_label(&entity.path)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" "),
+        Err(error) => format!("error={error}"),
+    };
+    let snapshot = match &tick.snapshot {
+        None => "-".to_string(),
+        Some(Ok(report)) => report.path.display().to_string(),
+        Some(Err(error)) => format!("snapshot-error={error}"),
+    };
+
+    println!(
+        "{} next_delay={}s snapshot={snapshot} {path_summary}",
+        Utc::now().to_rfc3339(),
+        tick.next_delay.as_secs(),
+    );
+}
+
+fn sync_path_label(path: &SyncPath) -> &'static str {
+    match path {
+        SyncPath::FullSweep { .. } => "sweep",
+        SyncPath::Cdc { .. } => "cdc",
+        SyncPath::CdcThenBackfill { .. } => "backfill",
+    }
+}
+
+fn print_sync_report_table(report: &SyncReport) {
+    println!(
+        "{:<14} {:<10} {:>9} {:>10} {:>12} {:>9}",
+        "entity", "path", "mirrored", "projected", "quarantined", "requests"
+    );
+    for entity in &report.entities {
+        println!(
+            "{:<14} {:<10} {:>9} {:>10} {:>12} {:>9}",
+            entity.entity_type.as_str(),
+            sync_path_label(&entity.path),
+            entity.mirrored,
+            entity.projected,
+            entity.quarantined,
+            entity.requests,
+        );
+    }
+}
+
+/// Watches stdin for a line reading "stop" and sets `stop` when one arrives.
+/// Ctrl-C on the foreground process is the other, simpler way out — safe
+/// because every write this daemon makes is transactional, so the worst a
+/// kill loses is the in-flight tick, never a half-written one.
+fn spawn_stdin_stop_watcher(stop: Arc<AtomicBool>) {
+    std::thread::spawn(move || {
+        if stdin_asks_to_stop(std::io::stdin().lock()) {
+            stop.store(true, Ordering::Relaxed);
+        }
+    });
+}
+
+/// True once a line reading "stop" arrives; false when the input ends or
+/// errors first. EOF is not a stop request: a daemon started in the
+/// background (`nohup`, launchd, a non-interactive shell) has stdin on
+/// /dev/null and would otherwise exit after its first tick (M0, 14 Oct 2026).
+fn stdin_asks_to_stop(mut input: impl std::io::BufRead) -> bool {
+    let mut line = String::new();
+    loop {
+        line.clear();
+        match input.read_line(&mut line) {
+            Ok(0) | Err(_) => return false,
+            Ok(_) if line.trim() == "stop" => return true,
+            Ok(_) => continue,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stdin_at_eof_does_not_stop_the_daemon() {
+        assert!(!stdin_asks_to_stop(std::io::empty()));
+        assert!(!stdin_asks_to_stop("status\n".as_bytes()));
+    }
+
+    #[test]
+    fn a_stop_line_stops_the_daemon() {
+        assert!(stdin_asks_to_stop("\nhello\n  stop  \n".as_bytes()));
+    }
+
+    fn args(raw: &[&str]) -> Vec<String> {
+        raw.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn no_arguments_is_a_usage_error() {
+        assert_eq!(parse(&[]), Err(UsageError::usage()));
+    }
+
+    #[test]
+    fn help_is_a_usage_error_with_no_reason() {
+        assert_eq!(parse(&args(&["--help"])), Err(UsageError::usage()));
+        assert_eq!(parse(&args(&["-h"])), Err(UsageError::usage()));
+    }
+
+    #[test]
+    fn an_unknown_subcommand_is_refused() {
+        let result = parse(&args(&["frobnicate"]));
+        assert_eq!(result, Err(UsageError::unknown_subcommand("frobnicate")));
+    }
+
+    #[test]
+    fn status_defaults_to_no_db() {
+        assert_eq!(
+            parse(&args(&["status"])),
+            Ok(Command::Status {
+                db: None,
+                config: None
+            })
+        );
+    }
+
+    #[test]
+    fn status_takes_an_optional_db() {
+        assert_eq!(
+            parse(&args(&["status", "--db", "replica.db"])),
+            Ok(Command::Status {
+                db: Some(PathBuf::from("replica.db")),
+                config: None
+            })
+        );
+    }
+
+    #[test]
+    fn import_token_needs_a_realm_and_takes_force() {
+        assert_eq!(
+            parse(&args(&["import-token", "--realm", "123", "--force"])),
+            Ok(Command::ImportToken {
+                realm: RealmId::parse("123").unwrap(),
+                config: None,
+                force: true
+            })
+        );
+        assert!(parse(&args(&["import-token"])).is_err());
+        assert!(parse(&args(&["import-token", "--realm", "1", "--token", "x"])).is_err());
+    }
+
+    #[test]
+    fn status_rejects_an_unknown_flag() {
+        assert_eq!(
+            parse(&args(&["status", "--bogus"])),
+            Err(UsageError::unknown_flag("--bogus"))
+        );
+    }
+
+    #[test]
+    fn init_requires_db_realm_and_name() {
+        assert_eq!(
+            parse(&args(&[
+                "init",
+                "--realm",
+                "1234567890123456",
+                "--name",
+                "Aquamentor"
+            ])),
+            Err(UsageError::missing_flag("--db"))
+        );
+        assert_eq!(
+            parse(&args(&["init", "--db", "r.db", "--name", "Aquamentor"])),
+            Err(UsageError::missing_flag("--realm"))
+        );
+        assert_eq!(
+            parse(&args(&[
+                "init",
+                "--db",
+                "r.db",
+                "--realm",
+                "1234567890123456"
+            ])),
+            Err(UsageError::missing_flag("--name"))
+        );
+    }
+
+    #[test]
+    fn init_parses_a_complete_invocation() {
+        let parsed = parse(&args(&[
+            "init",
+            "--db",
+            "replica.db",
+            "--realm",
+            "1234567890123456",
+            "--name",
+            "Aquamentor, Inc.",
+        ]))
+        .unwrap();
+        assert_eq!(
+            parsed,
+            Command::Init {
+                db: PathBuf::from("replica.db"),
+                realm: RealmId::parse("1234567890123456").unwrap(),
+                name: "Aquamentor, Inc.".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn init_rejects_a_non_numeric_realm() {
+        assert_eq!(
+            parse(&args(&[
+                "init",
+                "--db",
+                "r.db",
+                "--realm",
+                "not-a-realm",
+                "--name",
+                "x"
+            ])),
+            Err(UsageError::invalid_value("--realm", "not-a-realm"))
+        );
+    }
+
+    #[test]
+    fn daemon_requires_db_and_realm() {
+        assert_eq!(
+            parse(&args(&["daemon", "--realm", "1234567890123456"])),
+            Err(UsageError::missing_flag("--db"))
+        );
+        assert_eq!(
+            parse(&args(&["daemon", "--db", "r.db"])),
+            Err(UsageError::missing_flag("--realm"))
+        );
+    }
+
+    #[test]
+    fn daemon_defaults_once_and_mock_to_false() {
+        let parsed = parse(&args(&[
+            "daemon",
+            "--db",
+            "r.db",
+            "--realm",
+            "1234567890123456",
+        ]))
+        .unwrap();
+        match parsed {
+            Command::Daemon { once, mock, .. } => {
+                assert!(!once);
+                assert!(!mock);
+            }
+            other => panic!("expected Command::Daemon, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn daemon_toggles_once_and_mock() {
+        let parsed = parse(&args(&[
+            "daemon",
+            "--db",
+            "r.db",
+            "--realm",
+            "1234567890123456",
+            "--once",
+            "--mock",
+        ]))
+        .unwrap();
+        match parsed {
+            Command::Daemon { once, mock, .. } => {
+                assert!(once);
+                assert!(mock);
+            }
+            other => panic!("expected Command::Daemon, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn daemon_parses_cadence_and_snapshot_flags() {
+        let parsed = parse(&args(&[
+            "daemon",
+            "--db",
+            "r.db",
+            "--realm",
+            "1234567890123456",
+            "--focused-secs",
+            "5",
+            "--idle-secs",
+            "120",
+            "--snapshot-dir",
+            "snaps",
+            "--keep",
+            "3",
+            "--snapshot-hour-utc",
+            "9",
+        ]))
+        .unwrap();
+        assert_eq!(
+            parsed,
+            Command::Daemon {
+                db: PathBuf::from("r.db"),
+                realm: RealmId::parse("1234567890123456").unwrap(),
+                focused_secs: Some(5),
+                idle_secs: Some(120),
+                snapshot_dir: Some(PathBuf::from("snaps")),
+                keep: Some(3),
+                snapshot_hour_utc: Some(9),
+                once: false,
+                mock: false,
+                live: false,
+                config: None,
+            }
+        );
+    }
+
+    #[test]
+    fn daemon_snapshot_dir_and_keep_must_be_given_together() {
+        assert!(parse(&args(&[
+            "daemon",
+            "--db",
+            "r.db",
+            "--realm",
+            "1234567890123456",
+            "--snapshot-dir",
+            "snaps",
+        ]))
+        .is_err());
+        assert!(parse(&args(&[
+            "daemon",
+            "--db",
+            "r.db",
+            "--realm",
+            "1234567890123456",
+            "--keep",
+            "3",
+        ]))
+        .is_err());
+    }
+
+    #[test]
+    fn daemon_rejects_an_unknown_flag() {
+        assert_eq!(
+            parse(&args(&[
+                "daemon",
+                "--db",
+                "r.db",
+                "--realm",
+                "1234567890123456",
+                "--bogus"
+            ])),
+            Err(UsageError::unknown_flag("--bogus"))
+        );
+    }
+
+    #[test]
+    fn daemon_rejects_mock_and_live_together() {
+        assert!(parse(&args(&[
+            "daemon",
+            "--db",
+            "r.db",
+            "--realm",
+            "1234567890123456",
+            "--mock",
+            "--live",
+        ]))
+        .is_err());
+    }
+
+    #[test]
+    fn daemon_parses_live_with_a_config_path() {
+        let parsed = parse(&args(&[
+            "daemon",
+            "--db",
+            "r.db",
+            "--realm",
+            "1234567890123456",
+            "--live",
+            "--config",
+            "custom.toml",
+        ]))
+        .unwrap();
+        match parsed {
+            Command::Daemon {
+                live, config, mock, ..
+            } => {
+                assert!(live);
+                assert!(!mock);
+                assert_eq!(config, Some(PathBuf::from("custom.toml")));
+            }
+            other => panic!("expected Command::Daemon, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sweep_requires_db_and_realm() {
+        assert_eq!(
+            parse(&args(&["sweep", "--realm", "1234567890123456"])),
+            Err(UsageError::missing_flag("--db"))
+        );
+        assert_eq!(
+            parse(&args(&["sweep", "--db", "r.db"])),
+            Err(UsageError::missing_flag("--realm"))
+        );
+    }
+
+    #[test]
+    fn sweep_parses_with_mock() {
+        assert_eq!(
+            parse(&args(&[
+                "sweep",
+                "--db",
+                "r.db",
+                "--realm",
+                "1234567890123456",
+                "--mock"
+            ])),
+            Ok(Command::Sweep {
+                db: PathBuf::from("r.db"),
+                realm: RealmId::parse("1234567890123456").unwrap(),
+                mock: true,
+                live: false,
+                config: None,
+            })
+        );
+    }
+
+    #[test]
+    fn sweep_rejects_mock_and_live_together() {
+        assert!(parse(&args(&[
+            "sweep",
+            "--db",
+            "r.db",
+            "--realm",
+            "1234567890123456",
+            "--mock",
+            "--live",
+        ]))
+        .is_err());
+    }
+
+    #[test]
+    fn sweep_parses_live_with_a_config_path() {
+        assert_eq!(
+            parse(&args(&[
+                "sweep",
+                "--db",
+                "r.db",
+                "--realm",
+                "1234567890123456",
+                "--live",
+                "--config",
+                "custom.toml",
+            ])),
+            Ok(Command::Sweep {
+                db: PathBuf::from("r.db"),
+                realm: RealmId::parse("1234567890123456").unwrap(),
+                mock: false,
+                live: true,
+                config: Some(PathBuf::from("custom.toml")),
+            })
+        );
+    }
+
+    #[test]
+    fn auth_requires_realm() {
+        assert_eq!(
+            parse(&args(&["auth"])),
+            Err(UsageError::missing_flag("--realm"))
+        );
+    }
+
+    #[test]
+    fn auth_parses_port_and_config() {
+        assert_eq!(
+            parse(&args(&[
+                "auth",
+                "--realm",
+                "1234567890123456",
+                "--port",
+                "9999",
+                "--config",
+                "custom.toml",
+            ])),
+            Ok(Command::Auth {
+                realm: RealmId::parse("1234567890123456").unwrap(),
+                port: Some(9999),
+                config: Some(PathBuf::from("custom.toml")),
+            })
+        );
+    }
+
+    #[test]
+    fn snapshot_requires_db_and_dir() {
+        assert_eq!(
+            parse(&args(&["snapshot", "--dir", "snaps"])),
+            Err(UsageError::missing_flag("--db"))
+        );
+        assert_eq!(
+            parse(&args(&["snapshot", "--db", "r.db"])),
+            Err(UsageError::missing_flag("--dir"))
+        );
+    }
+
+    #[test]
+    fn snapshot_parses_an_optional_keep() {
+        assert_eq!(
+            parse(&args(&["snapshot", "--db", "r.db", "--dir", "snaps"])),
+            Ok(Command::Snapshot {
+                db: PathBuf::from("r.db"),
+                dir: PathBuf::from("snaps"),
+                keep: None,
+            })
+        );
+        assert_eq!(
+            parse(&args(&[
+                "snapshot", "--db", "r.db", "--dir", "snaps", "--keep", "4"
+            ])),
+            Ok(Command::Snapshot {
+                db: PathBuf::from("r.db"),
+                dir: PathBuf::from("snaps"),
+                keep: Some(4),
+            })
+        );
+    }
+
+    #[test]
+    fn record_requires_db_realm_and_dir() {
+        assert_eq!(
+            parse(&args(&[
+                "record",
+                "--realm",
+                "1234567890123456",
+                "--dir",
+                "fx"
+            ])),
+            Err(UsageError::missing_flag("--db"))
+        );
+        assert_eq!(
+            parse(&args(&["record", "--db", "r.db", "--dir", "fx"])),
+            Err(UsageError::missing_flag("--realm"))
+        );
+        assert_eq!(
+            parse(&args(&[
+                "record",
+                "--db",
+                "r.db",
+                "--realm",
+                "1234567890123456"
+            ])),
+            Err(UsageError::missing_flag("--dir"))
+        );
+    }
+
+    #[test]
+    fn record_defaults_mock_and_live_to_false() {
+        let parsed = parse(&args(&[
+            "record",
+            "--db",
+            "r.db",
+            "--realm",
+            "1234567890123456",
+            "--dir",
+            "fx",
+        ]))
+        .unwrap();
+        assert_eq!(
+            parsed,
+            Command::Record {
+                db: PathBuf::from("r.db"),
+                realm: RealmId::parse("1234567890123456").unwrap(),
+                dir: PathBuf::from("fx"),
+                mock: false,
+                live: false,
+                config: None,
+            }
+        );
+    }
+
+    #[test]
+    fn record_parses_mock() {
+        let parsed = parse(&args(&[
+            "record",
+            "--db",
+            "r.db",
+            "--realm",
+            "1234567890123456",
+            "--dir",
+            "fx",
+            "--mock",
+        ]))
+        .unwrap();
+        match parsed {
+            Command::Record { mock, live, .. } => {
+                assert!(mock);
+                assert!(!live);
+            }
+            other => panic!("expected Command::Record, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn record_rejects_mock_and_live_together() {
+        assert!(parse(&args(&[
+            "record",
+            "--db",
+            "r.db",
+            "--realm",
+            "1234567890123456",
+            "--dir",
+            "fx",
+            "--mock",
+            "--live",
+        ]))
+        .is_err());
+    }
+
+    #[test]
+    fn record_rejects_an_unknown_flag() {
+        assert_eq!(
+            parse(&args(&[
+                "record",
+                "--db",
+                "r.db",
+                "--realm",
+                "1234567890123456",
+                "--dir",
+                "fx",
+                "--bogus"
+            ])),
+            Err(UsageError::unknown_flag("--bogus"))
+        );
+    }
+
+    #[test]
+    fn replay_requires_db_realm_and_dir() {
+        assert_eq!(
+            parse(&args(&[
+                "replay",
+                "--realm",
+                "1234567890123456",
+                "--dir",
+                "fx"
+            ])),
+            Err(UsageError::missing_flag("--db"))
+        );
+        assert_eq!(
+            parse(&args(&["replay", "--db", "r.db", "--dir", "fx"])),
+            Err(UsageError::missing_flag("--realm"))
+        );
+        assert_eq!(
+            parse(&args(&[
+                "replay",
+                "--db",
+                "r.db",
+                "--realm",
+                "1234567890123456"
+            ])),
+            Err(UsageError::missing_flag("--dir"))
+        );
+    }
+
+    #[test]
+    fn replay_parses_a_complete_invocation() {
+        assert_eq!(
+            parse(&args(&[
+                "replay",
+                "--db",
+                "r.db",
+                "--realm",
+                "1234567890123456",
+                "--dir",
+                "fx",
+            ])),
+            Ok(Command::Replay {
+                db: PathBuf::from("r.db"),
+                realm: RealmId::parse("1234567890123456").unwrap(),
+                dir: PathBuf::from("fx"),
+            })
+        );
+    }
+
+    #[test]
+    fn report_parses_a_complete_invocation() {
+        assert_eq!(
+            parse(&args(&[
+                "report",
+                "--realm",
+                "1234567890123456",
+                "--name",
+                "trial-balance",
+                "--as-of",
+                "2026-09-10",
+                "--out",
+                "tb.csv",
+                "--replay",
+                "fx",
+            ])),
+            Ok(Command::Report {
+                realm: RealmId::parse("1234567890123456").unwrap(),
+                name: ReportKind::TrialBalance,
+                as_of: NaiveDate::from_ymd_opt(2026, 9, 10).unwrap(),
+                start: None,
+                out: PathBuf::from("tb.csv"),
+                live: false,
+                replay: Some(PathBuf::from("fx")),
+                record: None,
+                config: None,
+            })
+        );
+    }
+
+    #[test]
+    fn report_parses_start_live_and_record() {
+        let parsed = parse(&args(&[
+            "report",
+            "--realm",
+            "1234567890123456",
+            "--name",
+            "ar-aging",
+            "--as-of",
+            "2026-09-10",
+            "--start",
+            "2026-01-01",
+            "--out",
+            "ar.csv",
+            "--live",
+            "--record",
+            "rec",
+            "--config",
+            "conf.toml",
+        ]))
+        .unwrap();
+        assert_eq!(
+            parsed,
+            Command::Report {
+                realm: RealmId::parse("1234567890123456").unwrap(),
+                name: ReportKind::ArAging,
+                as_of: NaiveDate::from_ymd_opt(2026, 9, 10).unwrap(),
+                start: Some(NaiveDate::from_ymd_opt(2026, 1, 1).unwrap()),
+                out: PathBuf::from("ar.csv"),
+                live: true,
+                replay: None,
+                record: Some(PathBuf::from("rec")),
+                config: Some(PathBuf::from("conf.toml")),
+            }
+        );
+    }
+
+    #[test]
+    fn report_rejects_an_unknown_name() {
+        assert_eq!(
+            parse(&args(&[
+                "report",
+                "--realm",
+                "1234567890123456",
+                "--name",
+                "balance-sheet",
+                "--as-of",
+                "2026-09-10",
+                "--out",
+                "tb.csv",
+                "--replay",
+                "fx",
+            ])),
+            Err(UsageError::invalid_value("--name", "balance-sheet"))
+        );
+    }
+
+    #[test]
+    fn report_requires_exactly_one_of_live_or_replay() {
+        let base = [
+            "report",
+            "--realm",
+            "1234567890123456",
+            "--name",
+            "trial-balance",
+            "--as-of",
+            "2026-09-10",
+            "--out",
+            "tb.csv",
+        ];
+        assert!(
+            parse(&args(&base)).is_err(),
+            "neither given must be refused"
+        );
+
+        let mut both = base.to_vec();
+        both.extend(["--live", "--replay", "fx"]);
+        assert!(parse(&args(&both)).is_err(), "both given must be refused");
+    }
+
+    #[test]
+    fn snapshots_parses_a_complete_invocation() {
+        assert_eq!(
+            parse(&args(&[
+                "snapshots",
+                "--realm",
+                "1234567890123456",
+                "--from-year",
+                "2020",
+                "--to-year",
+                "2025",
+                "--dir",
+                "snaps",
+                "--replay",
+                "fx",
+            ])),
+            Ok(Command::Snapshots {
+                realm: RealmId::parse("1234567890123456").unwrap(),
+                from_year: 2020,
+                to_year: 2025,
+                dir: PathBuf::from("snaps"),
+                live: false,
+                replay: Some(PathBuf::from("fx")),
+                record: None,
+                config: None,
+            })
+        );
+    }
+
+    #[test]
+    fn snapshots_rejects_from_year_after_to_year() {
+        assert!(parse(&args(&[
+            "snapshots",
+            "--realm",
+            "1234567890123456",
+            "--from-year",
+            "2025",
+            "--to-year",
+            "2020",
+            "--dir",
+            "snaps",
+            "--replay",
+            "fx",
+        ]))
+        .is_err());
+    }
+
+    #[test]
+    fn a_flag_missing_its_value_is_refused() {
+        assert_eq!(
+            parse(&args(&["status", "--db"])),
+            Err(UsageError::missing_value("--db"))
+        );
+    }
 }

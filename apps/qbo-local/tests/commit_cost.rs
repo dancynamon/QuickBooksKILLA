@@ -72,4 +72,15 @@ fn per_entity_commits_versus_batched_on_a_file_database() {
         batched < one_at_a_time,
         "batching should not be slower: {batched:?} vs {one_at_a_time:?}"
     );
+
+    // DESIGN.md §11 measured ~0.58s for the batched path on this same shape;
+    // this budget is 3x that, enforced only under QBO_BENCH_ASSERT=1
+    // (`.github/workflows/ci.yml`'s `bench` job) rather than on every laptop
+    // that happens to run the ignored suite.
+    if std::env::var("QBO_BENCH_ASSERT").as_deref() == Ok("1") {
+        assert!(
+            batched.as_millis() < 2000,
+            "batched commit of {COUNT} invoices took {batched:?}, over the 2s QBO_BENCH_ASSERT budget"
+        );
+    }
 }
