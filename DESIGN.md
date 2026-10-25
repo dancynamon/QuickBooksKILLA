@@ -548,6 +548,11 @@ Steps 3 and 5 are both required. A rename is atomic but not automatically
 durable; without the directory fsync a crash can leave the old file in place with
 the new one already invalidated by Intuit.
 
+That sequence is the file backend's. The keychain backend replaces steps 2–5
+with one `SecItemUpdate` of one item holding every generation, which `securityd`
+applies as a single operation (`DECISIONS.md` D14). Step 6 is the caller's
+either way.
+
 ### 5.2 Generations
 
 The **previous two** token sets are retained. On startup, if the current set
@@ -776,8 +781,8 @@ POs/SOs, **accrual only**.
   exactly-once — specifically exercising the `in_flight` recovery path (§6.1).
 - Token rotation test: expire the access token mid-batch, assert clean recovery
   and that no token generation is lost.
-- CDC truncation test: a mock returning exactly 1000 objects must trigger window
-  halving, not cursor advance.
+- CDC truncation test: a mock returning exactly 1000 objects must trigger a
+  bounded backfill (§4.3), not cursor advance.
 
 ## 11. Performance targets — benchmarked, not asserted
 
@@ -833,5 +838,6 @@ what every other test here uses.
 | 2 | OAuth client id/secret and a sandbox company, on the machine that will run the first live sync | M0 completion |
 | 3 | Confirm QBO's tax rounding mode (§1) | ledger project, not this one |
 | 4 | Confirm the query endpoint accepts a `MetaData.LastUpdatedTime` range and honours `ORDERBY` on it (§4.3) — CDC truncation recovery depends on it | M1 |
+| 5 | §4.3 says cursors are Intuit's timestamps, never the local clock. The driver currently writes the caller's `now`, and the poll loop passes the local clock. A Mac clock ahead of Intuit's would skip changes in the gap. Fix when `HttpQboClient` exists: take the server time from the CDC/query response and use that as the cursor | M0 completion |
 
 Closed: WaterLine CNC sizing — not being measured, see §0.

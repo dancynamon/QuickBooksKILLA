@@ -14,6 +14,11 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 uuid = { workspace = true }
 
+# The keychain token backend (HANDOFF §2.1). macOS only; everything else
+# builds without it, which is what keeps a Linux CI green.
+[target.'cfg(target_os = "macos")'.dependencies]
+security-framework = { workspace = true }
+
 [dev-dependencies]
 proptest = { workspace = true }
 tempfile = { workspace = true }

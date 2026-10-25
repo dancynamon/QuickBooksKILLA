@@ -19,6 +19,12 @@ use thiserror::Error;
 
 use crate::domain::RealmId;
 
+mod keychain;
+
+pub use keychain::KEYCHAIN_SERVICE;
+#[cfg(target_os = "macos")]
+pub use keychain::KeychainTokenStore;
+
 #[derive(Debug, Error)]
 pub enum AuthError {
     #[error("token store i/o failed: {0}")]
@@ -27,6 +33,13 @@ pub enum AuthError {
     Corrupt(#[from] serde_json::Error),
     #[error("no usable token generation remains for realm {0}; re-authorisation required")]
     Lockout(RealmId),
+    /// The keychain refused: locked, access denied, or unavailable. Carries the
+    /// OS status only, never the item's contents.
+    #[error("keychain: {0}")]
+    Keychain(String),
+    /// A stored value names a different realm from the one it is filed under.
+    #[error("token store for realm {expected} holds tokens for realm {found}")]
+    RealmMismatch { expected: RealmId, found: RealmId },
 }
 
 /// How many previous generations to retain (§5.2).
@@ -148,10 +161,10 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), std::io::Error> {
 
 /// Durable storage for a realm's token generations.
 ///
-/// The production backend is the OS keychain (`DESIGN.md` §8 — secrets never in
-/// the repo, never in a dotfile that could sync to Dropbox). This trait exists
-/// so the rotation logic above is testable without one, and so the keychain
-/// backend can be added without touching the caller.
+/// The production backend is the OS keychain, [`KeychainTokenStore`] on macOS
+/// (`DESIGN.md` §8 — secrets never in the repo, never in a dotfile that could
+/// sync to Dropbox). This trait exists so the rotation logic above is testable
+/// without one, and so the caller does not know which backend it has.
 pub trait TokenStore {
     fn load(&self, realm: &RealmId) -> Result<Option<TokenGenerations>, AuthError>;
     fn save(&self, generations: &TokenGenerations) -> Result<(), AuthError>;

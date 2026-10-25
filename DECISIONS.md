@@ -232,3 +232,47 @@ that was never fully covered — the partial pages are already mirrored, so the
 re-sweep is idempotent, not wasted. And batching is now the normal path rather
 than an optimisation, which fixes the one-transaction-per-entity cost flagged in
 §11 for initial sync.
+
+## D14 — The keychain holds one item per realm, generations inside it
+
+26 Sep 2026, in build.
+
+`KeychainTokenStore` files one generic-password item per realm under the service
+`qbo-local.oauth-tokens`, with the realm id as the account, holding the whole
+`TokenGenerations` value — current set plus the two retained generations. The
+file backend's `write → fsync → rename → fsync directory` sequence has no
+keychain counterpart and needs none: `SecItemUpdate` replaces an item's data
+inside `securityd` as one operation. What the keychain does not do is keep
+history, so the generations travel inside the value. One item per generation
+would reintroduce the failure §5.2 exists to prevent — several writes that can
+disagree after a crash.
+
+Two refusals are deliberate. A locked keychain or a denied access prompt is an
+error, never `None`, because `None` means "authorise" and authorising overwrites
+an item that may be perfectly good. And an item whose contents name a different
+realm from the account it is filed under is refused as `RealmMismatch` rather
+than used, since using it would point one company's sync at another's tokens.
+
+The backend is `cfg(target_os = "macos")`; the encoding is not, so its tests run
+everywhere. The one test against the real keychain is `#[ignore]`d — `cargo
+test` must not depend on an unlocked login keychain — and uses a throwaway
+service name it removes afterwards.
+
+## D15 — The poll loop owns one driver per realm, and scopes failure the same way
+
+26 Sep 2026, in build.
+
+`SyncDriver` carries one `RealmLimiter`. Sharing one driver across realms would
+share one budget, which §4.4 forbids, so `PollLoop` holds a driver per realm.
+
+Failures sort three ways. Transient — rate budget refused, 429, network — backs
+that realm off on `ratelimit::backoff_delay`, jittered, never faster than the
+cadence. Permanent — anything else Intuit refuses — halts that realm until a
+person calls `resume`; spinning against it would spend budget to learn nothing
+and would look alive while syncing nothing. A local store failure stops the
+whole loop, because no realm can work around its own replica failing. `run`
+also returns when no realm is left that can poll, for the same reason.
+
+The loop adds no path that moves a cursor. Every cursor still moves only
+through `Store::apply_batch` (D13), and truncation still recovers through the
+bounded query (D12). The loop decides only when.

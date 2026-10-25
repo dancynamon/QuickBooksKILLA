@@ -43,8 +43,9 @@ backend in §2.1. Never in the repo, never in a dotfile Dropbox syncs.
 
 ## 1. Where the work stands
 
-`cargo test` — 128 tests, all offline, all green. `cargo clippy --all-targets` —
-clean.
+`cargo test` — 206 tests, all offline, all green (plus three `#[ignore]`d: two
+benchmarks and one real-keychain round trip). `cargo clippy --all-targets` —
+clean on macOS and on Linux.
 
 Built and tested:
 
@@ -54,23 +55,31 @@ Built and tested:
 | `domain` | `RealmId`, `EntityType`, sync tiers |
 | `store` | SQLite schema, migrations, realm-scoped access |
 | `sync` | CDC planning: staleness fallback, truncation handling |
-| `auth` | Token generations, atomic persistence, lockout detection |
+| `auth` | Token generations, atomic persistence, lockout detection; `KeychainTokenStore` (macOS, §2.1) |
 | `ratelimit` | Per-realm token buckets, jittered backoff |
 | `outbox` | State machine with enforced transitions |
 | `client` | The QBO trait boundary + `MockQbo` double |
 | `worker` | Drain loop, dependency resolution, local-id rewriting |
+| `driver` | Initial sweep, CDC poll, truncation backfill via bounded query (§2.4) |
+| `poll` | CDC poll loop: 15 s focused / 5 min idle, per-realm driver and budget, backoff, halt/resume (§2.5) |
 
 **Not built:** the HTTP transport behind `QboClient`, the OAuth authorisation
-flow, the keychain token backend, the initial-sync driver, the CDC poll loop,
-the reconciliation sweep, the Tauri shell, the React UI.
+flow, the reconciliation sweep, the Tauri shell, the React UI.
 
-M0 needs the first five of those. The last two are M1.
+M0 needs the first two of those. The last two are M1. §2.1, §2.4 and §2.5 are
+built and tested against `MockQbo`; what remains for M0 is §2.2 and §2.3, and
+running the whole thing against the real book.
 
 ---
 
 ## 2. What to build, in order
 
-### 2.1 `KeychainTokenStore`
+### 2.1 `KeychainTokenStore` — built
+
+`auth::KeychainTokenStore`, `cfg(target_os = "macos")`. One item per realm
+under service `qbo-local.oauth-tokens`, account = realm id, value = the whole
+`TokenGenerations`. See `DECISIONS.md` D14. Verify on the Mac with
+`cargo test -p qbo-local keychain -- --ignored`. The original brief follows.
 
 Implement the existing `auth::TokenStore` trait against the macOS keychain.
 
@@ -141,7 +150,10 @@ Mapping obligations:
 mock disagree about any of the above, the mock is what the worker's 20-odd
 tests were written against — reconcile deliberately, don't just change the mock.
 
-### 2.4 Initial sync driver
+### 2.4 Initial sync driver — built
+
+`driver::SyncDriver`. Row counts and wall-clock against the real book are still
+to be measured once §2.3 exists. The original brief follows.
 
 Per realm, walk `EntityType::m0_scope()` — masters before documents, which the
 ordering in `EntityType::ALL` already guarantees and a test enforces.
@@ -155,22 +167,26 @@ Report actual row counts and wall-clock time. The brief is explicit that these
 are measured and reported, never asserted. Expect roughly nine thousand invoices
 and tens of thousands of documents in total, going back to 2012.
 
-### 2.5 CDC poll loop
+### 2.5 CDC poll loop — built
+
+`poll::PollLoop` over one `SyncDriver` per realm. See `DECISIONS.md` D15. The
+original brief follows, corrected where the driver work (D12) overtook it.
 
 15 seconds focused, 5 minutes idle, both configurable.
 
 `sync::plan_sync` already makes the incremental-versus-sweep decision, and
-`sync::classify_response` plus `sync::halve_window` handle truncation. Wire them
-up rather than reimplementing:
+`sync::classify_response` detects truncation. Wire them up rather than
+reimplementing:
 
-- A response at the 1000-object cap is **possibly truncated**. Halve the window
-  and re-poll. Do not advance the cursor — `SyncCursor::advance` takes the
-  outcome specifically so advancing on a truncated response isn't expressible.
+- A response at the 1000-object cap is **possibly truncated**. Do not advance
+  the cursor — `SyncCursor::advance` takes the outcome specifically so advancing
+  on a truncated response isn't expressible. ~~Halve the window and re-poll~~ —
+  not implementable, CDC has no upper bound; the driver re-reads the window
+  through the bounded query endpoint instead (`DECISIONS.md` D12).
 - A cursor older than 25 days falls back to a full sweep. CDC does not error
   past its 30-day window; it silently under-reports, which is why the margin
   exists.
-- `halve_window` returning `None` means the window can't narrow further — fall
-  back to a sweep rather than looping.
+- ~~`halve_window` returning `None`…~~ — `halve_window` was deleted with D12.
 
 ---
 
