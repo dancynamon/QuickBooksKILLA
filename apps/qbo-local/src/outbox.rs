@@ -42,6 +42,9 @@ pub enum OutboxState {
     Applied,
     Conflicted,
     Rejected,
+    /// A person looked at a failed write in the inbox and chose to drop it.
+    /// Kept, never deleted: the record of what was not sent is history too.
+    Discarded,
 }
 
 /// Why a drain attempt did not reach `Applied`.
@@ -58,7 +61,7 @@ pub enum DrainFailure {
 
 impl OutboxState {
     pub const fn is_terminal(self) -> bool {
-        matches!(self, OutboxState::Applied)
+        matches!(self, OutboxState::Applied | OutboxState::Discarded)
     }
 
     /// Whether this record belongs in the failure inbox (`DESIGN.md` §6.6).
@@ -84,6 +87,9 @@ impl OutboxState {
                 // Human resolution re-queues a failed record.
                 | (Conflicted, Pending)
                 | (Rejected, Pending)
+                // Only a person discards, and only what already failed.
+                | (Conflicted, Discarded)
+                | (Rejected, Discarded)
         )
     }
 
@@ -94,20 +100,21 @@ impl OutboxState {
             OutboxState::Applied => "applied",
             OutboxState::Conflicted => "conflicted",
             OutboxState::Rejected => "rejected",
+            OutboxState::Discarded => "discarded",
         }
     }
 
-    /// The inverse of [`Self::as_str`] — what a row read back from
-    /// `store::Store` deserialises to.
     pub fn parse(raw: &str) -> Option<Self> {
-        match raw {
-            "pending" => Some(OutboxState::Pending),
-            "in_flight" => Some(OutboxState::InFlight),
-            "applied" => Some(OutboxState::Applied),
-            "conflicted" => Some(OutboxState::Conflicted),
-            "rejected" => Some(OutboxState::Rejected),
-            _ => None,
-        }
+        [
+            OutboxState::Pending,
+            OutboxState::InFlight,
+            OutboxState::Applied,
+            OutboxState::Conflicted,
+            OutboxState::Rejected,
+            OutboxState::Discarded,
+        ]
+        .into_iter()
+        .find(|state| state.as_str() == raw)
     }
 }
 
@@ -296,6 +303,11 @@ impl OutboxRecord {
         self.attempts = 0;
         self.last_error = None;
         self.transition(OutboxState::Pending, now)
+    }
+
+    /// A person chose to drop a failed write (§6.6). Never automatic.
+    pub fn discard(&mut self, now: DateTime<Utc>) -> Result<(), OutboxError> {
+        self.transition(OutboxState::Discarded, now)
     }
 
     /// Whether a create of this record must query QBO for an existing match

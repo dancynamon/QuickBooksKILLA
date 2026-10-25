@@ -101,12 +101,17 @@ pub enum QboError {
     Network(String),
     #[error("not found")]
     NotFound,
+    /// The day's Intuit call ceiling is spent ([`crate::budget`]). Refused
+    /// locally, before any request goes out. Not transient: retrying before
+    /// the next UTC day gets the same answer.
+    #[error("{0}")]
+    DailyBudgetExhausted(crate::budget::BudgetExhausted),
 }
 
 impl QboError {
     /// Whether retrying unchanged could plausibly succeed.
     pub fn is_transient(&self) -> bool {
-        matches!(self, QboError::RateLimited | QboError::Network(_))
+matches!(self, QboError::RateLimited | QboError::Network(_))
     }
 }
 
@@ -282,6 +287,12 @@ impl MockQbo {
             cdc_cap: crate::sync::CDC_RESPONSE_CAP,
             ..Default::default()
         }
+    }
+
+    /// Start allocating ids above `next`, so creates in a double seeded from a
+    /// real-shaped book never collide with the ids already in it.
+    pub fn set_next_id(&mut self, next: u64) {
+        self.next_id = next;
     }
 
     /// Lower the CDC response cap, so a test can hit truncation with a handful
@@ -559,7 +570,19 @@ impl QboClient for MockQbo {
 
         let next: u64 = entity.sync_token.parse::<u64>().unwrap_or(0) + 1;
         entity.sync_token = next.to_string();
-        entity.raw_json = payload.clone();
+        // A sparse update changes only the fields it sends, as QBO's does; a
+        // full update replaces the record.
+        if payload.get("sparse").and_then(|v| v.as_bool()) == Some(true) {
+            if let (Some(existing), Some(changes)) = (entity.raw_json.as_object_mut(), payload.as_object()) {
+                for (key, value) in changes {
+                    if key != "sparse" {
+                        existing.insert(key.clone(), value.clone());
+                    }
+                }
+            }
+        } else {
+            entity.raw_json = payload.clone();
+        }
         entity.last_updated_utc = self.clock;
         let updated = entity.clone();
         self.request_log.insert(log_key, updated.clone());
@@ -712,6 +735,20 @@ mod tests {
             .unwrap();
         assert_ne!(updated.sync_token, created.sync_token);
         assert_eq!(updated.raw_json["TotalAmt"], 74.24);
+    }
+
+    #[test]
+    fn a_sparse_update_keeps_the_fields_it_does_not_send() {
+        let mut qbo = MockQbo::new(at(0));
+        let created = qbo
+            .create(&realm(), EntityType::Invoice, &serde_json::json!({ "DocNumber": "T-1", "TotalAmt": 5 }), Uuid::now_v7())
+            .unwrap();
+        let updated = qbo
+            .update(&realm(), EntityType::Invoice, &created.qbo_id, &serde_json::json!({ "sparse": true, "PrivateNote": "x" }), "0", Uuid::now_v7())
+            .unwrap();
+        assert_eq!(updated.raw_json["DocNumber"], "T-1");
+        assert_eq!(updated.raw_json["PrivateNote"], "x");
+        assert!(updated.raw_json.get("sparse").is_none());
     }
 
     #[test]

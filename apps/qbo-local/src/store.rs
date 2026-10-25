@@ -15,7 +15,10 @@ use ledger_core::Money;
 pub mod backup;
 pub mod index;
 pub mod lineage;
+pub mod mfg_store;
+pub mod outbox_store;
 pub mod query;
+pub mod reports;
 pub mod sales_orders;
 pub mod search;
 
@@ -32,6 +35,8 @@ pub enum StoreError {
     Json(#[from] serde_json::Error),
     #[error("replica schema version {found} is newer than this build supports ({supported})")]
     SchemaTooNew { found: i64, supported: i64 },
+    #[error("stored value is unreadable: {0}")]
+    Corrupt(String),
     /// A computed total overflowed `i64` minor units. Unreachable at any
     /// realistic book size, but money arithmetic returns `Result` everywhere
     /// (D5), and a read path is no exception.
@@ -444,7 +449,177 @@ CREATE TABLE sales_order_snapshots (
 ) STRICT;
 "#,
     },
+    Migration {
+        version: 4,
+        name: "full-sweep checkpoints, so an interrupted pull resumes",
+        sql: r#"
+-- One row per entity type with a full sweep in progress: where the next page
+-- starts, and when the sweep began. Written in the same transaction as the
+-- page it follows, deleted in the one that writes the final page's cursor.
+CREATE TABLE sweep_checkpoints (
+    realm_id     TEXT NOT NULL REFERENCES realms(realm_id),
+    entity_type  TEXT NOT NULL,
+    next_start   INTEGER NOT NULL,
+    started_at   TEXT NOT NULL,
+    PRIMARY KEY (realm_id, entity_type)
+) STRICT;
+"#,
+    },
+    Migration {
+        version: 5,
+        name: "realm environment, for sandbox-first writes",
+        sql: r#"
+-- Which Intuit environment a realm lives in. Writes may be switched on for a
+-- sandbox company at any time; a production company needs the two-week
+-- read-only soak first (DESIGN.md §8). Existing realms were all synced from
+-- production, which is the default.
+ALTER TABLE realms ADD COLUMN environment TEXT NOT NULL DEFAULT 'production'
+    CHECK (environment IN ('production', 'sandbox'));
+"#,
+    },
+    Migration {
+        version: 6,
+        name: "manufacturing: materials, receipts, build sheets, builds",
+        sql: r#"
+-- The replica's own data: QuickBooks has no bill of materials at any tier, so
+-- nothing here is mirrored and nothing here is ever sent to QuickBooks.
+-- Decimals are text, as everywhere else in this file. Nothing is deleted: a
+-- wrong receipt is corrected by a later one, and history keeps both.
+CREATE TABLE materials (
+    realm_id      TEXT NOT NULL REFERENCES realms(realm_id),
+    material_id   TEXT NOT NULL,
+    name          TEXT NOT NULL,
+    thickness_in  TEXT NOT NULL,
+    width_in      TEXT NOT NULL,
+    length_in     TEXT NOT NULL,
+    color         TEXT,
+    created_at    TEXT NOT NULL,
+    PRIMARY KEY (realm_id, material_id)
+) STRICT;
+
+CREATE TABLE material_receipts (
+    realm_id       TEXT NOT NULL REFERENCES realms(realm_id),
+    receipt_id     TEXT NOT NULL,
+    received_on    TEXT NOT NULL,
+    vendor_id      TEXT,
+    reference      TEXT,
+    freight_minor  INTEGER NOT NULL,
+    created_at     TEXT NOT NULL,
+    PRIMARY KEY (realm_id, receipt_id)
+) STRICT;
+
+CREATE TABLE material_receipt_lines (
+    realm_id             TEXT NOT NULL,
+    receipt_id           TEXT NOT NULL,
+    line_no              INTEGER NOT NULL,
+    material_id          TEXT NOT NULL,
+    sheets               TEXT NOT NULL,
+    bf_per_sheet         TEXT NOT NULL,
+    price_per_sheet      TEXT NOT NULL,
+    surcharge_per_sheet  TEXT NOT NULL,
+    goods_minor          INTEGER NOT NULL,
+    freight_minor        INTEGER NOT NULL,
+    landed_per_bf        TEXT NOT NULL,
+    PRIMARY KEY (realm_id, receipt_id, line_no),
+    FOREIGN KEY (realm_id, receipt_id) REFERENCES material_receipts(realm_id, receipt_id),
+    FOREIGN KEY (realm_id, material_id) REFERENCES materials(realm_id, material_id)
+) STRICT;
+
+CREATE INDEX idx_receipt_lines_material ON material_receipt_lines(realm_id, material_id);
+
+-- One build sheet per finished product, keyed by its QuickBooks item.
+CREATE TABLE build_sheets (
+    realm_id         TEXT NOT NULL REFERENCES realms(realm_id),
+    item_id          TEXT NOT NULL,
+    components_json  TEXT NOT NULL,
+    updated_at       TEXT NOT NULL,
+    PRIMARY KEY (realm_id, item_id)
+) STRICT;
+
+-- A production run, with the build sheet as it stood that day: a later edit
+-- to the sheet must not rewrite what a past run was measured against.
+CREATE TABLE builds (
+    realm_id          TEXT NOT NULL REFERENCES realms(realm_id),
+    build_id          TEXT NOT NULL,
+    item_id           TEXT NOT NULL,
+    built_on          TEXT NOT NULL,
+    quantity          TEXT NOT NULL,
+    components_json   TEXT NOT NULL,
+    actual_json       TEXT NOT NULL,
+    standard_minor    INTEGER NOT NULL,
+    actual_minor      INTEGER NOT NULL,
+    variance_minor    INTEGER NOT NULL,
+    flagged           INTEGER NOT NULL,
+    note              TEXT,
+    created_at        TEXT NOT NULL,
+    PRIMARY KEY (realm_id, build_id)
+) STRICT;
+
+CREATE INDEX idx_builds_item ON builds(realm_id, item_id, built_on);
+"#,
+    },
+    Migration {
+        version: 7,
+        name: "material stock: counts and reorder points",
+        sql: r#"
+-- A physical count of one material: the shelf held exactly this much at the
+-- end of the day it is dated. Stock on hand and moving-average cost are
+-- replayed from deliveries, builds and counts, never stored.
+CREATE TABLE material_counts (
+    realm_id     TEXT NOT NULL REFERENCES realms(realm_id),
+    count_id     TEXT NOT NULL,
+    material_id  TEXT NOT NULL,
+    counted_on   TEXT NOT NULL,
+    board_feet   TEXT NOT NULL,
+    note         TEXT,
+    created_at   TEXT NOT NULL,
+    PRIMARY KEY (realm_id, count_id),
+    FOREIGN KEY (realm_id, material_id) REFERENCES materials(realm_id, material_id)
+) STRICT;
+
+CREATE INDEX idx_counts_material ON material_counts(realm_id, material_id, counted_on);
+
+-- Below this many board-feet on hand, the material shows as low.
+ALTER TABLE materials ADD COLUMN reorder_bf TEXT;
+"#,
+    },
+    Migration {
+        version: 8,
+        name: "finished goods counts",
+        sql: r#"
+-- A physical count of a finished product. The first count (or first build)
+-- starts the product's stock history: sales before it are not replayed,
+-- since nothing before it says how many were on the shelf.
+CREATE TABLE product_counts (
+    realm_id    TEXT NOT NULL REFERENCES realms(realm_id),
+    count_id    TEXT NOT NULL,
+    item_id     TEXT NOT NULL,
+    counted_on  TEXT NOT NULL,
+    units       TEXT NOT NULL,
+    note        TEXT,
+    created_at  TEXT NOT NULL,
+    PRIMARY KEY (realm_id, count_id)
+) STRICT;
+
+CREATE INDEX idx_product_counts_item ON product_counts(realm_id, item_id, counted_on);
+
+-- "Where is this item used" — the item list, item pages and finished-goods
+-- stock all ask it, and without an index each asks it of every line.
+CREATE INDEX idx_lines_item ON document_lines(realm_id, item_id);
+"#,
+    },
 ];
+
+/// How far an interrupted full sweep of one entity type got.
+/// `crate::driver::SyncDriver` resumes from here instead of page one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SweepCheckpoint {
+    /// Zero-based position of the first record not yet mirrored.
+    pub next_start: usize,
+    /// When the sweep began — what its cursor will say once it finishes, so
+    /// anything changed while it was paused is picked up by the next poll.
+    pub started_at: DateTime<Utc>,
+}
 
 pub fn latest_version() -> i64 {
     MIGRATIONS.iter().map(|m| m.version).max().unwrap_or(0)
@@ -514,7 +689,12 @@ impl Store {
 
     fn configure(connection: &Connection) -> Result<(), StoreError> {
         // journal_mode returns a row, so it cannot go through execute_batch.
-        let _: String = connection.query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))?;
+        let _: String =
+            connection.query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))?;
+        // The desktop app and the sync process open the same file: the app
+        // queues writes while sync drains them and mirrors. Waiting briefly on
+        // the other's lock beats failing a save with "database is locked".
+        connection.busy_timeout(std::time::Duration::from_secs(5))?;
         connection.execute_batch(
             "PRAGMA foreign_keys = ON;
              PRAGMA synchronous = FULL;",
@@ -583,6 +763,112 @@ impl Store {
     }
 
     /// Writes stay off until explicitly enabled, per realm, one realm at a time.
+    /// Write a consistent copy of the whole replica — outbox included — to a
+    /// new file (`DESIGN.md` §8). `VACUUM INTO` reads inside one transaction,
+    /// so the copy is a single point in time even while sync is writing, and
+    /// it refuses to overwrite an existing file.
+    pub fn vacuum_into(&self, path: &std::path::Path) -> Result<(), StoreError> {
+        let target = path
+            .to_str()
+            .ok_or_else(|| StoreError::Corrupt(format!("snapshot path is not UTF-8: {}", path.display())))?;
+        self.connection.execute("VACUUM INTO ?1", params![target])?;
+        Ok(())
+    }
+
+    /// Run `f` all-or-nothing inside a savepoint: an import that fails on
+    /// its fortieth row leaves the first thirty-nine unwritten.
+    pub fn atomically<T, E: From<StoreError>>(
+        &self,
+        f: impl FnOnce() -> Result<T, E>,
+    ) -> Result<T, E> {
+        self.connection
+            .execute_batch("SAVEPOINT atomically")
+            .map_err(StoreError::from)?;
+        match f() {
+            Ok(value) => {
+                self.connection
+                    .execute_batch("RELEASE atomically")
+                    .map_err(StoreError::from)?;
+                Ok(value)
+            }
+            Err(error) => {
+                self.connection
+                    .execute_batch("ROLLBACK TO atomically; RELEASE atomically")
+                    .map_err(StoreError::from)?;
+                Err(error)
+            }
+        }
+    }
+
+    /// Every registered realm — the company switcher's list.
+    pub fn realms(&self) -> Result<Vec<RealmRow>, StoreError> {
+        let mut statement = self.connection.prepare(
+            "SELECT realm_id, display_name, is_write_enabled FROM realms ORDER BY display_name",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, i64>(2)?))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (id, display_name, write) = row?;
+            out.push(RealmRow {
+                realm_id: RealmId::parse(id).map_err(|e| StoreError::Corrupt(e.to_string()))?,
+                display_name,
+                is_write_enabled: write != 0,
+            });
+        }
+        Ok(out)
+    }
+
+    /// Class id to display name, for labelling lines and documents (§2.4).
+    pub fn class_names(&self, realm: &RealmId) -> Result<Vec<(String, String)>, StoreError> {
+        let mut statement = self.connection.prepare(
+            "SELECT qbo_id, COALESCE(fully_qualified_name, name) FROM classes
+             WHERE realm_id = ?1 AND is_deleted = 0 ORDER BY 2",
+        )?;
+        let rows = statement.query_map(params![realm.as_str()], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// What the chrome shows at all times (`DESIGN.md` §6.7): how current each
+    /// type is, how many writes are queued, how many need a human.
+    pub fn replica_sync_status(&self, realm: &RealmId) -> Result<SyncStatus, StoreError> {
+        let mut statement = self.connection.prepare(
+            "SELECT e.entity_type, COUNT(*), c.last_cdc_cursor, c.last_full_sweep
+             FROM entities e
+             LEFT JOIN sync_cursors c
+               ON c.realm_id = e.realm_id AND c.entity_type = e.entity_type
+             WHERE e.realm_id = ?1 AND e.is_deleted = 0
+             GROUP BY e.entity_type ORDER BY e.entity_type",
+        )?;
+        let types = statement
+            .query_map(params![realm.as_str()], |row| {
+                Ok(EntityStatus {
+                    entity_type: row.get(0)?,
+                    count: row.get(1)?,
+                    last_cdc_cursor: row.get(2)?,
+                    last_full_sweep: row.get(3)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        let count = |sql: &str| -> Result<i64, StoreError> {
+            Ok(self.connection.query_row(sql, params![realm.as_str()], |row| row.get(0))?)
+        };
+        Ok(SyncStatus {
+            entity_types: types,
+            outbox_pending: count(
+                "SELECT COUNT(*) FROM outbox WHERE realm_id = ?1
+                 AND state IN ('pending', 'in_flight')",
+            )?,
+            outbox_needs_attention: count(
+                "SELECT COUNT(*) FROM outbox WHERE realm_id = ?1
+                 AND state IN ('conflicted', 'rejected')",
+            )?,
+            quarantined: count("SELECT COUNT(*) FROM quarantine_entities WHERE realm_id = ?1")?,
+            is_write_enabled: self.is_write_enabled(realm)?,
+        })
+    }
+
     pub fn is_write_enabled(&self, realm: &RealmId) -> Result<bool, StoreError> {
         let enabled: Option<i64> = self
             .connection
@@ -750,41 +1036,75 @@ impl Store {
         now: DateTime<Utc>,
     ) -> Result<BatchReport, StoreError> {
         let transaction = self.connection.unchecked_transaction()?;
-        let mut report = BatchReport::default();
-
-        for incoming in entities {
-            let Some(entity) = &with_last_known_payload(&transaction, realm, incoming)? else {
-                // A deletion of something never mirrored: keep the tombstone,
-                // there is nothing to project or un-project.
-                upsert_entity_in(&transaction, realm, incoming, now)?;
-                clear_quarantine_in(&transaction, realm, incoming)?;
-                report.not_projected += 1;
-                report.mirrored += 1;
-                continue;
-            };
-            upsert_entity_in(&transaction, realm, entity, now)?;
-
-            match crate::project::parse(entity) {
-                Projection::Parsed(parsed) => {
-                    write_parsed(&transaction, realm, &parsed, now)?;
-                    clear_quarantine_in(&transaction, realm, entity)?;
-                    report.projected += 1;
-                }
-                Projection::NotProjected => report.not_projected += 1,
-                Projection::Quarantine(reason) => {
-                    quarantine_in(&transaction, realm, entity, &reason, now)?;
-                    report.quarantined += 1;
-                }
-            }
-            report.mirrored += 1;
-        }
-
-        if let Some(cursor) = cursor {
-            save_cursor_in(&transaction, cursor)?;
-        }
-
+        let report = apply_batch_in(&transaction, realm, entities, cursor, now)?;
         transaction.commit()?;
         Ok(report)
+    }
+
+    /// [`Store::apply_batch`] for one page of a full sweep, recording in the
+    /// same transaction where the sweep has got to. `Some(checkpoint)` means
+    /// more pages follow; `None` means this was the last one, so the
+    /// checkpoint goes and `cursor` takes over. Either way a crash leaves the
+    /// page and the checkpoint that covers it together, or neither.
+    pub fn apply_sweep_page(
+        &self,
+        realm: &RealmId,
+        entity_type: EntityType,
+        entities: &[MirroredEntity],
+        checkpoint: Option<&SweepCheckpoint>,
+        cursor: Option<&SyncCursor>,
+        now: DateTime<Utc>,
+    ) -> Result<BatchReport, StoreError> {
+        let transaction = self.connection.unchecked_transaction()?;
+        let report = apply_batch_in(&transaction, realm, entities, cursor, now)?;
+        match checkpoint {
+            Some(checkpoint) => {
+                transaction.execute(
+                    "INSERT INTO sweep_checkpoints (realm_id, entity_type, next_start, started_at)
+                     VALUES (?1, ?2, ?3, ?4)
+                     ON CONFLICT(realm_id, entity_type) DO UPDATE SET
+                         next_start = excluded.next_start,
+                         started_at = excluded.started_at",
+                    params![
+                        realm.as_str(),
+                        entity_type.as_str(),
+                        checkpoint.next_start as i64,
+                        checkpoint.started_at.to_rfc3339(),
+                    ],
+                )?;
+            }
+            None => {
+                transaction.execute(
+                    "DELETE FROM sweep_checkpoints WHERE realm_id = ?1 AND entity_type = ?2",
+                    params![realm.as_str(), entity_type.as_str()],
+                )?;
+            }
+        }
+        transaction.commit()?;
+        Ok(report)
+    }
+
+    pub fn load_sweep_checkpoint(
+        &self,
+        realm: &RealmId,
+        entity_type: EntityType,
+    ) -> Result<Option<SweepCheckpoint>, StoreError> {
+        let row = self
+            .connection
+            .query_row(
+                "SELECT next_start, started_at FROM sweep_checkpoints
+                 WHERE realm_id = ?1 AND entity_type = ?2",
+                params![realm.as_str(), entity_type.as_str()],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()?;
+        // An unreadable start time cannot anchor a cursor; start over.
+        Ok(row.and_then(|(next_start, started_at)| {
+            Some(SweepCheckpoint {
+                next_start: usize::try_from(next_start).ok()?,
+                started_at: parse_optional_timestamp(&started_at)?,
+            })
+        }))
     }
 
     pub fn load_cursor(
@@ -917,7 +1237,9 @@ impl Store {
         Ok(report)
     }
 
-    fn all_entities(&self, realm: &RealmId) -> Result<Vec<MirroredEntity>, StoreError> {
+    /// Every mirrored entity of a realm: the reprojection source, and the
+    /// seed for a test double built from a replica.
+    pub fn all_entities(&self, realm: &RealmId) -> Result<Vec<MirroredEntity>, StoreError> {
         let mut statement = self.connection.prepare(
             "SELECT entity_type, qbo_id, sync_token, last_updated_utc, is_deleted, raw_json
              FROM entities WHERE realm_id = ?1
@@ -952,6 +1274,70 @@ impl Store {
             });
         }
         Ok(entities)
+    }
+
+    // -----------------------------------------------------------------------
+    // Reconciliation (§7)
+    // -----------------------------------------------------------------------
+
+    /// Every mirrored id of a type with its update time and tombstone flag —
+    /// the local half of the reconciliation diff. Ids and timestamps only, so
+    /// the whole book's index fits in memory without loading a payload.
+    pub fn indexed_entities(
+        &self,
+        realm: &RealmId,
+        entity_type: EntityType,
+    ) -> Result<Vec<IndexedEntity>, StoreError> {
+        let mut statement = self.connection.prepare(
+            "SELECT qbo_id, last_updated_utc, is_deleted FROM entities
+             WHERE realm_id = ?1 AND entity_type = ?2",
+        )?;
+        let rows = statement.query_map(params![realm.as_str(), entity_type.as_str()], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (qbo_id, updated, deleted) = row?;
+            let last_updated_utc = DateTime::parse_from_rfc3339(&updated)
+                .map_err(|e| StoreError::Corrupt(format!("{qbo_id}: {e}")))?
+                .with_timezone(&Utc);
+            out.push(IndexedEntity {
+                qbo_id,
+                last_updated_utc,
+                is_deleted: deleted != 0,
+            });
+        }
+        Ok(out)
+    }
+
+    /// Quarantine a mirrored entity without touching its row. The reconcile
+    /// path's only response to local data QBO no longer has: §7.4 says never
+    /// auto-delete, and a quarantine row clears itself the next time a parse of
+    /// the same record succeeds.
+    pub fn quarantine(
+        &self,
+        realm: &RealmId,
+        entity: &MirroredEntity,
+        reason: &str,
+        now: DateTime<Utc>,
+    ) -> Result<(), StoreError> {
+        quarantine_in(&self.connection, realm, entity, reason, now)
+    }
+
+    /// Line rows whose parent document is missing. The foreign key should make
+    /// this zero; reconciliation checks rather than assumes.
+    pub fn orphaned_line_count(&self, realm: &RealmId) -> Result<i64, StoreError> {
+        Ok(self.connection.query_row(
+            "SELECT COUNT(*) FROM document_lines l
+             LEFT JOIN documents d ON d.realm_id = l.realm_id AND d.qbo_id = l.doc_qbo_id
+             WHERE l.realm_id = ?1 AND d.qbo_id IS NULL",
+            params![realm.as_str()],
+            |row| row.get(0),
+        )?)
     }
 
     pub fn quarantined(&self, realm: &RealmId) -> Result<Vec<QuarantinedEntity>, StoreError> {
@@ -1271,6 +1657,40 @@ pub struct RealmSummary {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RealmRow {
+    pub realm_id: RealmId,
+    pub display_name: String,
+    pub is_write_enabled: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EntityStatus {
+    pub entity_type: String,
+    pub count: i64,
+    pub last_cdc_cursor: Option<String>,
+    pub last_full_sweep: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SyncStatus {
+    pub entity_types: Vec<EntityStatus>,
+    /// Queued and not yet confirmed by QBO.
+    pub outbox_pending: i64,
+    /// Conflicted or rejected — the failure inbox (§6.6).
+    pub outbox_needs_attention: i64,
+    pub quarantined: i64,
+    pub is_write_enabled: bool,
+}
+
+/// One row of [`Store::entity_index`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IndexedEntity {
+    pub qbo_id: String,
+    pub last_updated_utc: DateTime<Utc>,
+    pub is_deleted: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct QuarantinedEntity {
     pub entity_type: String,
     pub qbo_id: String,
@@ -1508,6 +1928,49 @@ fn quarantine_in(
         ],
     )?;
     Ok(())
+}
+
+/// The body of [`Store::apply_batch`], inside a caller's transaction.
+fn apply_batch_in(
+    transaction: &rusqlite::Transaction,
+    realm: &RealmId,
+    entities: &[MirroredEntity],
+    cursor: Option<&SyncCursor>,
+    now: DateTime<Utc>,
+) -> Result<BatchReport, StoreError> {
+    let mut report = BatchReport::default();
+
+    for incoming in entities {
+        let Some(entity) = &with_last_known_payload(transaction, realm, incoming)? else {
+            // A deletion of something never mirrored: keep the tombstone,
+            // there is nothing to project or un-project.
+            upsert_entity_in(transaction, realm, incoming, now)?;
+            clear_quarantine_in(transaction, realm, incoming)?;
+            report.not_projected += 1;
+            report.mirrored += 1;
+            continue;
+        };
+        upsert_entity_in(transaction, realm, entity, now)?;
+
+        match crate::project::parse(entity) {
+            Projection::Parsed(parsed) => {
+                write_parsed(transaction, realm, &parsed, now)?;
+                clear_quarantine_in(transaction, realm, entity)?;
+                report.projected += 1;
+            }
+            Projection::NotProjected => report.not_projected += 1,
+            Projection::Quarantine(reason) => {
+                quarantine_in(transaction, realm, entity, &reason, now)?;
+                report.quarantined += 1;
+            }
+        }
+        report.mirrored += 1;
+    }
+
+    if let Some(cursor) = cursor {
+        save_cursor_in(transaction, cursor)?;
+    }
+    Ok(report)
 }
 
 fn save_cursor_in(

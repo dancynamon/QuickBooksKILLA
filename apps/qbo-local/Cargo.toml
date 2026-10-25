@@ -21,6 +21,7 @@ uuid = { workspace = true }
 security-framework = "3"
 
 [dev-dependencies]
+rust_decimal_macros = { workspace = true }
 proptest = { workspace = true }
 tempfile = { workspace = true }
 

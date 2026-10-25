@@ -64,6 +64,15 @@ Built and tested:
 | `daemon`, `clock` | Cadence loop around the driver, backoff, nightly snapshots |
 | `store::query` | Read-only query API for the UI and the ledger import |
 | `http`, `oauth`, `config` | Live transport, OAuth loopback flow, `.local/config.toml` (§2.2, §2.3) |
+| `api` | The UI's read-only command surface; one `dispatch` behind both front doors |
+| `serve` | Loopback dev server over `api` for browser testing |
+| `demo` | Seeded synthetic book; no real names, `.invalid` emails |
+| `safety` | §8: `AuditedClient` write audit (JSONL, fsynced, failure is transient so the retry replays), dated snapshots with rotation that only touches its own `snapshot-YYYY-MM-DD.db` files |
+| `ui/` | React UI (registers, document + chain, contact, `⌘K` palette, status bar) |
+| `../qbo-local-desktop` | Tauri 2 shell: one `api` command, replica from `QBO_LOCAL_DB` or the app home |
+| `mfg`, `mfg_store` | Phase 2 costing: landed cost, build sheets, sensitivity, builds, material and finished-goods stock (DECISIONS D45) |
+| `mfg_import` | CSV import of materials, build sheets and counts: preview every row, commit all or nothing |
+| `writes`, `compose`, `outbox_store` | M2: durable outbox, drain, gate, editor payloads (DECISIONS D44) |
 
 **Built 28 Sep:** `KeychainTokenStore` (§2.1, `keychain.rs`), the default
 token store on macOS via `token_store` in `.local/config.toml`;
@@ -84,11 +93,41 @@ HTTP, `tests/oauth.rs` covers the loopback and token exchange. `developer.intuit
 was still blocked in this session, so the §0 and §4 confidence levels are
 unchanged — verify those against Intuit's live docs before M0 is called done.
 
+### 1.3 Turning writes on (after the soak)
+
+```sh
+qbo-local writes --db <replica> --realm <id>                     # state, and what enabling needs
+qbo-local writes --db <replica> --realm <id> --enable --confirm  # production: 14 days after first sync
+qbo-local daemon --db <replica> --realm <id> --live        # mirrors through BunzBooks' own Intuit app (D43)
+```
+
+Sandbox first: sync a sandbox company with `--sandbox` (its realm is recorded as
+sandbox and can take writes at once), use BunzBooks against it, then repeat for
+production after the soak. Every write is appended to `audit-<realm>.jsonl` in
+the app home. `--disable` turns writes off; anything queued stays queued.
+
+### 1.2 Running the UI on the Mac
+
+After `daemon --live` has written `replica-<realm>.db` to the app home:
+
+```sh
+cd apps/qbo-local/ui && npm install && npm run build
+cd ../../qbo-local-desktop && cargo install tauri-cli --version "^2" --locked
+cargo tauri dev        # hot reload; or `cargo tauri build` for BunzBooks.app
+```
+
+The shell opens the first `replica-*.db` in the app home, or `QBO_LOCAL_DB`.
+A bare `cargo build --release` produces a dev-mode binary that looks for the
+Vite server; build through `cargo tauri build`, or add
+`--features tauri/custom-protocol`. Verified on Linux under Xvfb against the
+synthetic book: 9,000-row register over IPC in ~200 ms with software rendering.
+It is read-only by construction: `api::dispatch` has no write command.
+
 ---
 
 ## 2. What to build, in order
 
-### 2.1 `KeychainTokenStore`
+### 2.1 `KeychainTokenStore` — BUILT (`keychain.rs`); verify on the Mac that the first save raises no keychain prompt loop
 
 Implement the existing `auth::TokenStore` trait against the macOS keychain.
 

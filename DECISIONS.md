@@ -1691,3 +1691,183 @@ backup loop walks `EntityType::ALL` against v3, which answers 400 for it.
   kept in the raw feed but not carried into the ledger; Aquamentor puts
   shipping on an item line. An order with either needs a look at conversion.
 - The desktop app has no sales-order screen yet; the parent session adds it.
+
+## D43 — BunzBooks has its own Intuit app, a daily call ceiling, and resumable sweeps
+
+**Why.** On 23 Oct 2026 the Intuit app qbo-local shared with the QuickBooks
+MCPs hit its monthly 500,000 CorePlus calls (429, ThrottleExceeded 003001),
+which took every QBO API path on the Mac down with it. The spender was
+`qbo-local daemon --live`: `apply_batch` counts every re-mirrored row, TaxCode
+and TaxRate are full-swept on every tick for want of CDC coverage, so
+`report.mirrored() > 0` was true on every tick and the daemon never left the
+15-second focused cadence — about 24 calls a tick, roughly 125,000 a day.
+
+**What.**
+
+1. *Its own app.* `LocalConfig::credentials` reads BunzBooks' app from the
+   login keychain (service `bunzbooks-intuit-app`, accounts `client_id`,
+   `client_secret`) or from `BUNZBOOKS_QBO_CLIENT_ID` /
+   `BUNZBOOKS_QBO_CLIENT_SECRET`. A config file that still sets
+   `[intuit].client_id` or `client_secret` is refused, so an old config
+   cannot quietly put the shared app back; `QBO_CLIENT_*`, which other tools
+   use, is not read. Tokens move to keychain service `bunzbooks-qbo-tokens`;
+   `com.aquamentor.qbo-local.tokens` holds the shared app's and is left
+   alone.
+2. *A ceiling.* `budget::CallBudget` counts every request that goes on the
+   wire (the 401 retry included) in `.local/call-budget.json`, per UTC day,
+   re-read before each call so concurrent processes share it. At
+   `[budget].daily_calls` (default 15,000) calls are refused locally with
+   `QboError::DailyBudgetExhausted`, a `STOP` line goes to stderr once, and
+   the daemon sleeps to midnight UTC. A warning line at 80%.
+3. *Cadence on change, not on mirroring.* The daemon goes focused on
+   `SyncReport::changed()`, which leaves out full-sweep rows.
+4. *Resumable sweeps.* A full sweep writes `sweep_checkpoints` (migration 4)
+   in the same transaction as each page and resumes from it, backing up one
+   page so a deletion during the pause cannot slide a record past the
+   boundary. It keeps its original start time for the cursor it finally
+   writes, so changes made while paused reach the next poll. A checkpoint
+   older than `cdc_max_age` is dropped and the sweep starts over.
+
+*Rejected: a smaller per-minute bucket instead of a daily ceiling.* The
+per-minute limiter was never the problem — 90 calls a minute is well under
+it. Only a figure that adds up across days protects a monthly quota.
+
+### D43 addendum — uncovered types rest between sweeps (24 Oct 2026)
+
+Point 3 stopped TaxCode and TaxRate holding the cadence at fifteen seconds,
+but they were still full-swept on every tick: at the idle cadence, two or
+more requests every five minutes for records that change a few times a year.
+`SyncOptions::uncovered_sweep_interval` (default one hour) now lets a
+completed sweep of any type CDC does not cover — TaxCode, TaxRate, the
+peripheral tier — stand that long; inside it the type reports
+`SyncPath::SweepNotDue` and makes no request. A type with a sweep checkpoint
+resumes regardless. The nightly reconciliation sweep is unchanged.
+
+*Merge note.* This lands with the merge of the isolation work into
+`ccr-3daf8637-ra3gev`. That line's own `http`, `oauth` and `keychain`
+modules, and its `authorize` / `sync` / `reconcile` live commands that read
+`QBO_CLIENT_ID`, are replaced by this line's, so every live path builds its
+client through `LocalConfig::credentials` and the call budget. Its replica
+migrations follow this line's as 5–8, and its D14/D15 are D44/D45.
+
+## D44 — M2 write path: what was decided while building it
+
+> D44 and D45 were written as D14 and D15 on the `ccr-3daf8637-ra3gev` line, which
+> had not seen the main line's D14–D43; renumbered when the two lines merged.
+
+
+18 Oct 2026, in build. Writes exist in code and stay off: no realm has them on.
+
+- **The gate is enforced in code, not only by a disabled button.** `writes::check_enable`
+  allows a sandbox company at any time; a production company only 14 days after its
+  first complete sweep, only with `--confirm` (the explicit go), and only while no
+  other production company has writes on. `queue_*` and `drain_once` refuse while a
+  realm's writes are off, so the API returns 403 rather than queueing something that
+  will never be sent.
+- **Realms carry their environment** (migration 3). A replica cannot be pointed at the
+  other Intuit host than the one it was first synced from; the CLI refuses.
+- **A human "discard" state.** §6 said failed writes are never silently dropped. They
+  still are not: `Discarded` is reachable only from `conflicted` or `rejected`, only by
+  a person in the sync queue, and the record is kept.
+- **Conflict retry re-bases, and only on the newer version.** Retrying a conflicted
+  update takes the replica's current `SyncToken`, and is refused until the replica has
+  actually picked up the other edit — so the person retrying has seen it. This is the
+  opposite of last-writer-wins: nothing is overwritten that nobody looked at.
+- **Updates are sparse.** QuickBooks changes only the fields sent, so fields the editor
+  does not know about survive an edit.
+- **Tax is QuickBooks'.** The editor sends a tax code per line and shows a pre-tax
+  subtotal; the replica shows QuickBooks' tax once the document lands. Line amounts are
+  computed once, with `LineExtension` rounding, and the UI uses the same rule in exact
+  integer arithmetic so the amount on screen is the amount sent.
+- **The customer PO goes in the book's own custom field**, whose `DefinitionId` is read
+  from existing documents. A PO with no such field is refused, never dropped.
+- **Queued creates are shown, not mirrored.** A saved document lists in its register and
+  opens from its outbox payload, marked "Not yet in QuickBooks"; nothing is written to
+  the replica's mirror until QuickBooks has it. A page left open on a queued document
+  follows it to its real id when it lands.
+- **The dev server refuses cross-site requests** now that it can queue writes: JSON
+  content type required (a form post or `no-cors` fetch cannot set it without a
+  preflight), and a browser `Origin` must be its own.
+- **The drain runs in the sync process.** The desktop app only queues; `sync --watch`
+  drains before each poll. Both open the same file, so the store waits up to 5 s on the
+  other's lock rather than failing a save.
+
+## D45 — Manufacturing costing: what was decided while building it
+
+18 Oct 2026, in build. Phase 2's first slice: landed cost, build sheets, builds.
+
+- **The replica's own data, outside the write gate.** Materials, deliveries, build sheets
+  and builds live in tables QuickBooks never sees (migration 4). Recording them changes
+  nothing in the book of record, so they are usable today, before any QuickBooks write
+  is switched on.
+- **Freight follows board-feet, to the cent.** Shares are allocated by largest remainder,
+  so the freight in the costs always equals the freight on the bill.
+- **A material's cost is its most recent delivery's landed $/bf.** Simple, explainable
+  and matches how a quote is priced. A moving average over stock on hand needs
+  quantities on hand, which this slice does not track. Recorded here because it is the
+  first thing to revisit when inventory quantities arrive.
+- **Yield divides.** Net board-feet over yield is what is bought; the difference is priced
+  as waste and shown, not buried.
+- **Rates carry four places; sums of money are rounded once.** $/bf and unit costs are
+  rates, kept to four places; a run's standard and variance are money, rounded to the
+  cent at the end.
+- **A build keeps the sheet it was measured against.** Editing a build sheet later does
+  not rewrite a past run's standard.
+- **Nothing is deleted.** A wrong delivery is corrected by recording another.
+- **No posting.** Builds are costed, not journalled. Moving inventory value between raw
+  material and finished goods is ledger work (Phase 3) and the posting rules there need
+  your CPA's review first.
+
+### D45 addendum — stock on hand (21 Oct 2026)
+
+- **Stock is replayed, never stored.** On-hand board-feet, the moving average and shelf
+  value are computed from deliveries, builds and counts in date order each time they are
+  read. A corrected record changes the history it belongs to; there is no running
+  balance to drift.
+- **Same-day order:** deliveries, then the day's cutting, then a count taken at the end of
+  the day.
+- **A count sets the shelf;** the difference is shrinkage, priced at the average.
+- **Cutting past zero is flagged, not hidden.** A delivery or count is missing; the next
+  delivery fills the gap at its own price rather than averaging against a hole.
+- **Build sheets cost on the latest delivery by default** (how a quote is priced), with the
+  shelf average a per-viewer choice. When nothing is on the shelf the average means
+  nothing, so the latest stands in.
+
+### D45 addendum — finished goods and spreadsheet import (21 Oct 2026)
+
+- **A product's stock starts at its first count or first build.** Sales before that are
+  not replayed: nothing before it says how many were on the shelf, so the history would
+  start negative and mean nothing.
+- **Builds come in at their actual cost; invoices and sales receipts take units off;
+  credit memos and refund receipts put them back** at the average.
+- **An opening count is valued at the build sheet's cost** (latest delivery prices) when
+  no build has set an average yet, rather than at zero.
+- **Import is preview, then commit, all or nothing.** Every row is checked and every
+  problem reported by line before anything is written; the commit runs inside one
+  savepoint, so a file never lands half in.
+
+### D44 addendum — receiving payments (22 Oct 2026)
+
+- **A payment is spread oldest due first** unless a person types the split; nothing goes
+  past an invoice's balance or past the amount received. What is left over stays on the
+  customer as a credit, shown before saving.
+- **No deposit account is named.** QuickBooks puts the payment in Undeposited Funds, as its
+  own Receive Payment screen does by default; grouping into a bank deposit stays in
+  QuickBooks until deposits are built here.
+- **Queued payments count against open balances.** An invoice already being paid by a
+  payment on its way is shown with that amount netted off, so the same cheque cannot be
+  applied twice before the first lands.
+- **Only invoices QuickBooks already holds can be paid.** A queued invoice has no tax yet,
+  so its balance is not known until it lands.
+- **Bills are paid from a bank or credit card account the person picks**; the account type
+  decides cheque or card. A bill payment must go on bills in full: money sent to a vendor
+  against nothing is a prepayment, entered in QuickBooks.
+- **Deposits bank what is waiting in Undeposited Funds.** A payment or sales receipt is
+  waiting when its deposit account is Undeposited Funds (or unset) and no deposit links
+  it. Each deposit line links its payment, so QuickBooks clears it from Undeposited Funds
+  rather than counting it twice; a payment on a queued deposit is not offered again.
+  Deposits go to bank accounts only.
+- **An expense is a receipt paid at once**, charged line by line to expense or cost of
+  goods accounts, from a bank account or card. From a bank it is a cheque when it has a
+  cheque number and cash otherwise; on a card it is a card charge. The payee is optional
+  and, when given, must be a vendor on file.

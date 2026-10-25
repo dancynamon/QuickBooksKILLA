@@ -839,13 +839,29 @@ The general lesson is worth keeping: a performance measurement taken against
 `open_in_memory` says nothing about durability costs, and `open_in_memory` is
 what every other test here uses.
 
+UI, M1 (October 2026) — release build, `qbo-local serve` on a file database of
+the synthetic book (21,724 entities: 9,000 invoices, 3,181 estimates, 8,385
+payments, 300 POs), driven by headless Chromium:
+
+| | Measured |
+|---|---|
+| Write the synthetic book (`demo`, 500 per commit) | ~4.5 s |
+| Cold page load to a rendered 9,000-row invoice register | ~330 ms |
+| Whole invoice register, query + JSON | ~110 ms |
+| Palette search, replica side (`elapsedMicros`) | ~13–19 ms |
+| Register cursor move (300 ArrowDowns, incl. driver overhead) | ~4.5 ms each |
+
+Palette search sits at the 16 ms keystroke budget, not under it. The text
+stage is the cost; number lookups that stop at the first stage are faster.
+Measured through the HTTP dev server, so the Tauri IPC path will differ.
+
 ---
 
 ## 12. Open items
 
 | # | Item | Blocks |
 |---|---|---|
-| 1 | Confirm §0 ⚠️ items against `developer.intuit.com` — batch limit, CDC entity exclusions, `RequestId` scope | M2 write path |
+| 1 | Confirm §0 ⚠️ items against `developer.intuit.com` — batch limit, CDC entity exclusions, `RequestId` scope | Turning M2 writes on for production (the code is built; DECISIONS D14) |
 | 2 | OAuth client id/secret and a sandbox company, on the machine that will run the first live sync | M0 completion |
 | 3 | Confirm QBO's tax rounding mode (§1) | ledger project, not this one |
 | 4 | Confirm the query endpoint accepts a `MetaData.LastUpdatedTime` range and honours `ORDERBY` on it (§4.3) — CDC truncation recovery depends on it | M1 |

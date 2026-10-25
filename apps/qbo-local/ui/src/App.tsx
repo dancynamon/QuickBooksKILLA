@@ -1,0 +1,3117 @@
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Aging, api, ApiError, BuildRow, Component, ContactType, CostBasis, ImportKind, ImportResult, ExpenseLine, OpenInvoice, PaymentAccount, PaymentPlan, Undeposited, ProductStockRow, StockMove, StockRow, Customer, DocType, Document, DocumentDetail, Draft, DraftLine, Hit, Item, MaterialRow, ReceiptRow, Realm, SalesRow, SearchResult, SheetDetail, SheetSummary, Status, Write } from "./api";
+import { createContext, useContext } from "react";
+import { ago, DOC_LABELS, DOC_PLURALS, formatDate, formatDecimal, formatMoney, formatPerBf, formatQty, formatRate, lineAmountMinor } from "./format";
+
+// ---------------------------------------------------------------------------
+// Routing: the hash is the whole navigation state, so back/forward and a
+// reload land exactly where you were.
+// ---------------------------------------------------------------------------
+
+type Report = "ar" | "ap" | "sales";
+
+type Route =
+  | { view: "list"; docType: DocType }
+  | { view: "report"; report: Report }
+  | { view: "items" }
+  | { view: "item"; itemId: string }
+  | { view: "new"; docType: DocType }
+  | { view: "edit"; qboId: string }
+  | { view: "writes" }
+  | { view: "materials" }
+  | { view: "sheets" }
+  | { view: "sheet"; itemId: string }
+  | { view: "builds" }
+  | { view: "import" }
+  | { view: "pay"; customerId: string | null }
+  | { view: "paybills"; vendorId: string | null }
+  | { view: "deposit" }
+  | { view: "expense" }
+  | { view: "doc"; qboId: string }
+  | { view: "contact"; contactType: ContactType; contactId: string };
+
+function parseRoute(hash: string): { realm: string | null; route: Route } {
+  const parts = hash.replace(/^#\/?/, "").split("/").map(decodeURIComponent);
+  const fallback: Route = { view: "list", docType: "Invoice" };
+  if (parts[0] !== "r" || !parts[1]) return { realm: null, route: fallback };
+  const realm = parts[1];
+  if (parts[2] === "doc" && parts[3]) return { realm, route: { view: "doc", qboId: parts[3] } };
+  if (parts[2] === "contact" && (parts[3] === "Customer" || parts[3] === "Vendor") && parts[4])
+    return { realm, route: { view: "contact", contactType: parts[3], contactId: parts[4] } };
+  if (parts[2] === "report" && (parts[3] === "ar" || parts[3] === "ap" || parts[3] === "sales"))
+    return { realm, route: { view: "report", report: parts[3] } };
+  if (parts[2] === "items") return { realm, route: { view: "items" } };
+  if (parts[2] === "writes") return { realm, route: { view: "writes" } };
+  if (parts[2] === "materials") return { realm, route: { view: "materials" } };
+  if (parts[2] === "sheets") return { realm, route: { view: "sheets" } };
+  if (parts[2] === "sheet" && parts[3]) return { realm, route: { view: "sheet", itemId: parts[3] } };
+  if (parts[2] === "builds") return { realm, route: { view: "builds" } };
+  if (parts[2] === "import") return { realm, route: { view: "import" } };
+  if (parts[2] === "expense") return { realm, route: { view: "expense" } };
+  if (parts[2] === "deposit") return { realm, route: { view: "deposit" } };
+  if (parts[2] === "paybills") return { realm, route: { view: "paybills", vendorId: parts[3] ? decodeURIComponent(parts[3]) : null } };
+  if (parts[2] === "pay") return { realm, route: { view: "pay", customerId: parts[3] ? decodeURIComponent(parts[3]) : null } };
+  if (parts[2] === "new" && EDITABLE.includes(parts[3] as DocType)) return { realm, route: { view: "new", docType: parts[3] as DocType } };
+  if (parts[2] === "edit" && parts[3]) return { realm, route: { view: "edit", qboId: parts[3] } };
+  if (parts[2] === "item" && parts[3]) return { realm, route: { view: "item", itemId: parts[3] } };
+  if (parts[2] === "list" && parts[3] && parts[3] in DOC_LABELS)
+    return { realm, route: { view: "list", docType: parts[3] as DocType } };
+  return { realm, route: fallback };
+}
+
+function href(realm: string, route: Route): string {
+  switch (route.view) {
+    case "list":
+      return `#/r/${realm}/list/${route.docType}`;
+    case "doc":
+      return `#/r/${realm}/doc/${encodeURIComponent(route.qboId)}`;
+    case "contact":
+      return `#/r/${realm}/contact/${route.contactType}/${encodeURIComponent(route.contactId)}`;
+    case "report":
+      return `#/r/${realm}/report/${route.report}`;
+    case "items":
+      return `#/r/${realm}/items`;
+    case "item":
+      return `#/r/${realm}/item/${encodeURIComponent(route.itemId)}`;
+    case "new":
+      return `#/r/${realm}/new/${route.docType}`;
+    case "edit":
+      return `#/r/${realm}/edit/${encodeURIComponent(route.qboId)}`;
+    case "writes":
+      return `#/r/${realm}/writes`;
+    case "materials":
+      return `#/r/${realm}/materials`;
+    case "sheets":
+      return `#/r/${realm}/sheets`;
+    case "sheet":
+      return `#/r/${realm}/sheet/${encodeURIComponent(route.itemId)}`;
+    case "builds":
+      return `#/r/${realm}/builds`;
+    case "import":
+      return `#/r/${realm}/import`;
+    case "expense":
+      return `#/r/${realm}/expense`;
+    case "deposit":
+      return `#/r/${realm}/deposit`;
+    case "paybills":
+      return route.vendorId ? `#/r/${realm}/paybills/${encodeURIComponent(route.vendorId)}` : `#/r/${realm}/paybills`;
+    case "pay":
+      return route.customerId ? `#/r/${realm}/pay/${encodeURIComponent(route.customerId)}` : `#/r/${realm}/pay`;
+  }
+}
+
+function useHash(): string {
+  const [hash, setHash] = useState(window.location.hash);
+  useEffect(() => {
+    const on = () => setHash(window.location.hash);
+    window.addEventListener("hashchange", on);
+    return () => window.removeEventListener("hashchange", on);
+  }, []);
+  return hash;
+}
+
+// Per-viewer conveniences only. Storage can be unavailable; the app must work
+// without it.
+function stored(key: string, fallback: string): string {
+  try {
+    return window.localStorage.getItem(key) ?? fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function store(key: string, value: string) {
+  try {
+    window.localStorage.setItem(key, value);
+  } catch {
+    /* storage unavailable: preference lasts this session only */
+  }
+}
+
+const REGISTERS: { group: string; types: DocType[] }[] = [
+  { group: "Sales", types: ["Estimate", "Invoice", "SalesReceipt", "Payment", "CreditMemo", "RefundReceipt"] },
+  { group: "Purchases", types: ["PurchaseOrder", "Bill", "BillPayment", "VendorCredit", "Purchase"] },
+  { group: "Banking", types: ["Deposit", "JournalEntry"] },
+];
+
+// Class id to name for the current company (DESIGN.md §2.4).
+const Classes = createContext<Record<string, string>>({});
+
+function useClassName() {
+  const classes = useContext(Classes);
+  return (id: string | null) => (id ? classes[id] ?? id : "");
+}
+
+// Document types the editor writes; the rest are entered in QuickBooks.
+const EDITABLE: DocType[] = ["Estimate", "Invoice", "SalesReceipt", "CreditMemo", "PurchaseOrder", "Bill"];
+
+// Whether this company takes writes, and a way to refresh the chrome after one.
+interface WriteState {
+  enabled: boolean;
+  environment: "production" | "sandbox";
+  refresh: () => void;
+}
+const Writes = createContext<WriteState>({ enabled: false, environment: "production", refresh: () => {} });
+
+const REPORT_LABELS: Record<Report, string> = {
+  ar: "A/R aging",
+  ap: "A/P aging",
+  sales: "Sales by customer",
+};
+
+const VENDOR_SIDE = new Set<DocType>(["PurchaseOrder", "Bill", "BillPayment", "VendorCredit", "Purchase"]);
+
+// ---------------------------------------------------------------------------
+// App
+// ---------------------------------------------------------------------------
+
+export function App() {
+  const hash = useHash();
+  const { realm: routedRealm, route } = parseRoute(hash);
+  const [realms, setRealms] = useState<Realm[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [status, setStatus] = useState<Status | null>(null);
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  const [theme, setTheme] = useState(() => stored("bb.theme", "auto"));
+  const [scale, setScale] = useState(() => Number(stored("bb.scale", "1")) || 1);
+  const [now, setNow] = useState(Date.now());
+  const [classes, setClasses] = useState<Record<string, string>>({});
+
+  useEffect(() => {
+    api.realms().then(setRealms, (e: ApiError) => setError(e.message));
+  }, []);
+
+  const realm = routedRealm ?? realms?.[0]?.realmId ?? null;
+  const realmRow = realms?.find((r) => r.realmId === realm) ?? null;
+
+  useEffect(() => {
+    if (realms && realms.length > 0 && !routedRealm) {
+      window.location.replace(href(realms[0].realmId, route));
+    }
+  }, [realms, routedRealm, route]);
+
+  useEffect(() => {
+    if (realm) api.classes(realm).then(setClasses, () => setClasses({}));
+  }, [realm]);
+
+  // The chrome's sync state: polled, never something to go and look for.
+  // Faster while writes are in flight, so "queued" turns to "landed" promptly.
+  const [statusTick, setStatusTick] = useState(0);
+  const busy = (status?.outboxPending ?? 0) > 0;
+  useEffect(() => {
+    if (!realm) return;
+    let live = true;
+    const load = () =>
+      api.status(realm).then(
+        (s) => live && setStatus(s),
+        () => live && setStatus(null),
+      );
+    load();
+    const timer = window.setInterval(() => {
+      load();
+      setNow(Date.now());
+    }, busy ? 3_000 : 15_000);
+    return () => {
+      live = false;
+      window.clearInterval(timer);
+    };
+  }, [realm, busy, statusTick]);
+
+  useEffect(() => {
+    if (theme === "auto") delete document.documentElement.dataset.theme;
+    else document.documentElement.dataset.theme = theme;
+    store("bb.theme", theme);
+  }, [theme]);
+
+  useEffect(() => {
+    document.documentElement.style.setProperty("--fs", String(scale));
+    store("bb.scale", String(scale));
+  }, [scale]);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        setPaletteOpen((open) => !open);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
+  if (error) return <div className="fatal">Replica unavailable: {error}</div>;
+  if (!realms) return <div className="fatal muted">Opening replica…</div>;
+  if (!realm || !realmRow) return <div className="fatal">No company in this replica. Run a sync first.</div>;
+
+  const go = (next: Route) => {
+    window.location.hash = href(realm, next);
+  };
+
+  const writeState: WriteState = {
+    enabled: status?.writeEnabled ?? false,
+    environment: status?.environment ?? "production",
+    refresh: () => setStatusTick((t) => t + 1),
+  };
+
+  return (
+    <Writes.Provider value={writeState}>
+    <Classes.Provider value={classes}>
+    <div className="shell">
+      <header className="chrome">
+        <a className="wordmark" href={href(realm, { view: "list", docType: "Invoice" })} aria-label="BunzBooks home">
+          <Bun />
+          <span>BunzBooks</span>
+        </a>
+        <select
+          className="realm"
+          aria-label="Company"
+          value={realm}
+          onChange={(e) => (window.location.hash = href(e.target.value, { view: "list", docType: "Invoice" }))}
+        >
+          {realms.map((r) => (
+            <option key={r.realmId} value={r.realmId}>
+              {r.displayName}
+            </option>
+          ))}
+        </select>
+        <button className="search-trigger" onClick={() => setPaletteOpen(true)}>
+          <span>Find a number, name, SKU or amount</span>
+          <kbd>{navigator.platform.includes("Mac") ? "⌘K" : "Ctrl K"}</kbd>
+        </button>
+        <div className="chrome-tools">
+          <button aria-label="Smaller text" onClick={() => setScale((s) => Math.max(0.9, +(s - 0.1).toFixed(1)))}>
+            A−
+          </button>
+          <button aria-label="Larger text" onClick={() => setScale((s) => Math.min(1.7, +(s + 0.1).toFixed(1)))}>
+            A+
+          </button>
+          <button
+            aria-label="Theme"
+            title={`Theme: ${theme}`}
+            onClick={() => setTheme((t) => (t === "auto" ? "dark" : t === "dark" ? "light" : "auto"))}
+          >
+            {theme === "dark" ? "Dark" : theme === "light" ? "Light" : "Auto"}
+          </button>
+        </div>
+      </header>
+
+      <nav className="rail" aria-label="Registers">
+        {REGISTERS.map((group) => (
+          <div key={group.group} className="rail-group">
+            <div className="rail-head">{group.group}</div>
+            {group.types.map((t) => {
+              const count = status?.entityTypes.find((e) => e.entityType === t)?.count;
+              const active = route.view === "list" && route.docType === t;
+              return (
+                <a key={t} className={active ? "rail-item active" : "rail-item"} href={href(realm, { view: "list", docType: t })}>
+                  <span>{DOC_PLURALS[t]}</span>
+                  {count !== undefined && <span className="rail-count num">{count.toLocaleString()}</span>}
+                </a>
+              );
+            })}
+          </div>
+        ))}
+        <div className="rail-group">
+          <div className="rail-head">Lists</div>
+          <a className={route.view === "items" || route.view === "item" ? "rail-item active" : "rail-item"} href={href(realm, { view: "items" })}>
+            <span>Products and services</span>
+          </a>
+          <a className={route.view === "writes" ? "rail-item active" : "rail-item"} href={href(realm, { view: "writes" })}>
+            <span>Sync queue</span>
+            {status && status.outboxPending + status.outboxNeedsAttention > 0 && (
+              <span className={status.outboxNeedsAttention > 0 ? "rail-count crit-text num" : "rail-count num"}>
+                {status.outboxPending + status.outboxNeedsAttention}
+              </span>
+            )}
+          </a>
+        </div>
+        <div className="rail-group">
+          <div className="rail-head">Manufacturing</div>
+          <a className={route.view === "materials" ? "rail-item active" : "rail-item"} href={href(realm, { view: "materials" })}>
+            <span>Materials</span>
+          </a>
+          <a className={route.view === "sheets" || route.view === "sheet" ? "rail-item active" : "rail-item"} href={href(realm, { view: "sheets" })}>
+            <span>Build sheets</span>
+          </a>
+          <a className={route.view === "builds" ? "rail-item active" : "rail-item"} href={href(realm, { view: "builds" })}>
+            <span>Builds</span>
+          </a>
+          <a className={route.view === "import" ? "rail-item active" : "rail-item"} href={href(realm, { view: "import" })}>
+            <span>Import from a spreadsheet</span>
+          </a>
+        </div>
+        <div className="rail-group">
+          <div className="rail-head">Reports</div>
+          {(["ar", "ap", "sales"] as Report[]).map((r) => (
+            <a key={r} className={route.view === "report" && route.report === r ? "rail-item active" : "rail-item"} href={href(realm, { view: "report", report: r })}>
+              <span>{REPORT_LABELS[r]}</span>
+            </a>
+          ))}
+        </div>
+      </nav>
+
+      <main className="main">
+        {route.view === "list" && <Register key={`${realm}:${route.docType}`} realm={realm} docType={route.docType} go={go} />}
+        {route.view === "doc" && <DocumentView key={`${realm}:${route.qboId}`} realm={realm} qboId={route.qboId} go={go} />}
+        {route.view === "report" && route.report !== "sales" && (
+          <AgingReport key={`${realm}:${route.report}`} realm={realm} side={route.report === "ar" ? "receivable" : "payable"} />
+        )}
+        {route.view === "report" && route.report === "sales" && <SalesReport key={realm} realm={realm} />}
+        {route.view === "items" && <ItemsView key={realm} realm={realm} go={go} />}
+        {route.view === "item" && <ItemView key={`${realm}:${route.itemId}`} realm={realm} itemId={route.itemId} />}
+        {route.view === "new" && <Editor key={`${realm}:new:${route.docType}`} realm={realm} docType={route.docType} go={go} />}
+        {route.view === "edit" && <Editor key={`${realm}:edit:${route.qboId}`} realm={realm} qboId={route.qboId} go={go} />}
+        {route.view === "writes" && <WritesView key={realm} realm={realm} />}
+        {route.view === "materials" && <MaterialsView key={realm} realm={realm} />}
+        {route.view === "sheets" && <SheetsView key={realm} realm={realm} go={go} />}
+        {route.view === "sheet" && <SheetView key={`${realm}:${route.itemId}`} realm={realm} itemId={route.itemId} />}
+        {route.view === "builds" && <BuildsView key={realm} realm={realm} />}
+        {route.view === "import" && <ImportView key={realm} realm={realm} />}
+        {route.view === "pay" && <PaymentEntry key={`${realm}:in:${route.customerId ?? ""}`} realm={realm} side="receive" contactId={route.customerId} go={go} />}
+        {route.view === "expense" && <ExpenseEditor key={realm} realm={realm} go={go} />}
+        {route.view === "deposit" && <DepositView key={realm} realm={realm} go={go} />}
+        {route.view === "paybills" && <PaymentEntry key={`${realm}:out:${route.vendorId ?? ""}`} realm={realm} side="pay" contactId={route.vendorId} go={go} />}
+        {route.view === "contact" && (
+          <ContactView key={`${realm}:${route.contactId}`} realm={realm} contactType={route.contactType} contactId={route.contactId} go={go} />
+        )}
+      </main>
+
+      <StatusBar status={status} now={now} realm={realm} />
+
+      {paletteOpen && <Palette realm={realm} go={go} close={() => setPaletteOpen(false)} />}
+    </div>
+    </Classes.Provider>
+    </Writes.Provider>
+  );
+}
+
+function Bun() {
+  return (
+    <svg viewBox="0 0 32 24" width="26" height="20" aria-hidden="true">
+      <path d="M3 12c0-6 6-10 13-10s13 4 13 10z" fill="var(--bun-top)" />
+      <ellipse cx="11" cy="6" rx="1.2" ry=".7" fill="var(--bun-seed)" />
+      <ellipse cx="17" cy="4.6" rx="1.2" ry=".7" fill="var(--bun-seed)" />
+      <ellipse cx="22" cy="7" rx="1.2" ry=".7" fill="var(--bun-seed)" />
+      <rect x="2" y="13" width="28" height="3.5" rx="1.7" fill="var(--bun-fill)" />
+      <path d="M3 18h26c0 2.5-2 4-5 4H8c-3 0-5-1.5-5-4z" fill="var(--bun-heel)" />
+    </svg>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Status bar
+// ---------------------------------------------------------------------------
+
+function StatusBar({ status, now, realm }: { status: Status | null; now: number; realm: string }) {
+  if (!status) return <footer className="statusbar">Status unavailable</footer>;
+  const total = status.entityTypes.reduce((sum, t) => sum + t.count, 0);
+  return (
+    <footer className="statusbar" role="status">
+      <span title={status.lastSynced ?? "never"}>Synced {ago(status.lastSynced, now)}</span>
+      <a href={href(realm, { view: "writes" })} className={status.outboxPending > 0 ? "pill warn" : "pill"}>{status.outboxPending} queued</a>
+      <a href={href(realm, { view: "writes" })} className={status.outboxNeedsAttention > 0 ? "pill crit" : "pill"}>{status.outboxNeedsAttention} need attention</a>
+      {status.quarantined > 0 && <span className="pill warn">{status.quarantined} quarantined</span>}
+      <span className="spacer" />
+      <span className="num">{total.toLocaleString()} records on disk</span>
+      {status.environment === "sandbox" && <span className="pill">Sandbox</span>}
+      <span className={status.writeEnabled ? "pill warn" : "pill ok"}>{status.writeEnabled ? "Writes on" : "Read-only"}</span>
+    </footer>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Register
+// ---------------------------------------------------------------------------
+
+type SortKey = "txnDate" | "docNumber" | "contactName" | "totalMinor" | "balanceMinor";
+
+function Register({ realm, docType, go }: { realm: string; docType: DocType; go: (r: Route) => void }) {
+  const [rows, setRows] = useState<Document[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [filter, setFilter] = useState("");
+  const [openOnly, setOpenOnly] = useState(false);
+  const [sort, setSort] = useState<{ key: SortKey; desc: boolean }>({ key: "txnDate", desc: true });
+  const [cursor, setCursor] = useState(0);
+  const [elapsed, setElapsed] = useState<number | null>(null);
+  const body = useRef<HTMLTableSectionElement>(null);
+
+  useEffect(() => {
+    const started = performance.now();
+    api.documents(realm, docType).then(
+      (r) => {
+        setRows(r);
+        setElapsed(performance.now() - started);
+      },
+      (e: ApiError) => setError(e.message),
+    );
+  }, [realm, docType]);
+
+  const hasBalance = rows?.some((r) => r.balanceMinor !== null) ?? false;
+
+  const visible = useMemo(() => {
+    if (!rows) return [];
+    const needle = filter.trim().toLowerCase();
+    const filtered = rows.filter((r) => {
+      if (openOnly && !(r.balanceMinor && r.balanceMinor !== 0)) return false;
+      if (!needle) return true;
+      return [r.docNumber, r.contactName, r.poNumber, r.status, formatMoney(r.totalMinor), r.txnDate]
+        .some((v) => v?.toLowerCase().includes(needle));
+    });
+    const dir = sort.desc ? -1 : 1;
+    return filtered.sort((a, b) => {
+      const x = a[sort.key] ?? "";
+      const y = b[sort.key] ?? "";
+      if (sort.key === "docNumber") {
+        return dir * String(x).localeCompare(String(y), undefined, { numeric: true });
+      }
+      return x < y ? -dir : x > y ? dir : 0;
+    });
+  }, [rows, filter, openOnly, sort]);
+
+  useEffect(() => setCursor(0), [filter, openOnly, sort]);
+
+  // Only the visible window is rendered: a nine-thousand-row register costs
+  // the same to draw as a forty-row one. Rows are fixed height, measured once.
+  const scroller = useRef<HTMLDivElement>(null);
+  const [rowHeight, setRowHeight] = useState(28);
+  const [view, setView] = useState({ top: 0, height: 800 });
+
+  useEffect(() => {
+    const el = scroller.current;
+    if (!el) return;
+    const measure = () => {
+      const row = el.querySelector("tbody tr[data-index]");
+      if (row) setRowHeight(row.getBoundingClientRect().height || 28);
+      setView({ top: el.scrollTop, height: el.clientHeight });
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [rows]);
+
+  useEffect(() => {
+    const el = scroller.current;
+    if (!el) return;
+    const header = el.querySelector("thead")?.getBoundingClientRect().height ?? 0;
+    const footer = el.querySelector("tfoot")?.getBoundingClientRect().height ?? 0;
+    const rowTop = cursor * rowHeight;
+    if (rowTop < el.scrollTop) el.scrollTop = rowTop;
+    else if (rowTop + rowHeight > el.scrollTop + el.clientHeight - header - footer)
+      el.scrollTop = rowTop + rowHeight - el.clientHeight + header + footer;
+  }, [cursor, rowHeight]);
+
+  const OVERSCAN = 20;
+  const first = Math.max(0, Math.floor(view.top / rowHeight) - OVERSCAN);
+  const last = Math.min(visible.length, Math.ceil((view.top + view.height) / rowHeight) + OVERSCAN);
+
+  const onKey = (e: React.KeyboardEvent) => {
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      setCursor((c) => Math.min(visible.length - 1, c + 1));
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      setCursor((c) => Math.max(0, c - 1));
+    } else if (e.key === "Enter" && visible[cursor]) {
+      go({ view: "doc", qboId: visible[cursor].qboId });
+    }
+  };
+
+  const header = (key: SortKey, label: string, className = "") => (
+    <th
+      className={className}
+      aria-sort={sort.key === key ? (sort.desc ? "descending" : "ascending") : "none"}
+      onClick={() => setSort((s) => ({ key, desc: s.key === key ? !s.desc : key !== "contactName" }))}
+    >
+      {label}
+      {sort.key === key ? (sort.desc ? " ▾" : " ▴") : ""}
+    </th>
+  );
+
+  const openTotal = visible.reduce((sum, r) => sum + (r.balanceMinor ?? 0), 0);
+  const total = visible.reduce((sum, r) => sum + r.totalMinor, 0);
+
+  return (
+    <section className="register" onKeyDown={onKey}>
+      <div className="toolbar">
+        <h1>{DOC_PLURALS[docType]}</h1>
+        <input
+          className="filter"
+          placeholder="Filter this register"
+          value={filter}
+          onChange={(e) => setFilter(e.target.value)}
+          autoFocus
+          aria-label="Filter"
+        />
+        {hasBalance && (
+          <label className="check">
+            <input type="checkbox" checked={openOnly} onChange={(e) => setOpenOnly(e.target.checked)} /> Open only
+          </label>
+        )}
+        <span className="spacer" />
+        {EDITABLE.includes(docType) && <NewButton realm={realm} docType={docType} />}
+        {docType === "Payment" && <PayButton realm={realm} customerId={null} primary />}
+        {docType === "BillPayment" && <PayButton realm={realm} side="pay" customerId={null} primary />}
+        {docType === "Deposit" && <DepositButton realm={realm} />}
+        {docType === "Purchase" && <WriteLinkButton realm={realm} route={{ view: "expense" }} label="New expense" />}
+        {elapsed !== null && rows && (
+          <span className="muted num">
+            {visible.length.toLocaleString()} of {rows.length.toLocaleString()} · {elapsed.toFixed(0)} ms
+          </span>
+        )}
+      </div>
+      {error && <div className="error">{error}</div>}
+      {!rows && !error && <div className="muted pad">Loading…</div>}
+      {rows && rows.length === 0 && <div className="muted pad">No {DOC_PLURALS[docType].toLowerCase()} in the replica.</div>}
+      {rows && rows.length > 0 && (
+        <div className="grid-wrap" ref={scroller} onScroll={(e) => setView({ top: e.currentTarget.scrollTop, height: e.currentTarget.clientHeight })}>
+          <table className="grid">
+            <thead>
+              <tr>
+                {header("txnDate", "Date")}
+                {header("docNumber", "No.")}
+                {header("contactName", VENDOR_SIDE.has(docType) ? "Vendor" : "Customer")}
+                <th>PO</th>
+                <th>Status</th>
+                {header("totalMinor", "Total", "r")}
+                {hasBalance && header("balanceMinor", "Open", "r")}
+              </tr>
+            </thead>
+            <tbody ref={body}>
+              {first > 0 && (
+                <tr aria-hidden="true" style={{ height: first * rowHeight }}>
+                  <td colSpan={7} className="spacer-row" />
+                </tr>
+              )}
+              {visible.slice(first, last).map((r, offset) => {
+                const i = first + offset;
+                return (
+                <tr
+                  key={r.qboId}
+                  data-index={i}
+                  className={i === cursor ? "cursor" : ""}
+                  onClick={() => setCursor(i)}
+                  onDoubleClick={() => go({ view: "doc", qboId: r.qboId })}
+                >
+                  <td className="num">{formatDate(r.txnDate)}</td>
+                  <td className="num">
+                    <a href={href(realm, { view: "doc", qboId: r.qboId })}>{r.docNumber ?? "—"}</a>
+                  </td>
+                  <td className="ellipsis">
+                    {r.contactId && r.contactType ? (
+                      <a href={href(realm, { view: "contact", contactType: r.contactType, contactId: r.contactId })}>
+                        {r.contactName ?? r.contactId}
+                      </a>
+                    ) : (
+                      <span className="muted">—</span>
+                    )}
+                  </td>
+                  <td className="num muted">{r.poNumber ?? ""}</td>
+                  <td>
+                    <Badge doc={r} />
+                  </td>
+                  <td className="num r">{formatMoney(r.totalMinor)}</td>
+                  {hasBalance && <td className="num r">{r.balanceMinor ? formatMoney(r.balanceMinor) : ""}</td>}
+                </tr>
+                );
+              })}
+              {last < visible.length && (
+                <tr aria-hidden="true" style={{ height: (visible.length - last) * rowHeight }}>
+                  <td colSpan={7} className="spacer-row" />
+                </tr>
+              )}
+            </tbody>
+            <tfoot>
+              <tr>
+                <td colSpan={5}>{visible.length.toLocaleString()} shown</td>
+                <td className="num r">{formatMoney(total)}</td>
+                {hasBalance && <td className="num r">{formatMoney(openTotal)}</td>}
+              </tr>
+            </tfoot>
+          </table>
+        </div>
+      )}
+    </section>
+  );
+}
+
+function Badge({ doc }: { doc: Document }) {
+  if (doc.pendingWrite) {
+    const failed = doc.pendingWrite === "conflicted" || doc.pendingWrite === "rejected";
+    return <span className={failed ? "badge crit" : "badge warn"}>{doc.status}</span>;
+  }
+  if (doc.balanceMinor !== null) {
+    if (doc.balanceMinor === 0) return <span className="badge ok">Paid</span>;
+    const overdue = doc.dueDate && doc.dueDate < new Date().toISOString().slice(0, 10);
+    if (doc.balanceMinor !== doc.totalMinor) return <span className={overdue ? "badge crit" : "badge warn"}>Partial</span>;
+    return <span className={overdue ? "badge crit" : "badge"}>{overdue ? "Overdue" : "Open"}</span>;
+  }
+  return doc.status ? <span className="badge">{doc.status}</span> : null;
+}
+
+// ---------------------------------------------------------------------------
+// Document
+// ---------------------------------------------------------------------------
+
+function DocumentView({ realm, qboId, go }: { realm: string; qboId: string; go: (r: Route) => void }) {
+  const [detail, setDetail] = useState<DocumentDetail | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const writes = useContext(Writes);
+  const [tick, setTick] = useState(0);
+  useEffect(() => {
+    api.document(realm, qboId).then(setDetail, (e: ApiError) => setError(e.message));
+  }, [realm, qboId, tick]);
+  // While a write about this document is on its way, look again until it lands.
+  const waiting = !!detail && (!!detail.document.pendingWrite || detail.openWrites.some((w) => w.state === "pending" || w.state === "in_flight"));
+  useEffect(() => {
+    if (!waiting) return;
+    const timer = window.setTimeout(() => setTick((t) => t + 1), 3_000);
+    return () => window.clearTimeout(timer);
+  }, [waiting, tick]);
+
+  const className = useClassName();
+  if (error) return <div className="error pad">{error}</div>;
+  if (!detail) return <div className="muted pad">Loading…</div>;
+  const d = detail.document;
+
+  return (
+    <section className="document">
+      <div className="toolbar">
+        <a className="back" href={href(realm, { view: "list", docType: d.docType })}>
+          ← {DOC_PLURALS[d.docType]}
+        </a>
+        <h1>
+          {DOC_LABELS[d.docType]} <span className="num">{d.docNumber ?? `#${d.qboId}`}</span>
+        </h1>
+        <Badge doc={d} />
+        <span className="spacer" />
+        {d.docType === "Invoice" && !d.pendingWrite && (d.balanceMinor ?? 0) > 0 && d.contactId && writes.enabled && (
+          <PayButton realm={realm} customerId={d.contactId} />
+        )}
+        {d.docType === "Bill" && !d.pendingWrite && (d.balanceMinor ?? 0) > 0 && d.contactId && writes.enabled && (
+          <PayButton realm={realm} side="pay" customerId={d.contactId} />
+        )}
+        {EDITABLE.includes(d.docType) && !d.pendingWrite && writes.enabled ? (
+          <a className="button" href={href(realm, { view: "edit", qboId: d.qboId })}>Edit</a>
+        ) : (
+          <span className="muted">{writes.enabled ? "Edit in QuickBooks" : "Read-only · edit in QuickBooks"}</span>
+        )}
+      </div>
+      {d.pendingWrite && (
+        <p className={d.pendingWrite === "conflicted" || d.pendingWrite === "rejected" ? "banner crit" : "banner"}>
+          {d.pendingWrite === "rejected" || d.pendingWrite === "conflicted"
+            ? <>QuickBooks did not accept this document. <a href={href(realm, { view: "writes" })}>Open the sync queue</a> to retry or discard it.</>
+            : "Saved here. Not yet in QuickBooks: it will be sent in the background, and this page updates when it lands. Tax is added by QuickBooks."}
+        </p>
+      )}
+      {!d.pendingWrite && detail.openWrites.map((w) => (
+        <p key={w.id} className={w.state === "conflicted" || w.state === "rejected" ? "banner crit" : "banner"}>
+          {w.state === "conflicted"
+            ? <>Someone changed this {DOC_LABELS[d.docType].toLowerCase()} in QuickBooks after your edit was made. <a href={href(realm, { view: "writes" })}>Review it in the sync queue</a>.</>
+            : w.state === "rejected"
+              ? <>QuickBooks refused your edit: {w.lastError}. <a href={href(realm, { view: "writes" })}>Open the sync queue</a>.</>
+              : "Your edit is saved here and on its way to QuickBooks. The figures below are QuickBooks' until it lands."}
+        </p>
+      ))}
+
+      <dl className="facts">
+        <div>
+          <dt>{d.contactType ?? "Contact"}</dt>
+          <dd>
+            {d.contactId && d.contactType ? (
+              <a href={href(realm, { view: "contact", contactType: d.contactType, contactId: d.contactId })}>{d.contactName ?? d.contactId}</a>
+            ) : (
+              "—"
+            )}
+          </dd>
+        </div>
+        <div>
+          <dt>Date</dt>
+          <dd className="num">{formatDate(d.txnDate)}</dd>
+        </div>
+        {d.dueDate && (
+          <div>
+            <dt>Due</dt>
+            <dd className="num">{formatDate(d.dueDate)}</dd>
+          </div>
+        )}
+        {d.poNumber && (
+          <div>
+            <dt>Customer PO</dt>
+            <dd className="num">{d.poNumber}</dd>
+          </div>
+        )}
+        <div>
+          <dt>Total</dt>
+          <dd className="num">{formatMoney(d.totalMinor)}</dd>
+        </div>
+        {d.balanceMinor !== null && (
+          <div>
+            <dt>Open</dt>
+            <dd className="num">{formatMoney(d.balanceMinor)}</dd>
+          </div>
+        )}
+        {d.classId && (
+          <div>
+            <dt>Class</dt>
+            <dd>{className(d.classId)}</dd>
+          </div>
+        )}
+      </dl>
+      {d.privateNote && <p className="note">Note: {d.privateNote}</p>}
+
+      <div className="grid-wrap">
+        <table className="grid lines">
+          <thead>
+            <tr>
+              <th>#</th>
+              <th>Description</th>
+              <th className="r">Qty</th>
+              <th className="r">Rate</th>
+              <th className="r">Amount</th>
+              <th>Class</th>
+              <th>Tax</th>
+            </tr>
+          </thead>
+          <tbody>
+            {detail.lines.map((l) => (
+              <tr key={l.lineNo}>
+                <td className="num muted">{l.lineNo}</td>
+                <td>{l.description ?? <span className="muted">—</span>}</td>
+                <td className="num r">{formatDecimal(l.qty)}</td>
+                <td className="num r">{formatDecimal(l.unitPrice)}</td>
+                <td className="num r">{formatMoney(l.amountMinor)}</td>
+                <td className="muted">{className(l.classId)}</td>
+                <td className="muted">{l.taxable ? "Tax" : ""}</td>
+              </tr>
+            ))}
+            {detail.lines.length === 0 && (
+              <tr>
+                <td colSpan={7} className="muted">
+                  No item lines
+                </td>
+              </tr>
+            )}
+          </tbody>
+          <tfoot>
+            <tr>
+              <td colSpan={4}>Total</td>
+              <td className="num r">{formatMoney(d.totalMinor)}</td>
+              <td colSpan={2} />
+            </tr>
+          </tfoot>
+        </table>
+      </div>
+
+      <h2>Chain</h2>
+      {detail.related.length <= 1 && detail.unresolved.length === 0 ? (
+        <p className="muted indent">Not linked to any other document.</p>
+      ) : (
+        <ol className="chain">
+          {[...detail.related]
+            .sort((a, b) => a.txnDate.localeCompare(b.txnDate))
+            .map((r) => (
+              <li key={r.qboId} className={r.qboId === d.qboId ? "here" : ""}>
+                <button onClick={() => go({ view: "doc", qboId: r.qboId })} disabled={r.qboId === d.qboId}>
+                  <span className="chain-type">{DOC_LABELS[r.docType]}</span>
+                  <span className="num">{r.docNumber ?? `#${r.qboId}`}</span>
+                  <span className="num muted">{formatDate(r.txnDate)}</span>
+                  <span className="num">{formatMoney(r.totalMinor)}</span>
+                </button>
+              </li>
+            ))}
+          {detail.unresolved.map((id) => (
+            <li key={id} className="gap">
+              Linked record {id} is not in the replica
+            </li>
+          ))}
+        </ol>
+      )}
+    </section>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Contact
+// ---------------------------------------------------------------------------
+
+function ContactView({
+  realm,
+  contactType,
+  contactId,
+  go,
+}: {
+  realm: string;
+  contactType: ContactType;
+  contactId: string;
+  go: (r: Route) => void;
+}) {
+  const [rows, setRows] = useState<Document[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [aging, setAging] = useState<Aging["rows"][number] | null>(null);
+  useEffect(() => {
+    api.contactDocuments(realm, contactType, contactId).then(setRows, (e: ApiError) => setError(e.message));
+    // The statement view: this contact's open balance by days past due.
+    api.aging(realm, contactType === "Customer" ? "receivable" : "payable").then(
+      (a) => setAging(a.rows.find((r) => r.contactId === contactId) ?? null),
+      () => setAging(null),
+    );
+  }, [realm, contactType, contactId]);
+
+  if (error) return <div className="error pad">{error}</div>;
+  if (!rows) return <div className="muted pad">Loading…</div>;
+  const name = rows.find((r) => r.contactName)?.contactName ?? `${contactType} ${contactId}`;
+  const open = rows.reduce((sum, r) => sum + (r.docType === "Invoice" || r.docType === "Bill" ? r.balanceMinor ?? 0 : 0), 0);
+  const sorted = [...rows].sort((a, b) => b.txnDate.localeCompare(a.txnDate));
+
+  return (
+    <section className="register">
+      <div className="toolbar">
+        <h1>{name}</h1>
+        <span className="badge">{contactType}</span>
+        <span className="spacer" />
+        <span className="num">Open {formatMoney(open)}</span>
+        {open > 0 && <PayButton realm={realm} side={contactType === "Vendor" ? "pay" : "receive"} customerId={contactId} />}
+      </div>
+      {aging && (
+        <dl className="facts aging-strip" aria-label="Open balance by days past due">
+          {AGING_COLUMNS.map((c) => (
+            <div key={c.key}>
+              <dt>{c.label}</dt>
+              <dd className={c.key === "over90Minor" && aging.over90Minor ? "num crit-text" : "num"}>{formatMoney(aging[c.key] as number)}</dd>
+            </div>
+          ))}
+        </dl>
+      )}
+      <div className="grid-wrap">
+        <table className="grid">
+          <thead>
+            <tr>
+              <th>Date</th>
+              <th>Type</th>
+              <th>No.</th>
+              <th>Status</th>
+              <th className="r">Total</th>
+              <th className="r">Open</th>
+            </tr>
+          </thead>
+          <tbody>
+            {sorted.map((r) => (
+              <tr key={r.qboId} onDoubleClick={() => go({ view: "doc", qboId: r.qboId })}>
+                <td className="num">{formatDate(r.txnDate)}</td>
+                <td>{DOC_LABELS[r.docType]}</td>
+                <td className="num">
+                  <a href={href(realm, { view: "doc", qboId: r.qboId })}>{r.docNumber ?? `#${r.qboId}`}</a>
+                </td>
+                <td>
+                  <Badge doc={r} />
+                </td>
+                <td className="num r">{formatMoney(r.totalMinor)}</td>
+                <td className="num r">{r.balanceMinor ? formatMoney(r.balanceMinor) : ""}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Command palette
+// ---------------------------------------------------------------------------
+
+function Palette({ realm, go, close }: { realm: string; go: (r: Route) => void; close: () => void }) {
+  const [query, setQuery] = useState("");
+  const [result, setResult] = useState<SearchResult | null>(null);
+  const [cursor, setCursor] = useState(0);
+  const sequence = useRef(0);
+
+  useEffect(() => {
+    const ticket = ++sequence.current;
+    if (!query.trim()) {
+      setResult(null);
+      return;
+    }
+    api.search(realm, query).then((r) => {
+      // Responses can return out of order; only the latest keystroke wins.
+      if (ticket === sequence.current) {
+        setResult(r);
+        setCursor(0);
+      }
+    });
+  }, [realm, query]);
+
+  const open = useCallback(
+    (hit: Hit) => {
+      close();
+      if (hit.kind === "document") go({ view: "doc", qboId: hit.document.qboId });
+      else if (hit.kind === "contact") go({ view: "contact", contactType: hit.contactType, contactId: hit.qboId });
+    },
+    [close, go],
+  );
+
+  const hits = result?.hits ?? [];
+  const onKey = (e: React.KeyboardEvent) => {
+    if (e.key === "Escape") close();
+    else if (e.key === "ArrowDown") {
+      e.preventDefault();
+      setCursor((c) => Math.min(hits.length - 1, c + 1));
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      setCursor((c) => Math.max(0, c - 1));
+    } else if (e.key === "Enter" && hits[cursor]) open(hits[cursor]);
+  };
+
+  return (
+    <div className="scrim" onMouseDown={close}>
+      <div className="palette" role="dialog" aria-label="Search" onMouseDown={(e) => e.stopPropagation()} onKeyDown={onKey}>
+        <input autoFocus value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Invoice 9005, PO-41230, Harbor, RT-RED, 1234.56" aria-label="Search" />
+        <ul className="hits">
+          {hits.map((hit, i) => (
+            <li key={i} className={i === cursor ? "cursor" : ""} onMouseEnter={() => setCursor(i)} onClick={() => open(hit)}>
+              <HitRow hit={hit} />
+              <span className="reason">{hit.reason}</span>
+            </li>
+          ))}
+          {result && hits.length === 0 && <li className="muted">Nothing matches.</li>}
+        </ul>
+        <div className="palette-foot muted">
+          {result ? `${hits.length} results · ${(result.elapsedMicros / 1000).toFixed(1)} ms local` : "Searches the replica on disk; no network."}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function HitRow({ hit }: { hit: Hit }) {
+  switch (hit.kind) {
+    case "document":
+      return (
+        <span className="hit hit-doc">
+          <span className="hit-type">{DOC_LABELS[hit.document.docType]}</span>
+          <span className="num">{hit.document.docNumber ?? `#${hit.document.qboId}`}</span>
+          <span className="ellipsis">{hit.document.contactName}</span>
+          <span className="num muted">{formatDate(hit.document.txnDate)}</span>
+          <span className="num">{formatMoney(hit.document.totalMinor)}</span>
+        </span>
+      );
+    case "contact":
+      return (
+        <span className="hit hit-contact">
+          <span className="hit-type">{hit.contactType}</span>
+          <span className="ellipsis">{hit.displayName}</span>
+          <span className="num">{hit.balanceMinor ? formatMoney(hit.balanceMinor) : ""}</span>
+        </span>
+      );
+    case "item":
+      return (
+        <span className="hit hit-item">
+          <span className="hit-type">Item</span>
+          <span className="ellipsis">{hit.name}</span>
+          <span className="num muted">{hit.sku}</span>
+          <span className="num">{formatDecimal(hit.unitPrice)}</span>
+        </span>
+      );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Reports
+// ---------------------------------------------------------------------------
+
+const todayIso = () => {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+};
+
+const AGING_COLUMNS: { key: keyof Aging["rows"][number]; label: string }[] = [
+  { key: "currentMinor", label: "Current" },
+  { key: "days1to30Minor", label: "1–30" },
+  { key: "days31to60Minor", label: "31–60" },
+  { key: "days61to90Minor", label: "61–90" },
+  { key: "over90Minor", label: "Over 90" },
+  { key: "totalMinor", label: "Total" },
+];
+
+function AgingReport({ realm, side }: { realm: string; side: "receivable" | "payable" }) {
+  const [asOf, setAsOf] = useState(todayIso);
+  const [data, setData] = useState<Aging | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(asOf)) return;
+    api.aging(realm, side, asOf).then(setData, (e: ApiError) => setError(e.message));
+  }, [realm, side, asOf]);
+  const contactType: ContactType = side === "receivable" ? "Customer" : "Vendor";
+  const totals = AGING_COLUMNS.map((c) => (data?.rows ?? []).reduce((sum, r) => sum + (r[c.key] as number), 0));
+
+  return (
+    <section className="register">
+      <div className="toolbar">
+        <h1>{side === "receivable" ? "A/R aging" : "A/P aging"}</h1>
+        <label className="check">
+          As of <input type="date" className="filter date" value={asOf} onChange={(e) => setAsOf(e.target.value)} aria-label="As of" />
+        </label>
+        <span className="spacer" />
+        <span className="muted">Open {side === "receivable" ? "invoices" : "bills"} by days past due · balances as of last sync</span>
+      </div>
+      {error && <div className="error">{error}</div>}
+      {!data && !error && <div className="muted pad">Loading…</div>}
+      {data && data.rows.length === 0 && <div className="muted pad">Nothing open on {formatDate(data.asOf)}.</div>}
+      {data && data.rows.length > 0 && (
+        <div className="grid-wrap">
+          <table className="grid">
+            <thead>
+              <tr>
+                <th>{contactType}</th>
+                {AGING_COLUMNS.map((c) => (
+                  <th key={c.key} className="r">{c.label}</th>
+                ))}
+                <th className="r">Docs</th>
+              </tr>
+            </thead>
+            <tbody>
+              {data.rows.map((r) => (
+                <tr key={r.contactId}>
+                  <td className="ellipsis">
+                    <a href={href(realm, { view: "contact", contactType, contactId: r.contactId })}>{r.contactName ?? r.contactId}</a>
+                  </td>
+                  {AGING_COLUMNS.map((c) => (
+                    <td key={c.key} className={c.key === "over90Minor" && r.over90Minor ? "num r crit-text" : "num r"}>
+                      {(r[c.key] as number) ? formatMoney(r[c.key] as number) : ""}
+                    </td>
+                  ))}
+                  <td className="num r muted">{r.documents}</td>
+                </tr>
+              ))}
+            </tbody>
+            <tfoot>
+              <tr>
+                <td>{data.rows.length} {contactType.toLowerCase()}s</td>
+                {totals.map((t, i) => (
+                  <td key={i} className="num r">{formatMoney(t)}</td>
+                ))}
+                <td />
+              </tr>
+            </tfoot>
+          </table>
+        </div>
+      )}
+    </section>
+  );
+}
+
+function SalesReport({ realm }: { realm: string }) {
+  const year = new Date().getFullYear();
+  const [from, setFrom] = useState(`${year}-01-01`);
+  const [to, setTo] = useState(todayIso);
+  const [rows, setRows] = useState<SalesRow[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    const ok = /^\d{4}-\d{2}-\d{2}$/;
+    if (!ok.test(from) || !ok.test(to)) return;
+    api.salesByCustomer(realm, from, to).then(setRows, (e: ApiError) => setError(e.message));
+  }, [realm, from, to]);
+  const total = (rows ?? []).reduce((sum, r) => sum + r.netSalesMinor, 0);
+  const max = Math.max(1, ...(rows ?? []).map((r) => r.netSalesMinor));
+
+  return (
+    <section className="register">
+      <div className="toolbar">
+        <h1>Sales by customer</h1>
+        <label className="check">
+          From <input type="date" className="filter date" value={from} onChange={(e) => setFrom(e.target.value)} aria-label="From" />
+        </label>
+        <label className="check">
+          To <input type="date" className="filter date" value={to} onChange={(e) => setTo(e.target.value)} aria-label="To" />
+        </label>
+        <span className="spacer" />
+        <span className="muted">Line amounts, before tax, less credit memos and refunds</span>
+      </div>
+      {error && <div className="error">{error}</div>}
+      {!rows && !error && <div className="muted pad">Loading…</div>}
+      {rows && rows.length === 0 && <div className="muted pad">No sales in this range.</div>}
+      {rows && rows.length > 0 && (
+        <div className="grid-wrap">
+          <table className="grid">
+            <thead>
+              <tr>
+                <th>Customer</th>
+                <th className="r">Net sales</th>
+                <th className="bar-col">Share</th>
+                <th className="r">Docs</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((r) => (
+                <tr key={r.contactId}>
+                  <td className="ellipsis">
+                    <a href={href(realm, { view: "contact", contactType: "Customer", contactId: r.contactId })}>{r.contactName ?? r.contactId}</a>
+                  </td>
+                  <td className="num r">{formatMoney(r.netSalesMinor)}</td>
+                  <td className="bar-col">
+                    <span className="inline-bar" style={{ width: `${Math.max(0, (100 * r.netSalesMinor) / max)}%` }} />
+                  </td>
+                  <td className="num r muted">{r.documents}</td>
+                </tr>
+              ))}
+            </tbody>
+            <tfoot>
+              <tr>
+                <td>{rows.length} customers</td>
+                <td className="num r">{formatMoney(total)}</td>
+                <td colSpan={2} />
+              </tr>
+            </tfoot>
+          </table>
+        </div>
+      )}
+    </section>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Items
+// ---------------------------------------------------------------------------
+
+function ItemsView({ realm, go }: { realm: string; go: (r: Route) => void }) {
+  const [items, setItems] = useState<Item[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [filter, setFilter] = useState("");
+  useEffect(() => {
+    api.items(realm).then(setItems, (e: ApiError) => setError(e.message));
+  }, [realm]);
+  const needle = filter.trim().toLowerCase();
+  const shown = (items ?? []).filter((i) => !needle || [i.name, i.sku, i.itemType].some((v) => v?.toLowerCase().includes(needle)));
+
+  return (
+    <section className="register">
+      <div className="toolbar">
+        <h1>Products and services</h1>
+        <input className="filter" placeholder="Filter by name or SKU" value={filter} onChange={(e) => setFilter(e.target.value)} autoFocus aria-label="Filter" />
+        <span className="spacer" />
+        {items && <span className="muted num">{shown.length.toLocaleString()} of {items.length.toLocaleString()}</span>}
+      </div>
+      {error && <div className="error">{error}</div>}
+      {!items && !error && <div className="muted pad">Loading…</div>}
+      {items && (
+        <div className="grid-wrap">
+          <table className="grid">
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th>SKU</th>
+                <th>Type</th>
+                <th className="r">Price</th>
+                <th className="r">Cost</th>
+                <th className="r">On hand</th>
+                <th className="r">Used on</th>
+              </tr>
+            </thead>
+            <tbody>
+              {shown.map((i) => (
+                <tr key={i.qboId} onDoubleClick={() => go({ view: "item", itemId: i.qboId })} className={i.active ? "" : "inactive"}>
+                  <td className="ellipsis">
+                    <a href={href(realm, { view: "item", itemId: i.qboId })}>{i.name}</a>
+                  </td>
+                  <td className="num muted">{i.sku ?? ""}</td>
+                  <td className="muted">{i.itemType ?? ""}</td>
+                  <td className="num r">{formatDecimal(i.unitPrice)}</td>
+                  <td className="num r">{formatDecimal(i.purchaseCost)}</td>
+                  <td className="num r">{formatDecimal(i.qtyOnHand)}</td>
+                  <td className="num r muted">{i.usedOn.toLocaleString()}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </section>
+  );
+}
+
+function ItemView({ realm, itemId }: { realm: string; itemId: string }) {
+  const [item, setItem] = useState<Item | null>(null);
+  const [docs, setDocs] = useState<Document[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    api.items(realm).then((all) => setItem(all.find((i) => i.qboId === itemId) ?? null), (e: ApiError) => setError(e.message));
+    api.itemDocuments(realm, itemId).then(setDocs, (e: ApiError) => setError(e.message));
+  }, [realm, itemId]);
+
+  if (error) return <div className="error pad">{error}</div>;
+  if (!docs) return <div className="muted pad">Loading…</div>;
+  const sorted = [...docs].sort((a, b) => b.txnDate.localeCompare(a.txnDate));
+  const price = item?.unitPrice ? Number(item.unitPrice) : null;
+  const cost = item?.purchaseCost ? Number(item.purchaseCost) : null;
+  // Display only: a ratio of two prices, never an amount that is stored or summed.
+  const margin = price && cost !== null && price > 0 ? `${(((price - cost) / price) * 100).toFixed(1)}%` : "—";
+
+  return (
+    <section className="document">
+      <div className="toolbar">
+        <a className="back" href={href(realm, { view: "items" })}>← Products and services</a>
+        <h1>{item?.name ?? `Item ${itemId}`}</h1>
+        {item?.sku && <span className="badge">{item.sku}</span>}
+        <span className="spacer" />
+        <a className="button" href={href(realm, { view: "sheet", itemId })}>Build sheet</a>
+      </div>
+      <dl className="facts">
+        <div><dt>Price</dt><dd className="num">{formatDecimal(item?.unitPrice ?? null) || "—"}</dd></div>
+        <div><dt>Cost</dt><dd className="num">{formatDecimal(item?.purchaseCost ?? null) || "—"}</dd></div>
+        <div><dt>Margin</dt><dd className="num">{margin}</dd></div>
+        <div><dt>On hand</dt><dd className="num">{formatDecimal(item?.qtyOnHand ?? null) || "—"}</dd></div>
+        <div><dt>Used on</dt><dd className="num">{docs.length.toLocaleString()} documents</dd></div>
+      </dl>
+      <h2>Where used</h2>
+      <div className="grid-wrap">
+        <table className="grid">
+          <thead>
+            <tr>
+              <th>Date</th>
+              <th>Type</th>
+              <th>No.</th>
+              <th>Contact</th>
+              <th className="r">Total</th>
+            </tr>
+          </thead>
+          <tbody>
+            {sorted.map((d) => (
+              <tr key={d.qboId}>
+                <td className="num">{formatDate(d.txnDate)}</td>
+                <td>{DOC_LABELS[d.docType]}</td>
+                <td className="num">
+                  <a href={href(realm, { view: "doc", qboId: d.qboId })}>{d.docNumber ?? `#${d.qboId}`}</a>
+                </td>
+                <td className="ellipsis">{d.contactName ?? ""}</td>
+                <td className="num r">{formatMoney(d.totalMinor)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Writing (M2): the editor and the sync queue
+// ---------------------------------------------------------------------------
+
+function NewButton({ realm, docType }: { realm: string; docType: DocType }) {
+  const writes = useContext(Writes);
+  if (!writes.enabled) {
+    return (
+      <span className="button disabled" title="Writes are off for this company. They are turned on after the read-only period.">
+        New {DOC_LABELS[docType].toLowerCase()}
+      </span>
+    );
+  }
+  return (
+    <a className="button primary" href={href(realm, { view: "new", docType })}>
+      New {DOC_LABELS[docType].toLowerCase()}
+    </a>
+  );
+}
+
+const emptyLine = (): DraftLine => ({ itemId: null, description: "", qty: "1", rate: "", classId: null, taxable: false });
+
+const plusDays = (iso: string, days: number) => {
+  const d = new Date(iso + "T00:00:00");
+  d.setDate(d.getDate() + days);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+};
+
+function Editor({ realm, docType, qboId, go }: { realm: string; docType?: DocType; qboId?: string; go: (r: Route) => void }) {
+  const writes = useContext(Writes);
+  const classes = useContext(Classes);
+  const [draft, setDraft] = useState<Draft | null>(null);
+  const [customers, setCustomers] = useState<Customer[]>([]);
+  const [items, setItems] = useState<Item[]>([]);
+  const [customerText, setCustomerText] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [adding, setAdding] = useState<{ name: string; email: string } | null>(null);
+
+  const purchase = draft ? VENDOR_SIDE.has(draft.docType) : docType ? VENDOR_SIDE.has(docType) : false;
+  // Contacts follow the document's side, known once the draft has loaded.
+  useEffect(() => {
+    (purchase ? api.vendors(realm) : api.customers(realm)).then(setCustomers, (e: ApiError) => setError(e.message));
+  }, [realm, purchase]);
+  useEffect(() => {
+    api.items(realm).then((all) => setItems(all.filter((i) => i.active)), () => setItems([]));
+    if (qboId) {
+      api.documentDraft(realm, qboId).then(
+        (r) => {
+          setDraft({ ...r.draft, lines: r.draft.lines.length ? r.draft.lines : [emptyLine()] });
+          setCustomerText(r.contactName ?? "");
+        },
+        (e: ApiError) => setError(e.message),
+      );
+    } else if (docType) {
+      const today = todayIso();
+      setDraft({
+        docType,
+        contactId: "",
+        txnDate: today,
+        dueDate: docType === "Invoice" || docType === "Bill" ? plusDays(today, 30) : null,
+        docNumber: null,
+        poNumber: null,
+        privateNote: null,
+        customerMemo: null,
+        classId: null,
+        lines: [emptyLine()],
+      });
+    }
+  }, [realm, docType, qboId]);
+
+  if (!writes.enabled) {
+    return <div className="pad">Writes are off for this company. They are turned on with <code>qbo-local writes --enable</code> after the read-only period.</div>;
+  }
+  if (!draft) return error ? <div className="error pad">{error}</div> : <div className="muted pad">Loading…</div>;
+
+  const set = (patch: Partial<Draft>) => setDraft({ ...draft, ...patch });
+  const setLine = (index: number, patch: Partial<DraftLine>) =>
+    set({ lines: draft.lines.map((l, i) => (i === index ? { ...l, ...patch } : l)) });
+  const amounts = draft.lines.map((l) => lineAmountMinor(l.qty, l.rate));
+  const subtotal = amounts.reduce<number>((sum, a) => sum + (a ?? 0), 0);
+  const label = DOC_LABELS[draft.docType];
+
+  const chooseCustomer = (text: string) => {
+    setCustomerText(text);
+    const match = customers.find((c) => c.displayName === text);
+    set({ contactId: match ? match.qboId : "" });
+  };
+
+  const chooseItem = (index: number, name: string) => {
+    const item = items.find((i) => i.name === name);
+    if (!item) {
+      setLine(index, { itemId: null, description: name });
+      return;
+    }
+    const line = draft.lines[index];
+    setLine(index, {
+      itemId: item.qboId,
+      description: line.description && line.itemId === null ? line.description : item.name,
+      rate: line.rate || formatDecimal(purchase ? item.purchaseCost : item.unitPrice).replace(/,/g, ""),
+    });
+  };
+
+  const addCustomer = async () => {
+    if (!adding) return;
+    setError(null);
+    try {
+      const created = await api.createCustomer(realm, adding.name, undefined, adding.email || undefined);
+      const customer: Customer = { qboId: created.entityId, displayName: created.displayName, companyName: null, pending: true };
+      setCustomers([...customers, customer]);
+      setCustomerText(created.displayName);
+      set({ contactId: created.entityId });
+      setAdding(null);
+      writes.refresh();
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  };
+
+  const save = async () => {
+    setError(null);
+    // The list may have arrived after the name was typed; resolve it now.
+    const contactId = draft.contactId || customers.find((c) => c.displayName === customerText)?.qboId || "";
+    const toSave = { ...draft, contactId };
+    if (!contactId) return setError(purchase ? "Choose a vendor from the list." : "Choose a customer from the list, or add a new one.");
+    if (purchase && draft.lines.some((l) => !l.itemId)) return setError("Every purchase line needs a product from the list.");
+    if (amounts.some((a) => a === null)) return setError("Every line needs a number for quantity and rate.");
+    setSaving(true);
+    try {
+      const result = await api.saveDocument(realm, toSave, qboId);
+      writes.refresh();
+      go({ view: "doc", qboId: qboId ?? result.entityId });
+    } catch (e) {
+      setError((e as Error).message);
+      setSaving(false);
+    }
+  };
+
+  const onKey = (e: React.KeyboardEvent) => {
+    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "s") {
+      e.preventDefault();
+      void save();
+    }
+  };
+
+  const classNames = Object.entries(classes);
+
+  return (
+    <section className="document editor" onKeyDown={onKey}>
+      <div className="toolbar">
+        <a className="back" href={qboId ? href(realm, { view: "doc", qboId }) : href(realm, { view: "list", docType: draft.docType })}>
+          ← {qboId ? "Back" : DOC_PLURALS[draft.docType]}
+        </a>
+        <h1>{qboId ? `Edit ${label.toLowerCase()} ${draft.docNumber ?? ""}` : `New ${label.toLowerCase()}`}</h1>
+        <span className="spacer" />
+        {writes.environment === "sandbox" && <span className="pill">Sandbox</span>}
+        <button className="button primary" onClick={() => void save()} disabled={saving}>
+          {saving ? "Saving…" : "Save"} <kbd>{navigator.platform.includes("Mac") ? "⌘S" : "Ctrl S"}</kbd>
+        </button>
+      </div>
+      {error && <div className="error">{error}</div>}
+
+      <div className="form-grid">
+        <label className="field wide">
+          <span>{purchase ? "Vendor" : "Customer"}</span>
+          <input list="bb-customers" value={customerText} onChange={(e) => chooseCustomer(e.target.value)} placeholder="Start typing a name" autoFocus={!qboId} />
+          <datalist id="bb-customers">
+            {customers.map((c) => (
+              <option key={c.qboId} value={c.displayName}>{c.pending ? "new, not yet in QuickBooks" : c.companyName ?? ""}</option>
+            ))}
+          </datalist>
+          {!purchase && !draft.contactId && customerText && !adding && (
+            <button className="link" onClick={() => setAdding({ name: customerText, email: "" })}>Add “{customerText}” as a new customer</button>
+          )}
+        </label>
+        <label className="field">
+          <span>Date</span>
+          <input type="date" value={draft.txnDate} onChange={(e) => set({ txnDate: e.target.value })} />
+        </label>
+        {(draft.docType === "Invoice" || draft.docType === "Bill") && (
+          <label className="field">
+            <span>Due</span>
+            <input type="date" value={draft.dueDate ?? ""} onChange={(e) => set({ dueDate: e.target.value || null })} />
+          </label>
+        )}
+        <label className="field">
+          <span>No.</span>
+          <input value={draft.docNumber ?? ""} onChange={(e) => set({ docNumber: e.target.value || null })} placeholder="QuickBooks assigns" />
+        </label>
+        {!purchase && (
+          <label className="field">
+            <span>Customer PO</span>
+            <input value={draft.poNumber ?? ""} onChange={(e) => set({ poNumber: e.target.value || null })} />
+          </label>
+        )}
+        {classNames.length > 0 && (
+          <label className="field">
+            <span>Class</span>
+            <select value={draft.classId ?? ""} onChange={(e) => set({ classId: e.target.value || null })}>
+              <option value="">None</option>
+              {classNames.map(([id, name]) => (
+                <option key={id} value={id}>{name}</option>
+              ))}
+            </select>
+          </label>
+        )}
+      </div>
+
+      {adding && (
+        <div className="inline-form">
+          <strong>New customer</strong>
+          <input value={adding.name} onChange={(e) => setAdding({ ...adding, name: e.target.value })} aria-label="Customer name" />
+          <input value={adding.email} onChange={(e) => setAdding({ ...adding, email: e.target.value })} placeholder="Billing email (optional)" aria-label="Billing email" />
+          <button className="button primary" onClick={() => void addCustomer()}>Add customer</button>
+          <button className="button" onClick={() => setAdding(null)}>Cancel</button>
+          <span className="muted">Usable on this {label.toLowerCase()} now; sent to QuickBooks first.</span>
+        </div>
+      )}
+
+      <datalist id="bb-items">
+        {items.map((i) => (
+          <option key={i.qboId} value={i.name}>{i.sku ?? ""}</option>
+        ))}
+      </datalist>
+      <div className="grid-wrap">
+        <table className="grid lines edit-lines">
+          <thead>
+            <tr>
+              <th>#</th>
+              <th>Product or service</th>
+              <th>Description</th>
+              <th className="r">Qty</th>
+              <th className="r">Rate</th>
+              <th className="r">Amount</th>
+              {!purchase && <th>Tax</th>}
+              <th />
+            </tr>
+          </thead>
+          <tbody>
+            {draft.lines.map((line, i) => {
+              const itemName = items.find((it) => it.qboId === line.itemId)?.name ?? "";
+              return (
+                <tr key={i}>
+                  <td className="num muted">{i + 1}</td>
+                  <td><input list="bb-items" defaultValue={itemName} onBlur={(e) => chooseItem(i, e.target.value)} aria-label={`Line ${i + 1} product`} /></td>
+                  <td><input value={line.description ?? ""} onChange={(e) => setLine(i, { description: e.target.value })} aria-label={`Line ${i + 1} description`} /></td>
+                  <td className="r"><input className="num r" inputMode="decimal" value={line.qty} onChange={(e) => setLine(i, { qty: e.target.value })} aria-label={`Line ${i + 1} quantity`} /></td>
+                  <td className="r"><input className="num r" inputMode="decimal" value={line.rate} onChange={(e) => setLine(i, { rate: e.target.value })} aria-label={`Line ${i + 1} rate`} /></td>
+                  <td className={amounts[i] === null && line.rate ? "num r crit-text" : "num r"}>{amounts[i] === null ? (line.rate ? "?" : "") : formatMoney(amounts[i])}</td>
+                  {!purchase && <td><input type="checkbox" checked={line.taxable} onChange={(e) => setLine(i, { taxable: e.target.checked })} aria-label={`Line ${i + 1} taxable`} /></td>}
+                  <td>
+                    {draft.lines.length > 1 && (
+                      <button className="link" onClick={() => set({ lines: draft.lines.filter((_, j) => j !== i) })} aria-label={`Remove line ${i + 1}`}>Remove</button>
+                    )}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+          <tfoot>
+            <tr>
+              <td colSpan={2}>
+                <button className="link" onClick={() => set({ lines: [...draft.lines, emptyLine()] })}>Add a line</button>
+              </td>
+              <td colSpan={3} className="r">{purchase ? "Total" : "Subtotal · tax is added by QuickBooks"}</td>
+              <td className="num r">{formatMoney(subtotal)}</td>
+              <td colSpan={purchase ? 1 : 2} />
+            </tr>
+          </tfoot>
+        </table>
+      </div>
+
+      <div className="form-grid">
+        <label className="field wide">
+          <span>{purchase ? "Message to vendor" : `Message on ${label.toLowerCase()}`}</span>
+          <textarea rows={2} value={draft.customerMemo ?? ""} onChange={(e) => set({ customerMemo: e.target.value || null })} />
+        </label>
+        <label className="field wide">
+          <span>Internal note</span>
+          <textarea rows={2} value={draft.privateNote ?? ""} onChange={(e) => set({ privateNote: e.target.value || null })} />
+        </label>
+      </div>
+    </section>
+  );
+}
+
+function WritesView({ realm }: { realm: string }) {
+  const writes = useContext(Writes);
+  const [rows, setRows] = useState<Write[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [tick, setTick] = useState(0);
+  useEffect(() => {
+    api.outbox(realm).then(setRows, (e: ApiError) => setError(e.message));
+  }, [realm, tick]);
+  useEffect(() => {
+    const timer = window.setTimeout(() => setTick((t) => t + 1), 3_000);
+    return () => window.clearTimeout(timer);
+  }, [tick]);
+
+  const act = async (id: string, action: "retry" | "discard") => {
+    setError(null);
+    try {
+      await api.resolveWrite(realm, id, action);
+      writes.refresh();
+      setTick((t) => t + 1);
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  };
+
+  const failed = (rows ?? []).filter((r) => r.state === "conflicted" || r.state === "rejected");
+  const queued = (rows ?? []).filter((r) => r.state === "pending" || r.state === "in_flight");
+
+  return (
+    <section className="document">
+      <div className="toolbar">
+        <h1>Sync queue</h1>
+        <span className="spacer" />
+        <span className="muted">Writes saved here and not yet confirmed by QuickBooks. Nothing is dropped or merged without you.</span>
+      </div>
+      {error && <div className="error">{error}</div>}
+      {!rows && !error && <div className="muted pad">Loading…</div>}
+      {rows && rows.length === 0 && <p className="muted indent">Nothing waiting. Every saved change is in QuickBooks.</p>}
+      {failed.length > 0 && (
+        <>
+          <h2>Needs you ({failed.length})</h2>
+          <div className="grid-wrap">
+            <table className="grid">
+              <thead>
+                <tr><th>Change</th><th>What happened</th><th>Saved</th><th /></tr>
+              </thead>
+              <tbody>
+                {failed.map((w) => (
+                  <tr key={w.id}>
+                    <td>
+                      <WriteLink realm={realm} write={w} />
+                      <div className="muted">{w.operation === "create" ? "New" : "Edit"} · {w.entityType}</div>
+                    </td>
+                    <td className="wrap">
+                      <span className="badge crit">{w.status}</span>
+                      <div className="muted">{w.state === "conflicted" ? "Someone changed it in QuickBooks after this edit was made. Retry applies your edit on top of their version once the replica has it." : w.lastError}</div>
+                    </td>
+                    <td className="num muted">{new Date(w.createdAt).toLocaleString()}</td>
+                    <td className="actions">
+                      <button className="button" onClick={() => void act(w.id, "retry")}>Retry</button>
+                      <button className="button" onClick={() => void act(w.id, "discard")}>Discard</button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
+      {queued.length > 0 && (
+        <>
+          <h2>On the way ({queued.length})</h2>
+          <div className="grid-wrap">
+            <table className="grid">
+              <thead>
+                <tr><th>Change</th><th>Status</th><th className="r">Tries</th><th>Saved</th></tr>
+              </thead>
+              <tbody>
+                {queued.map((w) => (
+                  <tr key={w.id}>
+                    <td>
+                      <WriteLink realm={realm} write={w} />
+                      <div className="muted">{w.operation === "create" ? "New" : "Edit"} · {w.entityType}</div>
+                    </td>
+                    <td>
+                      <span className="badge warn">{w.blockedBy ? `Waiting for ${w.blockedBy}` : w.status}</span>
+                      {w.lastError && <div className="muted">Last try: {w.lastError}</div>}
+                    </td>
+                    <td className="num r muted">{w.attempts}</td>
+                    <td className="num muted">{new Date(w.createdAt).toLocaleString()}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
+    </section>
+  );
+}
+
+function WriteLink({ realm, write }: { realm: string; write: Write }) {
+  const isDocument = !["Customer", "Vendor", "Item"].includes(write.entityType);
+  if (isDocument) return <a href={href(realm, { view: "doc", qboId: write.entityId })}>{write.label}</a>;
+  if (write.entityType === "Customer" && !write.entityId.startsWith("local:"))
+    return <a href={href(realm, { view: "contact", contactType: "Customer", contactId: write.entityId })}>{write.label}</a>;
+  return <span>{write.label}</span>;
+}
+
+// ---------------------------------------------------------------------------
+// Manufacturing: materials, build sheets, builds
+// ---------------------------------------------------------------------------
+
+function MaterialsView({ realm }: { realm: string }) {
+  const [rows, setRows] = useState<MaterialRow[] | null>(null);
+  const [stock, setStock] = useState<Map<string, StockRow>>(new Map());
+  const [counting, setCounting] = useState<{ materialId: string; on: string; amount: string; sheets: boolean; note: string } | null>(null);
+  const [ledger, setLedger] = useState<{ materialId: string; moves: StockMove[] } | null>(null);
+  const [receipts, setReceipts] = useState<ReceiptRow[]>([]);
+  const [error, setError] = useState<string | null>(null);
+  const [tick, setTick] = useState(0);
+  const [adding, setAdding] = useState<{ name: string; t: string; w: string; l: string; color: string } | null>(null);
+  const [receiving, setReceiving] = useState<{ on: string; ref: string; freight: string; lines: { materialId: string; sheets: string; price: string; surcharge: string }[] } | null>(null);
+
+  useEffect(() => {
+    api.materials(realm).then(setRows, (e: ApiError) => setError(e.message));
+    api.stock(realm).then((all) => setStock(new Map(all.map((s) => [s.materialId, s]))), () => setStock(new Map()));
+    api.receipts(realm).then(setReceipts, () => setReceipts([]));
+  }, [realm, tick]);
+
+  const saveCount = async () => {
+    if (!counting) return;
+    setError(null);
+    try {
+      await api.recordCount(realm, counting.materialId, counting.on, counting.amount, counting.sheets, counting.note);
+      setCounting(null);
+      setTick((t) => t + 1);
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  };
+
+  const [reorderEdit, setReorderEdit] = useState<{ materialId: string; value: string } | null>(null);
+  const editReorder = (materialId: string, current: string | null) => setReorderEdit({ materialId, value: current ?? "" });
+  const saveReorder = async () => {
+    if (!reorderEdit) return;
+    setError(null);
+    try {
+      await api.setReorderPoint(realm, reorderEdit.materialId, reorderEdit.value.trim() || null);
+      setReorderEdit(null);
+      setTick((t) => t + 1);
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  };
+
+  const showLedger = async (materialId: string) => {
+    if (ledger?.materialId === materialId) return setLedger(null);
+    try {
+      const l = await api.stockLedger(realm, materialId);
+      setLedger({ materialId, moves: l.moves });
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  };
+
+  const lowCount = [...stock.values()].filter((s) => s.low).length;
+  const shelfValue = [...stock.values()].reduce((sum, s) => sum + s.value, 0);
+
+  const names = new Map((rows ?? []).map((m) => [m.materialId, m.name]));
+
+  const saveMaterial = async () => {
+    if (!adding) return;
+    setError(null);
+    try {
+      await api.saveMaterial(realm, { name: adding.name, thicknessIn: adding.t, widthIn: adding.w, lengthIn: adding.l, color: adding.color });
+      setAdding(null);
+      setTick((t) => t + 1);
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  };
+
+  const saveReceipt = async () => {
+    if (!receiving) return;
+    setError(null);
+    try {
+      await api.recordReceipt(realm, {
+        receivedOn: receiving.on,
+        reference: receiving.ref,
+        freight: receiving.freight || "0",
+        lines: receiving.lines
+          .filter((l) => l.materialId && l.sheets)
+          .map((l) => ({ materialId: l.materialId, sheets: l.sheets, pricePerSheet: l.price, surchargePerSheet: l.surcharge })),
+      });
+      setReceiving(null);
+      setTick((t) => t + 1);
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  };
+
+  const emptyReceiptLine = () => ({ materialId: rows?.[0]?.materialId ?? "", sheets: "", price: "", surcharge: "" });
+
+  return (
+    <section className="document">
+      <div className="toolbar">
+        <h1>Materials</h1>
+        <span className="spacer" />
+        <span className="muted">Landed cost per board-foot: price, surcharge and freight allocated by board-foot</span>
+        <button className="button" onClick={() => setAdding({ name: "", t: "2", w: "48", l: "96", color: "" })}>New material</button>
+        <button className="button primary" onClick={() => setReceiving({ on: todayIso(), ref: "", freight: "", lines: [emptyReceiptLine()] })} disabled={!rows?.length}>
+          Record a delivery
+        </button>
+      </div>
+      {error && <div className="error">{error}</div>}
+
+      {adding && (
+        <div className="inline-form">
+          <strong>New material</strong>
+          <input value={adding.name} onChange={(e) => setAdding({ ...adding, name: e.target.value })} placeholder="Name, e.g. XLPE 2 in blue" aria-label="Material name" />
+          <input className="num narrow" value={adding.t} onChange={(e) => setAdding({ ...adding, t: e.target.value })} aria-label="Thickness in inches" title="Thickness, in" />
+          <span className="muted">×</span>
+          <input className="num narrow" value={adding.w} onChange={(e) => setAdding({ ...adding, w: e.target.value })} aria-label="Width in inches" title="Width, in" />
+          <span className="muted">×</span>
+          <input className="num narrow" value={adding.l} onChange={(e) => setAdding({ ...adding, l: e.target.value })} aria-label="Length in inches" title="Length, in" />
+          <span className="muted">in</span>
+          <input value={adding.color} onChange={(e) => setAdding({ ...adding, color: e.target.value })} placeholder="Colour" aria-label="Colour" />
+          <button className="button primary" onClick={() => void saveMaterial()}>Add material</button>
+          <button className="button" onClick={() => setAdding(null)}>Cancel</button>
+        </div>
+      )}
+
+      {receiving && (
+        <div className="inline-form column">
+          <div className="row">
+            <strong>Delivery</strong>
+            <input type="date" value={receiving.on} onChange={(e) => setReceiving({ ...receiving, on: e.target.value })} aria-label="Received on" />
+            <input value={receiving.ref} onChange={(e) => setReceiving({ ...receiving, ref: e.target.value })} placeholder="PO or bill number" aria-label="Reference" />
+            <input className="num" value={receiving.freight} onChange={(e) => setReceiving({ ...receiving, freight: e.target.value })} placeholder="Freight, $" aria-label="Freight" />
+          </div>
+          {receiving.lines.map((line, i) => (
+            <div className="row" key={i}>
+              <select value={line.materialId} onChange={(e) => setReceiving({ ...receiving, lines: receiving.lines.map((l, j) => (j === i ? { ...l, materialId: e.target.value } : l)) })} aria-label={`Line ${i + 1} material`}>
+                {(rows ?? []).map((m) => (
+                  <option key={m.materialId} value={m.materialId}>{m.name}</option>
+                ))}
+              </select>
+              <input className="num" value={line.sheets} onChange={(e) => setReceiving({ ...receiving, lines: receiving.lines.map((l, j) => (j === i ? { ...l, sheets: e.target.value } : l)) })} placeholder="Sheets" aria-label={`Line ${i + 1} sheets`} />
+              <input className="num" value={line.price} onChange={(e) => setReceiving({ ...receiving, lines: receiving.lines.map((l, j) => (j === i ? { ...l, price: e.target.value } : l)) })} placeholder="$ per sheet" aria-label={`Line ${i + 1} price per sheet`} />
+              <input className="num" value={line.surcharge} onChange={(e) => setReceiving({ ...receiving, lines: receiving.lines.map((l, j) => (j === i ? { ...l, surcharge: e.target.value } : l)) })} placeholder="Surcharge per sheet" aria-label={`Line ${i + 1} surcharge`} />
+            </div>
+          ))}
+          <div className="row">
+            <button className="link" onClick={() => setReceiving({ ...receiving, lines: [...receiving.lines, emptyReceiptLine()] })}>Add a line</button>
+            <span className="spacer" />
+            <button className="button primary" onClick={() => void saveReceipt()}>Record delivery</button>
+            <button className="button" onClick={() => setReceiving(null)}>Cancel</button>
+          </div>
+        </div>
+      )}
+
+      {!rows && !error && <div className="muted pad">Loading…</div>}
+      {rows && rows.length === 0 && <p className="muted indent">No materials yet. Add the sheet stock you cut from, then record a delivery to give it a cost.</p>}
+      {rows && rows.length > 0 && (
+        <div className="grid-wrap">
+          <table className="grid">
+            <thead>
+              <tr>
+                <th>Material</th>
+                <th>Sheet</th>
+                <th className="r">On hand</th>
+                <th className="r">Reorder at</th>
+                <th className="r">Latest $ / bf</th>
+                <th className="r">Average $ / bf</th>
+                <th className="r">Shelf value</th>
+                <th>Last delivery</th>
+                <th />
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((m) => {
+                const st = stock.get(m.materialId);
+                return (
+                  <tr key={m.materialId} className={ledger?.materialId === m.materialId ? "cursor" : ""}>
+                    <td className="ellipsis">
+                      {m.name}
+                      {st?.low && <span className="badge crit" title="On hand is below the reorder point">Low</span>}
+                      {st?.wentNegative && <span className="badge warn" title="Cutting ran the shelf below zero: a delivery or count is missing">Check</span>}
+                    </td>
+                    <td className="num muted">{formatQty(m.thicknessIn)} × {formatQty(m.widthIn)} × {formatQty(m.lengthIn)} in · {formatQty(m.bfPerSheet)} bf</td>
+                    <td className="num r">{st ? <>{formatQty(st.sheetsOnHand, 1)} sh<div className="muted small">{formatQty(st.onHandBf, 1)} bf</div></> : ""}</td>
+                    <td className="num r">
+                      {reorderEdit?.materialId === m.materialId ? (
+                        <span className="unit">
+                          <input className="num r narrow-input" autoFocus value={reorderEdit.value} onChange={(e) => setReorderEdit({ ...reorderEdit, value: e.target.value })}
+                            onKeyDown={(e) => { if (e.key === "Enter") void saveReorder(); if (e.key === "Escape") setReorderEdit(null); }} aria-label={`Reorder point for ${m.name}`} />
+                          bf
+                        </span>
+                      ) : (
+                        <button className="link" onClick={() => editReorder(m.materialId, st?.reorderBf ?? null)} aria-label={`Set reorder point for ${m.name}`}>
+                          {st?.reorderBf ? `${formatQty(st.reorderBf)} bf` : "Set"}
+                        </button>
+                      )}
+                    </td>
+                    <td className="num r">{m.landedPerBf ? formatPerBf(m.landedPerBf) : <span className="muted">no delivery yet</span>}</td>
+                    <td className="num r">{st?.averagePerBf ? formatPerBf(st.averagePerBf) : ""}</td>
+                    <td className="num r">{st ? formatMoney(st.value) : ""}</td>
+                    <td className="num muted">{formatDate(m.lastReceived)}</td>
+                    <td className="actions">
+                      <button className="button" onClick={() => setCounting({ materialId: m.materialId, on: todayIso(), amount: "", sheets: true, note: "" })}>Count</button>
+                      <button className="button" onClick={() => void showLedger(m.materialId)}>{ledger?.materialId === m.materialId ? "Hide" : "History"}</button>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+            <tfoot>
+              <tr>
+                <td colSpan={6}>{rows.length} materials{lowCount > 0 ? ` · ${lowCount} low` : ""}</td>
+                <td className="num r">{formatMoney(shelfValue)}</td>
+                <td colSpan={2} />
+              </tr>
+            </tfoot>
+          </table>
+        </div>
+      )}
+
+      {counting && (
+        <div className="inline-form">
+          <strong>Count {names.get(counting.materialId)}</strong>
+          <input type="date" value={counting.on} onChange={(e) => setCounting({ ...counting, on: e.target.value })} aria-label="Counted on" />
+          <input className="num" value={counting.amount} onChange={(e) => setCounting({ ...counting, amount: e.target.value })} placeholder="On the rack" aria-label="Counted amount" autoFocus />
+          <select value={counting.sheets ? "sheets" : "bf"} onChange={(e) => setCounting({ ...counting, sheets: e.target.value === "sheets" })} aria-label="Count unit">
+            <option value="sheets">sheets</option>
+            <option value="bf">board-feet</option>
+          </select>
+          <input value={counting.note} onChange={(e) => setCounting({ ...counting, note: e.target.value })} placeholder="Note, e.g. month end" aria-label="Count note" />
+          <button className="button primary" onClick={() => void saveCount()}>Record count</button>
+          <button className="button" onClick={() => setCounting(null)}>Cancel</button>
+          <span className="muted">Sets the shelf to what you counted; the difference is priced at the average.</span>
+        </div>
+      )}
+
+      {ledger && (
+        <>
+          <h2>History · {names.get(ledger.materialId)}</h2>
+          <div className="grid-wrap">
+            <table className="grid">
+              <thead>
+                <tr>
+                  <th>Date</th>
+                  <th>What</th>
+                  <th>Reference</th>
+                  <th className="r">Change, bf</th>
+                  <th className="r">On hand, bf</th>
+                  <th className="r">Average $ / bf</th>
+                  <th className="r">Value change</th>
+                </tr>
+              </thead>
+              <tbody>
+                {[...ledger.moves].reverse().map((mv, i) => (
+                  <tr key={i}>
+                    <td className="num">{formatDate(mv.date)}</td>
+                    <td>{mv.kind === "received" ? "Delivery" : mv.kind === "used" ? "Build" : "Count"}</td>
+                    <td className="ellipsis">{mv.reference}</td>
+                    <td className={Number(mv.changeBf) < 0 ? "num r crit-text" : "num r"}>{Number(mv.changeBf) > 0 ? "+" : ""}{formatQty(mv.changeBf, 1)}</td>
+                    <td className="num r">{formatQty(mv.onHandBf, 1)}</td>
+                    <td className="num r">{formatPerBf(mv.averagePerBf)}</td>
+                    <td className="num r">{formatMoney(mv.valueChange)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
+
+      {receipts.length > 0 && (
+        <>
+          <h2>Deliveries</h2>
+          <div className="grid-wrap">
+            <table className="grid">
+              <thead>
+                <tr>
+                  <th>Received</th>
+                  <th>Reference</th>
+                  <th>Material</th>
+                  <th className="r">Sheets</th>
+                  <th className="r">bf</th>
+                  <th className="r">Goods</th>
+                  <th className="r">Freight share</th>
+                  <th className="r">Landed $ / bf</th>
+                </tr>
+              </thead>
+              <tbody>
+                {receipts.flatMap((r) =>
+                  r.lines.map((l, i) => (
+                    <tr key={`${r.receiptId}:${i}`} className={i === 0 ? "group-start" : ""}>
+                      <td className="num">{i === 0 ? formatDate(r.receivedOn) : ""}</td>
+                      <td className="num muted">{i === 0 ? r.reference ?? "" : ""}</td>
+                      <td className="ellipsis">{names.get(l.materialId) ?? l.materialId}</td>
+                      <td className="num r">{formatQty(l.sheets)}</td>
+                      <td className="num r">{formatQty(multiplyDecimal(l.sheets, l.bfPerSheet))}</td>
+                      <td className="num r">{formatMoney(l.goodsMinor)}</td>
+                      <td className="num r">{formatMoney(l.freightMinor)}</td>
+                      <td className="num r">{formatPerBf(l.landedPerBf)}</td>
+                    </tr>
+                  )),
+                )}
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
+    </section>
+  );
+}
+
+// Exact product of two decimal strings, for display.
+function multiplyDecimal(a: string, b: string): string {
+  const scale = (x: string) => (x.split(".")[1] ?? "").length;
+  const sa = scale(a);
+  const sb = scale(b);
+  const product = BigInt(a.replace(".", "")) * BigInt(b.replace(".", ""));
+  const places = sa + sb;
+  if (places === 0) return product.toString();
+  const digits = product.toString().padStart(places + 1, "0");
+  return `${digits.slice(0, -places)}.${digits.slice(-places)}`;
+}
+
+function marginClass(pct: string | null): string {
+  if (pct === null) return "num r muted";
+  return Number(pct) < 30 ? "num r crit-text" : "num r";
+}
+
+function SheetsView({ realm, go }: { realm: string; go: (r: Route) => void }) {
+  const [rows, setRows] = useState<SheetSummary[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [filter, setFilter] = useState("");
+  const [basis, setBasis] = useCostBasis();
+  const [stock, setStock] = useState<Map<string, ProductStockRow>>(new Map());
+  useEffect(() => {
+    api.buildSheets(realm, basis).then(setRows, (e: ApiError) => setError(e.message));
+    api.productStock(realm).then((all) => setStock(new Map(all.map((p) => [p.itemId, p]))), () => setStock(new Map()));
+  }, [realm, basis]);
+  const needle = filter.trim().toLowerCase();
+  const shown = (rows ?? []).filter((r) => !needle || [r.name, r.sku].some((v) => v?.toLowerCase().includes(needle)));
+
+  return (
+    <section className="register">
+      <div className="toolbar">
+        <h1>Build sheets</h1>
+        <input className="filter" placeholder="Filter by product or SKU" value={filter} onChange={(e) => setFilter(e.target.value)} aria-label="Filter" />
+        <BasisToggle basis={basis} setBasis={setBasis} />
+        <span className="spacer" />
+        <span className="muted">Unit cost from landed material, parts and labour · margin against the QuickBooks price</span>
+      </div>
+      {error && <div className="error">{error}</div>}
+      {!rows && !error && <div className="muted pad">Loading…</div>}
+      {rows && rows.length === 0 && <p className="muted indent">No build sheets yet. Open a product and write one.</p>}
+      {rows && rows.length > 0 && (
+        <div className="grid-wrap">
+          <table className="grid">
+            <thead>
+              <tr>
+                <th>Product</th>
+                <th>SKU</th>
+                <th className="r">Unit cost</th>
+                <th className="r">of which waste</th>
+                <th className="r">Price</th>
+                <th className="r">Margin</th>
+                <th className="r" title="Finished units on the shelf: built, less sold, from the first count or build">On hand</th>
+              </tr>
+            </thead>
+            <tbody>
+              {shown.map((r) => (
+                <tr key={r.itemId} onDoubleClick={() => go({ view: "sheet", itemId: r.itemId })}>
+                  <td className="ellipsis">
+                    <a href={href(realm, { view: "sheet", itemId: r.itemId })}>{r.name}</a>
+                  </td>
+                  <td className="num muted">{r.sku ?? ""}</td>
+                  <td className="num r">{r.unitCost ? formatRate(r.unitCost) : <span className="crit-text">{r.problem}</span>}</td>
+                  <td className="num r muted">{r.wasteCost ? formatRate(r.wasteCost) : ""}</td>
+                  <td className="num r">{r.price ? formatRate(r.price) : ""}</td>
+                  <td className={marginClass(r.marginPct)}>{r.marginPct !== null ? `${r.marginPct}%` : "—"}</td>
+                  <td className="num r">
+                    {stock.get(r.itemId)?.tracked ? formatQty(stock.get(r.itemId)!.onHand, 1) : <span className="muted" title="Not counted or built yet">—</span>}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </section>
+  );
+}
+
+const newComponent = (kind: Component["kind"], materialId: string): Component =>
+  kind === "material"
+    ? { kind, materialId, netBf: "", yieldPct: "78" }
+    : kind === "part"
+      ? { kind, name: "", itemId: null, qty: "1", unitCost: "" }
+      : { kind, name: "", minutes: "", ratePerHour: "" };
+
+function SheetView({ realm, itemId }: { realm: string; itemId: string }) {
+  const [detail, setDetail] = useState<SheetDetail | null>(null);
+  const [materials, setMaterials] = useState<MaterialRow[]>([]);
+  const [components, setComponents] = useState<Component[]>([]);
+  const [dirty, setDirty] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [tick, setTick] = useState(0);
+  const [run, setRun] = useState<{ on: string; qty: string; actual: Record<string, string>; note: string } | null>(null);
+  const [basis, setBasis] = useCostBasis();
+
+  useEffect(() => {
+    api.buildSheet(realm, itemId, basis).then(
+      (d) => {
+        setDetail(d);
+        setComponents(d.components);
+        setDirty(false);
+      },
+      (e: ApiError) => setError(e.message),
+    );
+    api.materials(realm).then(setMaterials, () => setMaterials([]));
+  }, [realm, itemId, tick, basis]);
+
+  if (error && !detail) return <div className="error pad">{error}</div>;
+  if (!detail) return <div className="muted pad">Loading…</div>;
+  const names = new Map(materials.map((m) => [m.materialId, m.name]));
+  const update = (i: number, patch: Partial<Component>) => {
+    setComponents(components.map((c, j) => (j === i ? ({ ...c, ...patch } as Component) : c)));
+    setDirty(true);
+  };
+
+  const save = async () => {
+    setError(null);
+    try {
+      await api.saveBuildSheet(realm, itemId, components);
+      setTick((t) => t + 1);
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  };
+
+  const recordRun = async () => {
+    if (!run) return;
+    setError(null);
+    try {
+      await api.recordBuild(realm, {
+        itemId,
+        builtOn: run.on,
+        quantity: run.qty,
+        actual: Object.entries(run.actual).filter(([, bf]) => bf.trim()).map(([materialId, boardFeet]) => ({ materialId, boardFeet })),
+        note: run.note,
+      });
+      setRun(null);
+      setTick((t) => t + 1);
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  };
+
+  const cost = detail.cost;
+  const priceMoves = [...new Set(detail.sensitivity.map((c) => c.priceMovePct))];
+  const yieldMoves = [...new Set(detail.sensitivity.map((c) => c.yieldMovePts))];
+  const materialIds = components.flatMap((c) => (c.kind === "material" ? [c.materialId] : []));
+
+  return (
+    <section className="document" onKeyDown={(e) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "s") {
+        e.preventDefault();
+        void save();
+      }
+    }}>
+      <div className="toolbar">
+        <a className="back" href={href(realm, { view: "sheets" })}>← Build sheets</a>
+        <h1>{detail.item.name}</h1>
+        {detail.item.sku && <span className="badge">{detail.item.sku}</span>}
+        <span className="spacer" />
+        <BasisToggle basis={basis} setBasis={setBasis} />
+        <a className="button" href={href(realm, { view: "item", itemId })}>Where used</a>
+        <button className="button primary" onClick={() => void save()} disabled={!dirty}>{dirty ? "Save build sheet" : "Saved"}</button>
+      </div>
+      {error && <div className="error">{error}</div>}
+      {detail.problem && <p className="banner crit">{detail.problem}</p>}
+
+      <dl className="facts">
+        <div><dt>Unit cost</dt><dd className="num">{cost ? formatRate(cost.total) : "—"}</dd></div>
+        <div><dt>Material</dt><dd className="num">{cost ? formatRate(cost.material) : "—"}</dd></div>
+        <div><dt>of which waste</dt><dd className="num">{cost ? formatRate(cost.waste) : "—"}</dd></div>
+        <div><dt>Parts</dt><dd className="num">{cost ? formatRate(cost.parts) : "—"}</dd></div>
+        <div><dt>Labour</dt><dd className="num">{cost ? formatRate(cost.labour) : "—"}</dd></div>
+        <div><dt>Price</dt><dd className="num">{detail.item.unitPrice ? formatRate(detail.item.unitPrice) : "—"}</dd></div>
+        <div><dt>Margin</dt><dd className={detail.marginPct !== null && Number(detail.marginPct) < 30 ? "num crit-text" : "num"}>{detail.marginPct !== null ? `${detail.marginPct}%` : "—"}</dd></div>
+      </dl>
+
+      <h2>Components{dirty && <span className="muted"> · unsaved; costs below are for the saved sheet</span>}</h2>
+      <div className="grid-wrap">
+        <table className="grid edit-lines components">
+          <thead>
+            <tr>
+              <th>Kind</th>
+              <th>What</th>
+              <th className="r">Amount</th>
+              <th className="r">Yield / rate</th>
+              <th className="r">Cost per unit</th>
+              <th />
+            </tr>
+          </thead>
+          <tbody>
+            {components.map((c, i) => {
+              const line = cost && !dirty ? cost.lines[i] : null;
+              return (
+                <tr key={i}>
+                  <td>
+                    <select value={c.kind} onChange={(e) => update(i, newComponent(e.target.value as Component["kind"], materials[0]?.materialId ?? ""))} aria-label={`Component ${i + 1} kind`}>
+                      <option value="material">Material</option>
+                      <option value="part">Part</option>
+                      <option value="labour">Labour</option>
+                    </select>
+                  </td>
+                  <td>
+                    {c.kind === "material" ? (
+                      <select value={c.materialId} onChange={(e) => update(i, { materialId: e.target.value })} aria-label={`Component ${i + 1} material`}>
+                        {materials.map((m) => (
+                          <option key={m.materialId} value={m.materialId}>{m.name}</option>
+                        ))}
+                      </select>
+                    ) : (
+                      <input value={c.name} onChange={(e) => update(i, { name: e.target.value })} placeholder={c.kind === "part" ? "Strap, buckle, decal…" : "CNC, sewing, packing…"} aria-label={`Component ${i + 1} name`} />
+                    )}
+                  </td>
+                  <td className="r">
+                    {c.kind === "material" ? (
+                      <label className="unit"><input className="num r" value={c.netBf} onChange={(e) => update(i, { netBf: e.target.value })} aria-label={`Component ${i + 1} net board-feet`} /> net bf</label>
+                    ) : c.kind === "part" ? (
+                      <label className="unit"><input className="num r" value={c.qty} onChange={(e) => update(i, { qty: e.target.value })} aria-label={`Component ${i + 1} quantity`} /> each</label>
+                    ) : (
+                      <label className="unit"><input className="num r" value={c.minutes} onChange={(e) => update(i, { minutes: e.target.value })} aria-label={`Component ${i + 1} minutes`} /> min</label>
+                    )}
+                  </td>
+                  <td className="r">
+                    {c.kind === "material" ? (
+                      <label className="unit"><input className="num r" value={c.yieldPct} onChange={(e) => update(i, { yieldPct: e.target.value })} aria-label={`Component ${i + 1} yield`} /> % yield</label>
+                    ) : c.kind === "part" ? (
+                      <label className="unit">$<input className="num r" value={c.unitCost} onChange={(e) => update(i, { unitCost: e.target.value })} aria-label={`Component ${i + 1} unit cost`} /> each</label>
+                    ) : (
+                      <label className="unit">$<input className="num r" value={c.ratePerHour} onChange={(e) => update(i, { ratePerHour: e.target.value })} aria-label={`Component ${i + 1} rate`} /> / h</label>
+                    )}
+                  </td>
+                  <td className="num r">
+                    {line ? formatRate(line.cost) : ""}
+                    {line?.grossBf && <div className="muted small">buys {formatQty(line.grossBf)} bf, wastes {formatQty(line.wasteBf)}</div>}
+                  </td>
+                  <td>
+                    <button className="link" onClick={() => { setComponents(components.filter((_, j) => j !== i)); setDirty(true); }} aria-label={`Remove component ${i + 1}`}>Remove</button>
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+          <tfoot>
+            <tr>
+              <td colSpan={6}>
+                <button className="link" onClick={() => { setComponents([...components, newComponent("material", materials[0]?.materialId ?? "")]); setDirty(true); }} disabled={!materials.length}>Add material</button>
+                {" · "}
+                <button className="link" onClick={() => { setComponents([...components, newComponent("part", "")]); setDirty(true); }}>Add part</button>
+                {" · "}
+                <button className="link" onClick={() => { setComponents([...components, newComponent("labour", "")]); setDirty(true); }}>Add labour</button>
+              </td>
+            </tr>
+          </tfoot>
+        </table>
+      </div>
+
+      {detail.sensitivity.length > 0 && (
+        <>
+          <h2>What moves the cost</h2>
+          <p className="muted indent">Unit cost and margin if every material's price moved, against every yield moving by points. The middle cell is today.</p>
+          <div className="grid-wrap">
+            <table className="grid sensitivity">
+              <thead>
+                <tr>
+                  <th>Yield \ material price</th>
+                  {priceMoves.map((p) => (
+                    <th key={p} className="r">{Number(p) > 0 ? `+${p}` : p}%</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {yieldMoves.map((y) => (
+                  <tr key={y}>
+                    <td>{Number(y) > 0 ? `+${y}` : y} pts</td>
+                    {priceMoves.map((p) => {
+                      const cell = detail.sensitivity.find((c) => c.priceMovePct === p && c.yieldMovePts === y);
+                      const today = Number(p) === 0 && Number(y) === 0;
+                      return (
+                        <td key={p} className={today ? "num r today" : "num r"}>
+                          {cell ? formatRate(cell.unitCost) : "—"}
+                          {cell?.marginPct && <div className="muted small">{cell.marginPct}%</div>}
+                        </td>
+                      );
+                    })}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
+
+      <ProductStockPanel realm={realm} itemId={itemId} refresh={tick} />
+
+      <h2>
+        Builds
+        {detail.components.length > 0 && !run && (
+          <button className="link inline" onClick={() => setRun({ on: todayIso(), qty: "", actual: {}, note: "" })}>Record a build</button>
+        )}
+      </h2>
+      {run && (
+        <div className="inline-form column">
+          <div className="row">
+            <input type="date" value={run.on} onChange={(e) => setRun({ ...run, on: e.target.value })} aria-label="Built on" />
+            <input className="num" value={run.qty} onChange={(e) => setRun({ ...run, qty: e.target.value })} placeholder="Units built" aria-label="Units built" />
+            <input value={run.note} onChange={(e) => setRun({ ...run, note: e.target.value })} placeholder="Note" aria-label="Note" />
+          </div>
+          {materialIds.map((m) => (
+            <div className="row" key={m}>
+              <span>{names.get(m) ?? m}: board-feet actually used</span>
+              <input className="num" value={run.actual[m] ?? ""} onChange={(e) => setRun({ ...run, actual: { ...run.actual, [m]: e.target.value } })} placeholder="blank = as the sheet says" aria-label={`Actual board-feet of ${names.get(m) ?? m}`} />
+            </div>
+          ))}
+          <div className="row">
+            <span className="spacer" />
+            <button className="button primary" onClick={() => void recordRun()}>Record build</button>
+            <button className="button" onClick={() => setRun(null)}>Cancel</button>
+          </div>
+        </div>
+      )}
+      <BuildsTable builds={detail.builds} />
+    </section>
+  );
+}
+
+function BuildsTable({ builds, showProduct }: { builds: BuildRow[]; showProduct?: (b: BuildRow) => JSX.Element }) {
+  if (builds.length === 0) return <p className="muted indent">No builds recorded.</p>;
+  return (
+    <div className="grid-wrap">
+      <table className="grid">
+        <thead>
+          <tr>
+            <th>Built</th>
+            {showProduct && <th>Product</th>}
+            <th className="r">Units</th>
+            <th className="r">Standard</th>
+            <th className="r">Actual</th>
+            <th className="r">Variance</th>
+            <th />
+          </tr>
+        </thead>
+        <tbody>
+          {builds.map((b) => (
+            <tr key={b.buildId}>
+              <td className="num">{formatDate(b.builtOn)}</td>
+              {showProduct && <td className="ellipsis">{showProduct(b)}</td>}
+              <td className="num r">{formatQty(b.quantity)}</td>
+              <td className="num r">{formatMoney(b.standardMinor)}</td>
+              <td className="num r">{formatMoney(b.actualMinor)}</td>
+              <td className={b.varianceMinor > 0 ? "num r crit-text" : "num r"}>{b.varianceMinor > 0 ? "+" : ""}{formatMoney(b.varianceMinor)}</td>
+              <td>{b.flagged && <span className="badge crit" title="More than 5% over the build sheet on a material">Over sheet</span>}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function BuildsView({ realm }: { realm: string }) {
+  const [rows, setRows] = useState<BuildRow[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    api.builds(realm).then(setRows, (e: ApiError) => setError(e.message));
+  }, [realm]);
+  const flagged = (rows ?? []).filter((b) => b.flagged).length;
+  const variance = (rows ?? []).reduce((sum, b) => sum + b.varianceMinor, 0);
+  return (
+    <section className="document">
+      <div className="toolbar">
+        <h1>Builds</h1>
+        <span className="spacer" />
+        {rows && <span className="muted">{rows.length} runs · {flagged} over sheet · net variance {formatMoney(variance)}</span>}
+      </div>
+      {error && <div className="error">{error}</div>}
+      {!rows && !error && <div className="muted pad">Loading…</div>}
+      {rows && (
+        <BuildsTable
+          builds={rows}
+          showProduct={(b) => <a href={href(realm, { view: "sheet", itemId: b.itemId })}>{b.name ?? b.itemId}</a>}
+        />
+      )}
+    </section>
+  );
+}
+
+// Which material cost build sheets use; remembered per viewer.
+function useCostBasis(): [CostBasis, (b: CostBasis) => void] {
+  const [basis, set] = useState<CostBasis>(() => (stored("bb.basis", "latest") === "average" ? "average" : "latest"));
+  return [
+    basis,
+    (b: CostBasis) => {
+      store("bb.basis", b);
+      set(b);
+    },
+  ];
+}
+
+function BasisToggle({ basis, setBasis }: { basis: CostBasis; setBasis: (b: CostBasis) => void }) {
+  return (
+    <label className="check" title="Latest: the most recent delivery's landed cost, as a quote is priced. Average: the moving average of what is on the shelf.">
+      Material cost
+      <select value={basis} onChange={(e) => setBasis(e.target.value as CostBasis)} aria-label="Material cost basis">
+        <option value="latest">latest delivery</option>
+        <option value="average">shelf average</option>
+      </select>
+    </label>
+  );
+}
+
+function ProductStockPanel({ realm, itemId, refresh }: { realm: string; itemId: string; refresh: number }) {
+  const [data, setData] = useState<{ since: string | null; stock: { moves: StockMove[]; onHandBf: string; averagePerBf: string | null; value: number } } | null>(null);
+  const [counting, setCounting] = useState<{ on: string; units: string } | null>(null);
+  const [open, setOpen] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [tick, setTick] = useState(0);
+  useEffect(() => {
+    api.productLedger(realm, itemId).then(setData, (e: ApiError) => setError(e.message));
+  }, [realm, itemId, refresh, tick]);
+
+  const save = async () => {
+    if (!counting) return;
+    setError(null);
+    try {
+      await api.recordProductCount(realm, itemId, counting.on, counting.units);
+      setCounting(null);
+      setTick((t) => t + 1);
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  };
+
+  return (
+    <>
+      <h2>
+        Finished stock
+        {!counting && <button className="link inline" onClick={() => setCounting({ on: todayIso(), units: "" })}>Count the shelf</button>}
+        {data?.since && <button className="link inline" onClick={() => setOpen(!open)}>{open ? "Hide history" : "History"}</button>}
+      </h2>
+      {error && <div className="error">{error}</div>}
+      {counting && (
+        <div className="inline-form">
+          <input type="date" value={counting.on} onChange={(e) => setCounting({ ...counting, on: e.target.value })} aria-label="Product counted on" />
+          <input className="num" value={counting.units} onChange={(e) => setCounting({ ...counting, units: e.target.value })} placeholder="Units on the shelf" aria-label="Units counted" autoFocus />
+          <button className="button primary" onClick={() => void save()}>Record count</button>
+          <button className="button" onClick={() => setCounting(null)}>Cancel</button>
+        </div>
+      )}
+      {data && !data.since && <p className="muted indent">Not tracked yet: count the shelf or record a build to start this product's stock.</p>}
+      {data?.since && (
+        <dl className="facts">
+          <div><dt>On hand</dt><dd className="num">{formatQty(data.stock.onHandBf, 1)} units</dd></div>
+          <div><dt>Average cost</dt><dd className="num">{data.stock.averagePerBf ? formatRate(data.stock.averagePerBf) : "—"}</dd></div>
+          <div><dt>Shelf value</dt><dd className="num">{formatMoney(data.stock.value)}</dd></div>
+          <div><dt>Tracked since</dt><dd className="num">{formatDate(data.since)}</dd></div>
+        </dl>
+      )}
+      {open && data?.since && (
+        <div className="grid-wrap">
+          <table className="grid">
+            <thead>
+              <tr><th>Date</th><th>What</th><th>Reference</th><th className="r">Change</th><th className="r">On hand</th><th className="r">Value change</th></tr>
+            </thead>
+            <tbody>
+              {[...data.stock.moves].reverse().map((mv, i) => (
+                <tr key={i}>
+                  <td className="num">{formatDate(mv.date)}</td>
+                  <td>{mv.kind === "received" ? "Built" : mv.kind === "used" ? (Number(mv.changeBf) > 0 ? "Returned" : "Sold") : "Count"}</td>
+                  <td className="ellipsis">{mv.reference}</td>
+                  <td className={Number(mv.changeBf) < 0 ? "num r crit-text" : "num r"}>{Number(mv.changeBf) > 0 ? "+" : ""}{formatQty(mv.changeBf, 1)}</td>
+                  <td className="num r">{formatQty(mv.onHandBf, 1)}</td>
+                  <td className="num r">{formatMoney(mv.valueChange)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </>
+  );
+}
+
+const IMPORT_TEMPLATES: Record<ImportKind, { label: string; columns: string; example: string; note: string }> = {
+  materials: {
+    label: "Materials",
+    columns: "name, thickness, width, length, colour, reorder",
+    example: "name,thickness,width,length,colour,reorder\nXLPE 2 in blue,2,48,96,blue,640\nEVA 1 in black,1,48,96,black,320",
+    note: "Inches, and the reorder point in board-feet. A name already on the list is updated, not duplicated.",
+  },
+  buildSheets: {
+    label: "Build sheets",
+    columns: "product, kind, what, amount, rate",
+    example: "product,kind,what,amount,rate\nRT-RED-000,material,XLPE 2 in red,2.1,78\nRT-RED-000,part,Webbing strap,1,1.85\nRT-RED-000,labour,CNC and finish,6,30",
+    note: "Product is the QuickBooks SKU or name. Material: net bf and yield %. Part: quantity and cost each. Labour: minutes and $ per hour. Replaces the product's sheet.",
+  },
+  counts: {
+    label: "Counts",
+    columns: "what, date, amount, unit",
+    example: "what,date,amount,unit\nXLPE 2 in blue,2026-10-31,12,sheets\nRT-RED-000,2026-10-31,140,units",
+    note: "A material counts in sheets (the default) or bf; a product in units. Sets the shelf on that date.",
+  },
+};
+
+function ImportView({ realm }: { realm: string }) {
+  const [kind, setKind] = useState<ImportKind>("materials");
+  const [text, setText] = useState("");
+  const [result, setResult] = useState<ImportResult | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const template = IMPORT_TEMPLATES[kind];
+
+  const run = async (commit: boolean) => {
+    setBusy(true);
+    setError(null);
+    try {
+      setResult(await api.importCsv(realm, kind, text, commit));
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const loadFile = (file: File | undefined) => {
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      setText(String(reader.result ?? ""));
+      setResult(null);
+    };
+    reader.readAsText(file);
+  };
+
+  const columns = result?.rows.length ? Object.keys(result.rows[0]) : [];
+
+  return (
+    <section className="document">
+      <div className="toolbar">
+        <h1>Import from a spreadsheet</h1>
+        <span className="spacer" />
+        <span className="muted">Preview first; nothing is written until you commit, and then all of it or none</span>
+      </div>
+      {error && <div className="error">{error}</div>}
+      <div className="form-grid">
+        <label className="field">
+          <span>What</span>
+          <select value={kind} onChange={(e) => { setKind(e.target.value as ImportKind); setResult(null); }} aria-label="Import kind">
+            {(Object.keys(IMPORT_TEMPLATES) as ImportKind[]).map((k) => (
+              <option key={k} value={k}>{IMPORT_TEMPLATES[k].label}</option>
+            ))}
+          </select>
+        </label>
+        <label className="field">
+          <span>CSV file</span>
+          <input type="file" accept=".csv,text/csv,text/plain" onChange={(e) => loadFile(e.target.files?.[0])} aria-label="CSV file" />
+        </label>
+        <div className="field wide">
+          <span>Columns</span>
+          <div><code>{template.columns}</code> <button className="link" onClick={() => { setText(template.example.replace(/\\n/g, "\n")); setResult(null); }}>Paste an example</button></div>
+          <div className="muted small">{template.note}</div>
+        </div>
+        <label className="field wide">
+          <span>Or paste from the spreadsheet (save as CSV, or copy with commas)</span>
+          <textarea rows={8} value={text} onChange={(e) => { setText(e.target.value); setResult(null); }} className="mono-area" aria-label="CSV text" />
+        </label>
+      </div>
+      <div className="toolbar plain">
+        <button className="button" onClick={() => void run(false)} disabled={busy || !text.trim()}>Preview</button>
+        <button className="button primary" onClick={() => void run(true)} disabled={busy || !result?.ok || result.committed}>
+          {result?.committed ? "Imported" : `Import ${result?.rows.length ?? ""} rows`}
+        </button>
+      </div>
+      {result && !result.ok && (
+        <>
+          <h2>Fix these rows first</h2>
+          <div className="grid-wrap">
+            <table className="grid">
+              <thead><tr><th className="r">Line</th><th>Problem</th></tr></thead>
+              <tbody>
+                {result.errors.map((e, i) => (
+                  <tr key={i}><td className="num r">{e.line}</td><td className="wrap">{e.message}</td></tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
+      {result?.ok && (
+        <>
+          <h2>{result.committed ? `Imported ${result.rows.length} rows` : `Ready to import ${result.rows.length} rows`}</h2>
+          <div className="grid-wrap">
+            <table className="grid">
+              <thead><tr>{columns.map((c) => <th key={c}>{c}</th>)}</tr></thead>
+              <tbody>
+                {result.rows.map((row, i) => (
+                  <tr key={i}>{columns.map((c) => <td key={c} className="num">{row[c] === null || row[c] === undefined ? "" : String(row[c])}</td>)}</tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
+    </section>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Receive payment: a cheque against a customer's open invoices
+// ---------------------------------------------------------------------------
+
+function PayButton({ realm, customerId, primary, side = "receive" }: { realm: string; customerId: string | null; primary?: boolean; side?: "receive" | "pay" }) {
+  const writes = useContext(Writes);
+  const label = side === "pay" ? "Pay bills" : "Receive payment";
+  if (!writes.enabled) {
+    return primary ? <span className="button disabled" title="Writes are off for this company. They are turned on after the read-only period.">{label}</span> : null;
+  }
+  const route: Route = side === "pay" ? { view: "paybills", vendorId: customerId } : { view: "pay", customerId };
+  return <a className={primary ? "button primary" : "button"} href={href(realm, route)}>{label}</a>;
+}
+
+/** Minor units as plain text an input accepts: 123456 → "1234.56". */
+const plainMoney = (minor: number) => `${minor < 0 ? "-" : ""}${Math.trunc(Math.abs(minor) / 100)}.${String(Math.abs(minor) % 100).padStart(2, "0")}`;
+
+function PaymentEntry({ realm, side, contactId: customerId, go }: { realm: string; side: "receive" | "pay"; contactId: string | null; go: (r: Route) => void }) {
+  const writes = useContext(Writes);
+  const paying = side === "pay";
+  const noun = paying ? "Bill" : "Invoice";
+  const [accounts, setAccounts] = useState<PaymentAccount[]>([]);
+  const [accountId, setAccountId] = useState("");
+  const [customers, setCustomers] = useState<Customer[]>([]);
+  const [customer, setCustomer] = useState<string>(customerId ?? "");
+  const [customerText, setCustomerText] = useState("");
+  const [open, setOpen] = useState<OpenInvoice[] | null>(null);
+  const [txnDate, setTxnDate] = useState(todayIso);
+  const [amount, setAmount] = useState("");
+  const [reference, setReference] = useState("");
+  const [note, setNote] = useState("");
+  // null: oldest first; otherwise what the person typed against each invoice.
+  const [manual, setManual] = useState<Record<string, string> | null>(null);
+  const [plan, setPlan] = useState<PaymentPlan | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    if (!paying) return;
+    api.paymentAccounts(realm).then((all) => {
+      setAccounts(all);
+      setAccountId((current) => current || all.find((a) => a.accountType === "Bank")?.qboId || all[0]?.qboId || "");
+    }, (e: ApiError) => setError(e.message));
+  }, [realm, paying]);
+  useEffect(() => {
+    (paying ? api.vendors(realm) : api.customers(realm)).then((all) => {
+      const real = all.filter((c) => !c.pending);
+      setCustomers(real);
+      if (customerId) setCustomerText(real.find((c) => c.qboId === customerId)?.displayName ?? "");
+    }, (e: ApiError) => setError(e.message));
+  }, [realm, customerId, paying]);
+  useEffect(() => {
+    setOpen(null);
+    setManual(null);
+    if (!customer) return;
+    (paying ? api.openBills(realm, customer) : api.openInvoices(realm, customer)).then(setOpen, (e: ApiError) => setError(e.message));
+  }, [realm, customer, paying]);
+
+  const common = {
+    txnDate,
+    amount,
+    reference: reference || null,
+    privateNote: note || null,
+    applications: manual ? Object.entries(manual).filter(([, a]) => a.trim() !== "").map(([invoiceId, a]) => ({ invoiceId, amount: a })) : undefined,
+  };
+  const preview = () => (paying ? api.billPaymentPreview(realm, { ...common, vendorId: customer, accountId }) : api.paymentPreview(realm, { ...common, customerId: customer }));
+  const submit = () => (paying ? api.payBills(realm, { ...common, vendorId: customer, accountId }) : api.receivePayment(realm, { ...common, customerId: customer }));
+
+  // Where the money goes is the server's call, asked on every change.
+  useEffect(() => {
+    setPlan(null);
+    if (!customer || !amount.trim()) return;
+    let current = true;
+    preview().then(
+      (p) => { if (current) { setPlan(p); setError(null); } },
+      (e: ApiError) => { if (current) setError(e.message); },
+    );
+    return () => { current = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [realm, customer, amount, txnDate, manual, accountId]);
+
+  if (!writes.enabled) {
+    return <div className="pad">Writes are off for this company. They are turned on with <code>qbo-local writes --enable</code> after the read-only period.</div>;
+  }
+
+  const chooseCustomer = (text: string) => {
+    setCustomerText(text);
+    setCustomer(customers.find((c) => c.displayName === text)?.qboId ?? "");
+  };
+  const appliedTo = (id: string) => plan?.applied.find((a) => a.invoiceId === id)?.amountMinor ?? 0;
+  const owed = (open ?? []).reduce((s, i) => s + i.balanceMinor, 0);
+
+  const save = async () => {
+    setError(null);
+    if (!customer) return setError(paying ? "Choose a vendor from the list." : "Choose a customer from the list.");
+    if (!plan) return setError(paying ? "Enter the amount paid." : "Enter the amount received.");
+    setSaving(true);
+    try {
+      const result = await submit();
+      writes.refresh();
+      go({ view: "doc", qboId: result.entityId });
+    } catch (e) {
+      setError((e as Error).message);
+      setSaving(false);
+    }
+  };
+
+  return (
+    <section className="document editor" onKeyDown={(e) => { if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "s") { e.preventDefault(); void save(); } }}>
+      <div className="toolbar">
+        <a className="back" href={href(realm, { view: "list", docType: paying ? "BillPayment" : "Payment" })}>← {paying ? "Bill payments" : "Payments"}</a>
+        <h1>{paying ? "Pay bills" : "Receive payment"}</h1>
+        <span className="spacer" />
+        {writes.environment === "sandbox" && <span className="pill">Sandbox</span>}
+        <button className="button primary" onClick={() => void save()} disabled={saving || !plan}>
+          {saving ? "Saving…" : "Save"} <kbd>{navigator.platform.includes("Mac") ? "⌘S" : "Ctrl S"}</kbd>
+        </button>
+      </div>
+      {error && <div className="error">{error}</div>}
+      <div className="form-grid">
+        <label className="field wide">
+          <span>{paying ? "Vendor" : "Customer"}</span>
+          <input list="bb-pay-customers" value={customerText} onChange={(e) => chooseCustomer(e.target.value)} placeholder="Start typing a name" autoFocus={!customerId} />
+          <datalist id="bb-pay-customers">
+            {customers.map((c) => <option key={c.qboId} value={c.displayName}>{c.companyName ?? ""}</option>)}
+          </datalist>
+        </label>
+        <label className="field">
+          <span>Date</span>
+          <input type="date" value={txnDate} onChange={(e) => setTxnDate(e.target.value)} />
+        </label>
+        {paying && (
+          <label className="field">
+            <span>Paid from</span>
+            <select value={accountId} onChange={(e) => setAccountId(e.target.value)} aria-label="Paid from">
+              {accounts.map((a) => <option key={a.qboId} value={a.qboId}>{a.name}{a.accountType === "Credit Card" ? " (card)" : ""}</option>)}
+            </select>
+          </label>
+        )}
+        <label className="field">
+          <span>{paying ? "Amount paid" : "Amount received"}</span>
+          <input className="num r" inputMode="decimal" value={amount} onChange={(e) => setAmount(e.target.value)} autoFocus={!!customerId} aria-label={paying ? "Amount paid" : "Amount received"} />
+        </label>
+        <label className="field">
+          <span>{paying ? "Cheque no." : "Cheque or reference no."}</span>
+          <input value={reference} onChange={(e) => setReference(e.target.value)} />
+        </label>
+      </div>
+      {customer && open && open.length === 0 && (
+        <p className="muted pad">{paying ? "No open bills for this vendor." : "No open invoices. A payment saved now stays on the customer as a credit."}</p>
+      )}
+      {open && open.length > 0 && (
+        <div className="grid-wrap">
+          <table className="grid lines">
+            <thead>
+              <tr>
+                <th>{noun}</th>
+                <th>Date</th>
+                <th>Due</th>
+                <th className="r">Open</th>
+                <th className="r">Payment</th>
+              </tr>
+            </thead>
+            <tbody>
+              {open.map((i) => (
+                <tr key={i.qboId}>
+                  <td className="num"><a href={href(realm, { view: "doc", qboId: i.qboId })}>{i.docNumber ?? `#${i.qboId}`}</a></td>
+                  <td className="num">{formatDate(i.txnDate)}</td>
+                  <td className="num">{i.dueDate ? formatDate(i.dueDate) : ""}</td>
+                  <td className="num r">
+                    {formatMoney(i.balanceMinor)}
+                    {i.queuedMinor > 0 && <div className="muted">{formatMoney(i.queuedMinor)} on its way</div>}
+                  </td>
+                  <td className="r">
+                    <input
+                      className="num r"
+                      inputMode="decimal"
+                      aria-label={`Payment on ${noun.toLowerCase()} ${i.docNumber ?? i.qboId}`}
+                      value={manual ? manual[i.qboId] ?? "" : appliedTo(i.qboId) ? plainMoney(appliedTo(i.qboId)) : ""}
+                      onChange={(e) => {
+                        const base = manual ?? Object.fromEntries((plan?.applied ?? []).map((a) => [a.invoiceId, plainMoney(a.amountMinor)]));
+                        setManual({ ...base, [i.qboId]: e.target.value });
+                      }}
+                    />
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+            <tfoot>
+              <tr>
+                <td colSpan={2}>{manual && <button className="link" onClick={() => setManual(null)}>Pay oldest first</button>}</td>
+                <td className="r">Owed</td>
+                <td className="num r">{formatMoney(owed)}</td>
+                <td className="num r">{plan ? formatMoney(plan.totalMinor - plan.unappliedMinor) : ""}</td>
+              </tr>
+            </tfoot>
+          </table>
+        </div>
+      )}
+      {plan && (
+        <dl className="facts">
+          <div><dt>{paying ? "Paid" : "Received"}</dt><dd className="num">{formatMoney(plan.totalMinor)}</dd></div>
+          <div><dt>Applied</dt><dd className="num">{formatMoney(plan.totalMinor - plan.unappliedMinor)}</dd></div>
+          {!paying && <div><dt>Left as credit</dt><dd className={plan.unappliedMinor ? "num warn-text" : "num"}>{formatMoney(plan.unappliedMinor)}</dd></div>}
+          <div><dt>{paying ? "Paid from" : "Deposit to"}</dt><dd>{paying ? accounts.find((a) => a.qboId === accountId)?.name ?? "" : "Undeposited Funds"}</dd></div>
+        </dl>
+      )}
+      <div className="form-grid">
+        <label className="field wide">
+          <span>Internal note</span>
+          <textarea rows={2} value={note} onChange={(e) => setNote(e.target.value)} />
+        </label>
+      </div>
+    </section>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Make a deposit: banking what is waiting in Undeposited Funds
+// ---------------------------------------------------------------------------
+
+function DepositButton({ realm }: { realm: string }) {
+  const writes = useContext(Writes);
+  if (!writes.enabled) {
+    return <span className="button disabled" title="Writes are off for this company. They are turned on after the read-only period.">Make a deposit</span>;
+  }
+  return <a className="button primary" href={href(realm, { view: "deposit" })}>Make a deposit</a>;
+}
+
+function DepositView({ realm, go }: { realm: string; go: (r: Route) => void }) {
+  const writes = useContext(Writes);
+  const [rows, setRows] = useState<Undeposited[] | null>(null);
+  const [accounts, setAccounts] = useState<PaymentAccount[]>([]);
+  const [accountId, setAccountId] = useState("");
+  const [txnDate, setTxnDate] = useState(todayIso);
+  const [note, setNote] = useState("");
+  const [ticked, setTicked] = useState<Set<string>>(new Set());
+  const [error, setError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    api.undeposited(realm).then(setRows, (e: ApiError) => setError(e.message));
+    api.paymentAccounts(realm).then((all) => {
+      const banks = all.filter((a) => a.accountType === "Bank");
+      setAccounts(banks);
+      setAccountId((current) => current || banks[0]?.qboId || "");
+    }, (e: ApiError) => setError(e.message));
+  }, [realm]);
+
+  if (!writes.enabled) {
+    return <div className="pad">Writes are off for this company. They are turned on with <code>qbo-local writes --enable</code> after the read-only period.</div>;
+  }
+  if (!rows) return error ? <div className="error pad">{error}</div> : <div className="muted pad">Loading…</div>;
+
+  const total = rows.filter((r) => ticked.has(r.qboId)).reduce((sum, r) => sum + r.amountMinor, 0);
+  const toggle = (id: string) => {
+    const next = new Set(ticked);
+    if (next.has(id)) next.delete(id); else next.add(id);
+    setTicked(next);
+  };
+  const all = rows.length > 0 && ticked.size === rows.length;
+
+  const save = async () => {
+    setError(null);
+    if (!accountId) return setError("Choose the bank account.");
+    if (ticked.size === 0) return setError("Tick the payments on this deposit slip.");
+    setSaving(true);
+    try {
+      const result = await api.makeDeposit(realm, { accountId, txnDate, paymentIds: rows.filter((r) => ticked.has(r.qboId)).map((r) => r.qboId), privateNote: note || null });
+      writes.refresh();
+      go({ view: "doc", qboId: result.entityId });
+    } catch (e) {
+      setError((e as Error).message);
+      setSaving(false);
+    }
+  };
+
+  return (
+    <section className="document editor" onKeyDown={(e) => { if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "s") { e.preventDefault(); void save(); } }}>
+      <div className="toolbar">
+        <a className="back" href={href(realm, { view: "list", docType: "Deposit" })}>← Deposits</a>
+        <h1>Make a deposit</h1>
+        <span className="spacer" />
+        {writes.environment === "sandbox" && <span className="pill">Sandbox</span>}
+        <button className="button primary" onClick={() => void save()} disabled={saving || ticked.size === 0}>
+          {saving ? "Saving…" : "Save"} <kbd>{navigator.platform.includes("Mac") ? "⌘S" : "Ctrl S"}</kbd>
+        </button>
+      </div>
+      {error && <div className="error">{error}</div>}
+      <div className="form-grid">
+        <label className="field">
+          <span>Deposit to</span>
+          <select value={accountId} onChange={(e) => setAccountId(e.target.value)} aria-label="Deposit to">
+            {accounts.map((a) => <option key={a.qboId} value={a.qboId}>{a.name}</option>)}
+          </select>
+        </label>
+        <label className="field">
+          <span>Date</span>
+          <input type="date" value={txnDate} onChange={(e) => setTxnDate(e.target.value)} />
+        </label>
+      </div>
+      {rows.length === 0 ? (
+        <p className="muted pad">Nothing is waiting in Undeposited Funds.</p>
+      ) : (
+        <div className="grid-wrap">
+          <table className="grid lines">
+            <thead>
+              <tr>
+                <th><input type="checkbox" checked={all} onChange={() => setTicked(all ? new Set() : new Set(rows.map((r) => r.qboId)))} aria-label="Tick all" /></th>
+                <th>Received</th>
+                <th>From</th>
+                <th>Type</th>
+                <th>Ref no.</th>
+                <th className="r">Amount</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((r) => (
+                <tr key={r.qboId} onClick={() => toggle(r.qboId)}>
+                  <td><input type="checkbox" checked={ticked.has(r.qboId)} onChange={() => toggle(r.qboId)} onClick={(e) => e.stopPropagation()} aria-label={`Deposit ${r.customerName ?? r.qboId} ${formatMoney(r.amountMinor)}`} /></td>
+                  <td className="num">{formatDate(r.txnDate)}</td>
+                  <td><a href={href(realm, { view: "doc", qboId: r.qboId })} onClick={(e) => e.stopPropagation()}>{r.customerName ?? `#${r.qboId}`}</a></td>
+                  <td>{DOC_LABELS[r.docType]}</td>
+                  <td className="num">{r.reference ?? ""}</td>
+                  <td className="num r">{formatMoney(r.amountMinor)}</td>
+                </tr>
+              ))}
+            </tbody>
+            <tfoot>
+              <tr>
+                <td colSpan={5} className="r">{ticked.size} ticked · deposit total</td>
+                <td className="num r">{formatMoney(total)}</td>
+              </tr>
+            </tfoot>
+          </table>
+        </div>
+      )}
+      <div className="form-grid">
+        <label className="field wide">
+          <span>Internal note</span>
+          <textarea rows={2} value={note} onChange={(e) => setNote(e.target.value)} />
+        </label>
+      </div>
+    </section>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Expenses: a receipt paid from the bank or on the card
+// ---------------------------------------------------------------------------
+
+function WriteLinkButton({ realm, route, label }: { realm: string; route: Route; label: string }) {
+  const writes = useContext(Writes);
+  if (!writes.enabled) {
+    return <span className="button disabled" title="Writes are off for this company. They are turned on after the read-only period.">{label}</span>;
+  }
+  return <a className="button primary" href={href(realm, route)}>{label}</a>;
+}
+
+const emptyExpenseLine = (): ExpenseLine => ({ accountId: "", description: null, amount: "", classId: null });
+
+function ExpenseEditor({ realm, go }: { realm: string; go: (r: Route) => void }) {
+  const writes = useContext(Writes);
+  const classes = useContext(Classes);
+  const [vendors, setVendors] = useState<Customer[]>([]);
+  const [payeeText, setPayeeText] = useState("");
+  const [payFrom, setPayFrom] = useState<PaymentAccount[]>([]);
+  const [expenseAccounts, setExpenseAccounts] = useState<PaymentAccount[]>([]);
+  const [accountId, setAccountId] = useState("");
+  const [txnDate, setTxnDate] = useState(todayIso);
+  const [reference, setReference] = useState("");
+  const [note, setNote] = useState("");
+  const [lines, setLines] = useState<ExpenseLine[]>([emptyExpenseLine()]);
+  const [error, setError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    api.vendors(realm).then(setVendors, (e: ApiError) => setError(e.message));
+    api.paymentAccounts(realm).then((all) => {
+      setPayFrom(all);
+      setAccountId((current) => current || all.find((a) => a.accountType === "Credit Card")?.qboId || all[0]?.qboId || "");
+    }, (e: ApiError) => setError(e.message));
+    api.expenseAccounts(realm).then(setExpenseAccounts, (e: ApiError) => setError(e.message));
+  }, [realm]);
+
+  if (!writes.enabled) {
+    return <div className="pad">Writes are off for this company. They are turned on with <code>qbo-local writes --enable</code> after the read-only period.</div>;
+  }
+
+  const setLine = (index: number, patch: Partial<ExpenseLine>) => setLines(lines.map((l, i) => (i === index ? { ...l, ...patch } : l)));
+  const amounts = lines.map((l) => (l.amount.trim() ? lineAmountMinor("1", l.amount) : 0));
+  const total = amounts.reduce<number>((sum, a) => sum + (a ?? 0), 0);
+  const card = payFrom.find((a) => a.qboId === accountId)?.accountType === "Credit Card";
+  const classNames = Object.entries(classes);
+
+  const save = async () => {
+    setError(null);
+    const payee = payeeText.trim() ? vendors.find((v) => v.displayName === payeeText)?.qboId : null;
+    if (payeeText.trim() && !payee) return setError("Choose the payee from the vendor list, or leave it blank.");
+    if (amounts.some((a) => a === null)) return setError("Every line needs a number for its amount.");
+    setSaving(true);
+    try {
+      const result = await api.saveExpense(realm, {
+        payeeId: payee ?? null,
+        txnDate,
+        accountId,
+        reference: reference || null,
+        privateNote: note || null,
+        lines: lines.filter((l) => l.accountId || l.amount.trim()),
+      });
+      writes.refresh();
+      go({ view: "doc", qboId: result.entityId });
+    } catch (e) {
+      setError((e as Error).message);
+      setSaving(false);
+    }
+  };
+
+  return (
+    <section className="document editor" onKeyDown={(e) => { if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "s") { e.preventDefault(); void save(); } }}>
+      <div className="toolbar">
+        <a className="back" href={href(realm, { view: "list", docType: "Purchase" })}>← Expenses</a>
+        <h1>New expense</h1>
+        <span className="spacer" />
+        {writes.environment === "sandbox" && <span className="pill">Sandbox</span>}
+        <button className="button primary" onClick={() => void save()} disabled={saving}>
+          {saving ? "Saving…" : "Save"} <kbd>{navigator.platform.includes("Mac") ? "⌘S" : "Ctrl S"}</kbd>
+        </button>
+      </div>
+      {error && <div className="error">{error}</div>}
+      <div className="form-grid">
+        <label className="field wide">
+          <span>Payee</span>
+          <input list="bb-expense-vendors" value={payeeText} onChange={(e) => setPayeeText(e.target.value)} placeholder="Vendor (optional)" autoFocus />
+          <datalist id="bb-expense-vendors">
+            {vendors.map((v) => <option key={v.qboId} value={v.displayName}>{v.companyName ?? ""}</option>)}
+          </datalist>
+        </label>
+        <label className="field">
+          <span>Paid from</span>
+          <select value={accountId} onChange={(e) => setAccountId(e.target.value)} aria-label="Paid from">
+            {payFrom.map((a) => <option key={a.qboId} value={a.qboId}>{a.name}{a.accountType === "Credit Card" ? " (card)" : ""}</option>)}
+          </select>
+        </label>
+        <label className="field">
+          <span>Date</span>
+          <input type="date" value={txnDate} onChange={(e) => setTxnDate(e.target.value)} />
+        </label>
+        <label className="field">
+          <span>{card ? "Ref no." : "Cheque no. (blank for cash)"}</span>
+          <input value={reference} onChange={(e) => setReference(e.target.value)} aria-label="Reference" />
+        </label>
+      </div>
+      <div className="grid-wrap">
+        <table className="grid lines edit-lines">
+          <thead>
+            <tr>
+              <th>#</th>
+              <th>Expense account</th>
+              <th>Description</th>
+              {classNames.length > 0 && <th>Class</th>}
+              <th className="r">Amount</th>
+              <th />
+            </tr>
+          </thead>
+          <tbody>
+            {lines.map((line, i) => (
+              <tr key={i}>
+                <td className="num muted">{i + 1}</td>
+                <td>
+                  <select value={line.accountId} onChange={(e) => setLine(i, { accountId: e.target.value })} aria-label={`Line ${i + 1} account`}>
+                    <option value="">Choose…</option>
+                    {expenseAccounts.map((a) => <option key={a.qboId} value={a.qboId}>{a.name}</option>)}
+                  </select>
+                </td>
+                <td><input value={line.description ?? ""} onChange={(e) => setLine(i, { description: e.target.value || null })} aria-label={`Line ${i + 1} description`} /></td>
+                {classNames.length > 0 && (
+                  <td>
+                    <select value={line.classId ?? ""} onChange={(e) => setLine(i, { classId: e.target.value || null })} aria-label={`Line ${i + 1} class`}>
+                      <option value="">None</option>
+                      {classNames.map(([id, name]) => <option key={id} value={id}>{name}</option>)}
+                    </select>
+                  </td>
+                )}
+                <td className="r"><input className="num r" inputMode="decimal" value={line.amount} onChange={(e) => setLine(i, { amount: e.target.value })} aria-label={`Line ${i + 1} amount`} /></td>
+                <td>{lines.length > 1 && <button className="link" onClick={() => setLines(lines.filter((_, j) => j !== i))} aria-label={`Remove line ${i + 1}`}>Remove</button>}</td>
+              </tr>
+            ))}
+          </tbody>
+          <tfoot>
+            <tr>
+              <td colSpan={2}><button className="link" onClick={() => setLines([...lines, emptyExpenseLine()])}>Add a line</button></td>
+              <td colSpan={classNames.length > 0 ? 2 : 1} className="r">Total</td>
+              <td className="num r">{formatMoney(total)}</td>
+              <td />
+            </tr>
+          </tfoot>
+        </table>
+      </div>
+      <div className="form-grid">
+        <label className="field wide">
+          <span>Internal note</span>
+          <textarea rows={2} value={note} onChange={(e) => setNote(e.target.value)} />
+        </label>
+      </div>
+    </section>
+  );
+}

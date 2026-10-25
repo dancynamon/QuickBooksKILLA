@@ -23,7 +23,10 @@ use crate::auth::{AuthError, TokenGenerations, TokenStore};
 use crate::domain::RealmId;
 
 /// The keychain service every realm's item is filed under.
-pub const DEFAULT_SERVICE: &str = "com.aquamentor.qbo-local.tokens";
+/// BunzBooks-only. The earlier `com.aquamentor.qbo-local.tokens` holds tokens
+/// minted for the app shared with the QuickBooks MCPs; it is left untouched
+/// and never read.
+pub const DEFAULT_SERVICE: &str = "bunzbooks-qbo-tokens";
 
 /// `errSecItemNotFound`.
 const ERR_SEC_ITEM_NOT_FOUND: i32 = -25300;

@@ -105,6 +105,17 @@ impl Drainer {
         Drainer::default()
     }
 
+    /// Start from mappings an earlier process recorded, so a dependant queued
+    /// before a restart still resolves its parent's real id.
+    pub fn with_mappings(mappings: impl IntoIterator<Item = ((String, String), String)>) -> Self {
+        Drainer { id_map: mappings.into_iter().collect(), ..Drainer::default() }
+    }
+
+    /// Every `(realm, local id) -> QBO id` known, for persisting.
+    pub fn mappings(&self) -> impl Iterator<Item = (&(String, String), &String)> {
+        self.id_map.iter()
+    }
+
     pub fn resolved_id(&self, realm: &RealmId, local_entity_id: &str) -> Option<&String> {
         self.id_map
             .get(&(realm.as_str().to_string(), local_entity_id.to_string()))
@@ -157,6 +168,21 @@ impl Drainer {
         records: &mut [OutboxRecord],
         client: &mut dyn QboClient,
         now: DateTime<Utc>,
+    ) -> DrainReport {
+        self.drain_with(records, client, now, &mut |_| Ok(()))
+    }
+
+    /// [`Self::drain`], calling `persist` with each record as its state
+    /// changes: once on entering `in_flight`, **before** the request is sent,
+    /// and once with the outcome. A record whose `in_flight` cannot be
+    /// persisted is not sent at all — sending it would leave a write QBO may
+    /// have applied with no durable trace that it was attempted.
+    pub fn drain_with(
+        &mut self,
+        records: &mut [OutboxRecord],
+        client: &mut dyn QboClient,
+        now: DateTime<Utc>,
+        persist: &mut dyn FnMut(&OutboxRecord) -> Result<(), String>,
     ) -> DrainReport {
         let mut report = DrainReport::default();
 
@@ -221,6 +247,13 @@ impl Drainer {
                 blocked_entities.insert(entity_key);
                 continue;
             }
+            if let Err(error) = persist(&records[index]) {
+                // Undo in memory too, so the caller's view matches the store.
+                let _ = records[index].mark_failed(DrainFailure::Transient(format!("not sent: {error}")), now);
+                report.blocked += 1;
+                blocked_entities.insert(entity_key);
+                continue;
+            }
             if let Some(hook) = self.on_transition.as_mut() {
                 hook(&records[index], None);
             }
@@ -235,6 +268,7 @@ impl Drainer {
                     }
                     self.record_mapping(&realm, &local_entity_id, &qbo_id);
                     let _ = records[index].mark_applied(now);
+                    let _ = persist(&records[index]);
                     if let Some(hook) = self.on_transition.as_mut() {
                         hook(&records[index], Some(qbo_id.as_str()));
                     }
@@ -251,6 +285,7 @@ impl Drainer {
                         other => DrainFailure::Rejected(other.to_string()),
                     };
                     let _ = records[index].mark_failed(failure, now);
+                    let _ = persist(&records[index]);
                     if let Some(hook) = self.on_transition.as_mut() {
                         hook(&records[index], None);
                     }

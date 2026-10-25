@@ -231,6 +231,9 @@ fn error_to_json(error: &QboError) -> Value {
         QboError::NotFound => "NotFound".to_string(),
         QboError::Validation(detail) => format!("Validation: {detail}"),
         QboError::Network(detail) => format!("Network: {detail}"),
+        // A local refusal, never Intuit's answer; replays as the failure it
+        // was rather than as a budget a replay has no ledger for.
+        QboError::DailyBudgetExhausted(exhausted) => format!("Network: {exhausted}"),
     };
     json!({ "error": message })
 }

@@ -15,7 +15,7 @@ use qbo_local::client::{EntityPayload, MockQbo, QboError};
 use qbo_local::clock::FakeClock;
 use qbo_local::daemon::{Cadence, Daemon, DaemonOptions};
 use qbo_local::domain::{EntityType, RealmId};
-use qbo_local::driver::{SyncError, SyncOptions};
+use qbo_local::driver::{SyncError, SyncOptions, SyncPath};
 use qbo_local::ratelimit::{BucketBudget, RealmLimits};
 use qbo_local::store::backup::SnapshotPolicy;
 use qbo_local::store::Store;
@@ -48,6 +48,17 @@ fn invoice(id: &str, updated: DateTime<Utc>) -> EntityPayload {
     }
 }
 
+fn tax(entity_type: EntityType, id: &str, updated: DateTime<Utc>) -> EntityPayload {
+    EntityPayload {
+        entity_type,
+        qbo_id: id.to_string(),
+        sync_token: "0".into(),
+        last_updated_utc: updated,
+        is_deleted: false,
+        raw_json: json!({ "Id": id, "Name": format!("Tax {id}"), "Active": true }),
+    }
+}
+
 /// A rate budget generous enough that these tests are about the daemon's
 /// cadence, not about the limiter refusing a request.
 fn generous_sync_options() -> SyncOptions {
@@ -76,17 +87,105 @@ fn daemon_at(qbo: MockQbo, clock: FakeClock, sync: SyncOptions) -> Daemon<MockQb
 // ---------------------------------------------------------------------------
 
 #[test]
-fn a_tick_that_mirrors_something_polls_again_on_the_focused_cadence() {
+fn a_tick_that_finds_a_change_polls_again_on_the_focused_cadence() {
     let mut qbo = MockQbo::new(day_start(1, 0));
     qbo.seed(&realm(), invoice("1", day_start(1, 0)));
 
     let store = store();
-    let clock = FakeClock::new(day_start(1, 0));
+    let clock = FakeClock::new(day_start(1, 1));
+    let mut daemon = daemon_at(qbo, clock.clone(), generous_sync_options());
+    daemon.tick(&store, &realm());
+
+    // A new invoice after the first sweep reaches the replica through CDC.
+    clock.advance(Duration::from_secs(300));
+    daemon.client_mut().advance(day_start(1, 2));
+    daemon.client_mut().seed(
+        &realm(),
+        invoice("2", day_start(1, 1) + chrono::Duration::minutes(2)),
+    );
+
+    let tick = daemon.tick(&store, &realm());
+    assert!(tick.report.as_ref().unwrap().changed() > 0);
+    assert_eq!(tick.next_delay, Cadence::default().focused);
+}
+
+#[test]
+fn a_tick_of_sweeps_alone_is_not_activity() {
+    // October 2026: re-mirrored sweep rows read as activity held the daemon
+    // at fifteen seconds for days, about 125,000 calls a day.
+    let mut qbo = MockQbo::new(day_start(1, 0));
+    qbo.seed(&realm(), invoice("1", day_start(1, 0)));
+
+    let store = store();
+    let clock = FakeClock::new(day_start(1, 1));
     let mut daemon = daemon_at(qbo, clock, generous_sync_options());
 
     let tick = daemon.tick(&store, &realm());
     assert!(tick.report.as_ref().unwrap().mirrored() > 0);
-    assert_eq!(tick.next_delay, Cadence::default().focused);
+    assert_eq!(tick.report.as_ref().unwrap().changed(), 0);
+    assert_eq!(tick.next_delay, Cadence::default().idle);
+}
+
+#[test]
+fn three_idle_ticks_with_no_changes_hold_the_idle_cadence_and_rest_the_tax_sweeps() {
+    // The October replay: a book with tax codes and no edits. Every tick must
+    // land on the idle cadence, and only the first may sweep TaxCode/TaxRate.
+    let mut qbo = MockQbo::new(day_start(1, 0));
+    qbo.seed(&realm(), invoice("1", day_start(1, 0)));
+    qbo.seed(&realm(), tax(EntityType::TaxCode, "2", day_start(1, 0)));
+    qbo.seed(&realm(), tax(EntityType::TaxRate, "3", day_start(1, 0)));
+
+    let store = store();
+    let clock = FakeClock::new(day_start(1, 1));
+    let mut daemon = daemon_at(qbo, clock.clone(), generous_sync_options());
+
+    let mut requests = Vec::new();
+    for tick_no in 0..3 {
+        let tick = daemon.tick(&store, &realm());
+        let report = tick.report.as_ref().unwrap();
+        assert_eq!(report.changed(), 0, "tick {tick_no}");
+        assert_eq!(tick.next_delay, Cadence::default().idle, "tick {tick_no}");
+        assert_ne!(tick.next_delay, Cadence::default().focused);
+        for entity_type in [EntityType::TaxCode, EntityType::TaxRate] {
+            let path = &report
+                .entities
+                .iter()
+                .find(|entity| entity.entity_type == entity_type)
+                .unwrap()
+                .path;
+            if tick_no == 0 {
+                assert!(matches!(path, SyncPath::FullSweep { .. }));
+            } else {
+                assert!(matches!(path, SyncPath::SweepNotDue { .. }), "{entity_type:?} on tick {tick_no}: {path:?}");
+            }
+        }
+        requests.push(report.requests());
+        clock.advance(tick.next_delay);
+        daemon
+            .client_mut()
+            .advance(day_start(1, 1) + chrono::Duration::minutes(5 * (tick_no + 1)));
+    }
+    assert!(requests[1] < requests[0], "{requests:?}");
+    assert_eq!(requests[1], requests[2]);
+}
+
+#[test]
+fn a_spent_daily_budget_sleeps_until_the_utc_reset() {
+    let mut qbo = MockQbo::new(day_start(1, 0));
+    qbo.fail_next(QboError::DailyBudgetExhausted(
+        qbo_local::budget::BudgetExhausted {
+            day: day_start(1, 0).date_naive(),
+            used: 15_000,
+            limit: 15_000,
+        },
+    ));
+    let store = store();
+    let clock = FakeClock::new(day_start(1, 18));
+    let mut daemon = daemon_at(qbo, clock, generous_sync_options());
+
+    let tick = daemon.tick(&store, &realm());
+    assert!(tick.report.is_err());
+    assert_eq!(tick.next_delay, Duration::from_secs(6 * 3600 + 60));
 }
 
 #[test]

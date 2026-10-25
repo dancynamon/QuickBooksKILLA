@@ -835,3 +835,39 @@ fn invoice_fields(doc_number: &str, total: f64) -> Value {
                      "SalesItemLineDetail": { "ItemRef": { "value": "12" } } } ]
     })
 }
+
+#[test]
+fn the_daily_call_budget_refuses_without_a_request_going_out() {
+    let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let seen = std::sync::Arc::clone(&hits);
+    let server = support::start(move |_: &FakeRequest| {
+        seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        FakeResponse::json(200, json!({ "QueryResponse": {} }))
+    });
+    let directory = tempfile::tempdir().unwrap();
+    let ledger = directory.path().join("call-budget.json");
+    let mut client = fresh_client(&server, directory.path())
+        .with_call_budget(qbo_local::budget::CallBudget::persistent(&ledger, 2));
+
+    client
+        .query(&realm(), EntityType::Invoice, None, 0, 10)
+        .unwrap();
+    client
+        .query(&realm(), EntityType::Invoice, None, 0, 10)
+        .unwrap();
+    let refused = client.query(&realm(), EntityType::Invoice, None, 0, 10);
+    assert!(
+        matches!(refused, Err(QboError::DailyBudgetExhausted(ref e)) if e.used == 2 && e.limit == 2),
+        "got {refused:?}"
+    );
+    assert!(!refused.unwrap_err().is_transient());
+    assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 2);
+
+    // A restarted process reads the same ledger and is refused too.
+    let mut restarted = fresh_client(&server, directory.path())
+        .with_call_budget(qbo_local::budget::CallBudget::persistent(&ledger, 2));
+    assert!(restarted
+        .query(&realm(), EntityType::Invoice, None, 0, 10)
+        .is_err());
+    assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 2);
+}

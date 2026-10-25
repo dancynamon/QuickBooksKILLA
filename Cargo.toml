@@ -7,6 +7,8 @@ members = [
     "apps/ledger",
     "apps/desktop/commands",
 ]
+# Its own workspace: needs a webview toolchain the root test run must not.
+exclude = ["apps/qbo-local-desktop"]
 
 [workspace.package]
 edition = "2021"

@@ -40,6 +40,19 @@ cargo test          # 672 tests, all offline
 cargo clippy --all-targets
 cargo run --bin qbo-local -- --help
 cargo run --bin ledger -- --help
+
+# The UI against a synthetic book — no Intuit, no real data
+cargo run --release --bin qbo-local -- demo --db /tmp/demo.db --invoices 9000
+(cd apps/qbo-local/ui && npm install && npm run build && npm test)
+cargo run --release --bin qbo-local -- serve --db /tmp/demo.db   # http://127.0.0.1:8780/
+# ... or with writes landing in a stand-in QuickBooks (synthetic book only)
+cargo run --release --bin qbo-local -- serve --db /tmp/demo.db --demo-writes
+
+# Desktop shell (own workspace; needs a webview toolchain — Xcode CLT on macOS)
+(cd apps/qbo-local-desktop && cargo install tauri-cli --version "^2" && cargo tauri build)
+
+# Live sync goes through `qbo-local auth` / `daemon --live`, which read
+# BunzBooks' own Intuit app only (DECISIONS D43)
 ```
 
 The test suite never touches the network. That is a requirement rather than a
@@ -81,8 +94,36 @@ Built and tested:
   on the Mac), a commands crate that is the whole Tauri command body, and the
   Tauri v2 scaffold, compiled on the Mac only
 
-Not built yet: the keychain token backend (macOS only), the first live sync,
-the Tauri shell compiled. See `ROADMAP.md` and `docs/cowork-mac-session/`.
+- M1 read-only UI ("BunzBooks"): React registers for every document type
+  (virtualized, sortable, filterable, keyboard-driven), document view with
+  lines and the estimate→invoice→payment / PO→bill→payment chain, contact
+  view, `⌘K` palette with match reasons and local timing, sync state in the
+  chrome, light/dark, text scaling. Served by `qbo-local serve` or the Tauri
+  shell in `apps/qbo-local-desktop`; both call one `api::dispatch`
+- Read-only reports and lists: A/R and A/P aging (as-of date, five buckets),
+  sales by customer (line amounts before tax, net of credits), products and
+  services with price, cost, margin, on-hand and where-used; a statement
+  strip (open balance by days past due) on every customer and vendor
+- Synthetic book generator (`demo`) for UI work and §11 measurements
+- §8 safety nets for M2: `AuditedClient` appends every QBO write (request,
+  `RequestId`, result) to an fsynced JSONL file; `snapshot` writes a dated
+  `VACUUM INTO` copy of the replica, outbox included, keeping the newest N
+
+- M2 write path, built and switched off: editor for estimates, invoices,
+  sales receipts, credit memos, purchase orders and bills, new customers usable before QuickBooks has them, a sync queue to
+  retry or discard what QuickBooks refused, all through the durable outbox
+  and the write gate (`qbo-local writes`; DECISIONS D44). Try it end to end
+  on the synthetic book with `serve --demo-writes`
+
+- Manufacturing costing (Phase 2, first slice): materials with landed cost
+  per board-foot (freight allocated by board-foot, to the cent), build sheets
+  per product (material over yield, parts, labour) with margin and a
+  price-by-yield sensitivity table, and builds with priced variance against
+  the sheet; material stock on hand replayed from deliveries, builds and
+  counts, with moving-average cost, shrinkage, reorder points and a choice
+  of latest or average cost on build sheets. The replica's own data; never sent to QuickBooks (DECISIONS D45)
+
+Not built yet: the first live sync, the Tauri shell compiled. See `ROADMAP.md` and `docs/cowork-mac-session/`.
 
 ## Current state — the ledger
 

@@ -126,6 +126,10 @@ enum Command {
         config: Option<PathBuf>,
         force: bool,
     },
+    Whoami {
+        realm: RealmId,
+        config: Option<PathBuf>,
+    },
     Daemon {
         db: PathBuf,
         realm: RealmId,
@@ -191,6 +195,12 @@ enum Command {
         realm: RealmId,
         all: bool,
     },
+    /// `demo`, `serve`, `writes`: offline commands that never reach Intuit,
+    /// handed their raw arguments.
+    Offline {
+        name: String,
+        args: Vec<String>,
+    },
     Snapshots {
         realm: RealmId,
         from_year: i32,
@@ -243,6 +253,7 @@ USAGE:
     qbo-local init --db PATH --realm ID --name \"Display Name\"
     qbo-local auth --realm ID [--port N] [--config PATH]
     qbo-local import-token --realm ID [--config PATH] [--force] < refresh-token
+    qbo-local whoami --realm ID [--config PATH]
     qbo-local daemon --db PATH --realm ID [--focused-secs N] [--idle-secs N]
                       [--snapshot-dir DIR --keep N] [--snapshot-hour-utc H]
                       [--once] (--live [--config PATH] | --mock)
@@ -257,6 +268,9 @@ USAGE:
                       (--live [--config PATH] | --replay DIR) [--record DIR]
     qbo-local sync-sales-orders --db PATH --realm ID --feed URL|PATH
     qbo-local sales-orders --db PATH --realm ID [--all]
+    qbo-local demo --db PATH [--invoices N]
+    qbo-local serve --db PATH [--port 8780] [--ui DIR] [--demo-writes]
+    qbo-local writes --db PATH --realm ID [--enable [--confirm] | --disable]
     qbo-local --help
 
 SUBCOMMANDS:
@@ -308,6 +322,11 @@ SUBCOMMANDS:
     sales-orders
                 List the mirrored sales orders still open (--all: every one),
                 with what is left to invoice. Opens the replica read-only.
+    demo        Write a synthetic book to a new --db file (no Intuit).
+    serve       Serve the UI and its API on 127.0.0.1 over --db; with
+                --demo-writes, the synthetic book's writes land in a
+                stand-in QuickBooks.
+    writes      Show or change whether a realm takes writes (DESIGN.md §8).
 
 FLAGS:
     --db PATH               Path to the SQLite replica file.
@@ -421,6 +440,7 @@ fn parse(args: &[String]) -> Result<Command, UsageError> {
         "init" => parse_init(args),
         "auth" => parse_auth(args),
         "import-token" => parse_import_token(args),
+        "whoami" => parse_whoami(args),
         "daemon" => parse_daemon(args),
         "sweep" => parse_sweep(args),
         "snapshot" => parse_snapshot(args),
@@ -431,6 +451,10 @@ fn parse(args: &[String]) -> Result<Command, UsageError> {
         "snapshots" => parse_snapshots(args),
         "sync-sales-orders" => parse_sync_sales_orders(args),
         "sales-orders" => parse_sales_orders(args),
+        "demo" | "serve" | "writes" => Ok(Command::Offline {
+            name: subcommand.clone(),
+            args: args.cloned().collect(),
+        }),
         other => Err(UsageError::unknown_subcommand(other)),
     }
 }
@@ -505,6 +529,22 @@ fn parse_import_token(mut args: Args<'_>) -> Result<Command, UsageError> {
         realm: realm.ok_or_else(|| UsageError::missing_flag("--realm"))?,
         config,
         force,
+    })
+}
+
+fn parse_whoami(mut args: Args<'_>) -> Result<Command, UsageError> {
+    let mut realm = None;
+    let mut config = None;
+    while let Some(flag) = args.next() {
+        match flag.as_str() {
+            "--realm" => realm = Some(parse_realm(&next_value(&mut args, "--realm")?)?),
+            "--config" => config = Some(PathBuf::from(next_value(&mut args, "--config")?)),
+            other => return Err(UsageError::unknown_flag(other)),
+        }
+    }
+    Ok(Command::Whoami {
+        realm: realm.ok_or_else(|| UsageError::missing_flag("--realm"))?,
+        config,
     })
 }
 
@@ -912,6 +952,14 @@ fn runtime<E: std::fmt::Display>(error: E) -> CommandError {
 
 fn execute(command: Command) -> Result<(), CommandError> {
     match command {
+        Command::Offline { name, args } => {
+            let run = match name.as_str() {
+                "demo" => offline::demo,
+                "serve" => offline::serve,
+                _ => offline::writes,
+            };
+            run(&args).map_err(|e| CommandError::Runtime(e.to_string()))
+        }
         Command::Status { db, config } => run_status(db, config.as_deref()),
         Command::Init { db, realm, name } => run_init(&db, &realm, &name),
         Command::Auth {
@@ -924,6 +972,7 @@ fn execute(command: Command) -> Result<(), CommandError> {
             config,
             force,
         } => run_import_token(&realm, config.as_deref(), force),
+        Command::Whoami { realm, config } => run_whoami(&realm, config.as_deref()),
         Command::Daemon {
             db,
             realm,
@@ -1029,16 +1078,25 @@ fn build_http_client(
     // Validates that `realm` is one this config file actually lists, so a
     // typo'd --realm fails loudly here rather than as a confusing empty sync.
     config.realm(realm.as_str()).map_err(runtime)?;
-    let secret = config.client_secret().map_err(runtime)?;
+    let app = config.credentials().map_err(runtime)?;
+    let budget = config.call_budget();
+    // On stderr, so it lands at the top of the daemon log: which app this
+    // process spends, and how much of today's ceiling is already gone.
+    eprintln!(
+        "qbo-local: Intuit app {} (from the {}); {}/{} calls used today (UTC)",
+        app.client_id,
+        app.source,
+        budget.used(Utc::now()).map_err(runtime)?,
+        budget.limit()
+    );
     let redirect_uri = format!("http://localhost:{}/callback", config.intuit.redirect_port);
-    let oauth_config = OAuthConfig::intuit(config.intuit.client_id.clone(), secret, redirect_uri);
+    let oauth_config = OAuthConfig::intuit(app.client_id, app.client_secret, redirect_uri);
     let (token_store, _) = open_token_store(&config)?;
     let tokens = TokenSource::new(token_store, oauth_config, realm.clone());
-    Ok(HttpQboClient::new(
-        config.base_url(),
-        tokens,
-        config.rotation_log.clone(),
-    ))
+    Ok(
+        HttpQboClient::new(config.base_url(), tokens, config.rotation_log.clone())
+            .with_call_budget(budget),
+    )
 }
 
 /// The token store `config` selects (`token_store`, defaulting to the
@@ -1053,7 +1111,9 @@ fn open_token_store(config: &LocalConfig) -> Result<(Box<dyn TokenStore>, String
         )),
         #[cfg(target_os = "macos")]
         TokenStoreKind::Keychain => {
-            let store = qbo_local::keychain::KeychainTokenStore::new();
+            let store = qbo_local::keychain::KeychainTokenStore::with_service(
+                &config.intuit.token_keychain_service,
+            );
             let description = format!("macOS keychain, service {}", store.service());
             Ok((Box::new(store), description))
         }
@@ -1270,10 +1330,11 @@ fn run_auth(
 ) -> Result<(), CommandError> {
     let path = config_path.unwrap_or(Path::new(DEFAULT_CONFIG_PATH));
     let config = LocalConfig::load(path).map_err(runtime)?;
-    let secret = config.client_secret().map_err(runtime)?;
+    let app = config.credentials().map_err(runtime)?;
     let port = port.unwrap_or(config.intuit.redirect_port);
     let redirect_uri = format!("http://localhost:{port}/callback");
-    let oauth_config = OAuthConfig::intuit(config.intuit.client_id.clone(), secret, redirect_uri);
+    println!("Intuit app {} (from the {})", app.client_id, app.source);
+    let oauth_config = OAuthConfig::intuit(app.client_id, app.client_secret, redirect_uri);
 
     let state = Uuid::now_v7().to_string();
     println!("Open this URL to authorize qbo-local for realm {realm}:\n");
@@ -1348,9 +1409,9 @@ fn run_import_token(
         ));
     }
 
-    let secret = config.client_secret().map_err(runtime)?;
+    let app = config.credentials().map_err(runtime)?;
     let redirect_uri = format!("http://localhost:{}/callback", config.intuit.redirect_port);
-    let oauth_config = OAuthConfig::intuit(config.intuit.client_id.clone(), secret, redirect_uri);
+    let oauth_config = OAuthConfig::intuit(app.client_id, app.client_secret, redirect_uri);
     let agent = ureq::AgentBuilder::new().build();
     let token_set = oauth::refresh(&oauth_config, refresh_token, &agent).map_err(runtime)?;
 
@@ -1361,6 +1422,22 @@ fn run_import_token(
         generations.current.fingerprint(),
         generations.current.refresh_expires_at().to_rfc3339()
     );
+    Ok(())
+}
+
+// -- whoami -----------------------------------------------------------------
+
+/// One `CompanyInfo` read, through the same client every live path builds:
+/// proves the stored tokens work for this app and this company, for the
+/// price of one call against the budget.
+fn run_whoami(realm: &RealmId, config: Option<&Path>) -> Result<(), CommandError> {
+    let mut client = build_http_client(config, realm)?;
+    let info = client
+        .fetch(realm, EntityType::CompanyInfo, realm.as_str())
+        .map_err(runtime)?
+        .ok_or_else(|| CommandError::Runtime(format!("no CompanyInfo for realm {realm}")))?;
+    let name = info.raw_json["CompanyName"].as_str().unwrap_or("?");
+    println!("realm {realm}: {name} (CompanyInfo read with the app above)");
     Ok(())
 }
 
@@ -1881,6 +1958,115 @@ fn run_daemon_with_client<C: QboClient>(
     Ok(())
 }
 
+mod offline {
+    //! Commands that never reach Intuit: the synthetic book and the dev server.
+
+    use std::net::TcpListener;
+    use std::path::PathBuf;
+    use std::time::Instant;
+
+    use chrono::Utc;
+    use qbo_local::demo::{self, DemoSize};
+    use qbo_local::store::Store;
+
+    type Error = Box<dyn std::error::Error>;
+
+    fn value<'a>(args: &'a [String], name: &str) -> Option<&'a str> {
+        args.iter()
+            .position(|a| a == name)
+            .and_then(|i| args.get(i + 1))
+            .map(String::as_str)
+    }
+
+    pub fn demo(args: &[String]) -> Result<(), Error> {
+        let db = PathBuf::from(value(args, "--db").ok_or("--db is required")?);
+        if db.exists() {
+            return Err(format!("{} exists; demo writes only to a new file", db.display()).into());
+        }
+        let mut size = DemoSize::default();
+        if let Some(invoices) = value(args, "--invoices") {
+            size.invoices = invoices.parse()?;
+        }
+        let store = Store::open(&db)?;
+        let started = Instant::now();
+        let written = demo::seed(&store, size, 42, Utc::now())?;
+        println!(
+            "wrote {written} synthetic entities to {} in {:.2}s (realm {})",
+            db.display(),
+            started.elapsed().as_secs_f64(),
+            demo::DEMO_REALM
+        );
+        Ok(())
+    }
+
+    /// Show or change whether a company takes writes (`DESIGN.md` §8). With
+    /// neither flag, reports the current state and what enabling would need.
+    pub fn writes(args: &[String]) -> Result<(), Error> {
+        let db = PathBuf::from(value(args, "--db").ok_or("--db is required")?);
+        let realm = qbo_local::domain::RealmId::parse(value(args, "--realm").ok_or("--realm is required")?)?;
+        let store = Store::open(&db)?;
+        if !store.realms()?.iter().any(|r| r.realm_id == realm) {
+            return Err(format!("{realm} is not in this replica").into());
+        }
+        let has = |name: &str| args.iter().any(|a| a == name);
+        if has("--disable") {
+            store.set_write_enabled(&realm, false)?;
+            println!("writes off for {realm}; queued writes stay queued");
+            return Ok(());
+        }
+        if has("--enable") {
+            qbo_local::writes::check_enable(&store, &realm, has("--confirm"), Utc::now())?;
+            store.set_write_enabled(&realm, true)?;
+            println!("writes on for {realm} ({})", store.realm_environment(&realm)?.as_str());
+            return Ok(());
+        }
+        let on = store.is_write_enabled(&realm)?;
+        println!("{realm}: {} company, writes {}", store.realm_environment(&realm)?.as_str(), if on { "on" } else { "off" });
+        if !on {
+            match qbo_local::writes::check_enable(&store, &realm, true, Utc::now()) {
+                Ok(()) => println!("can be enabled now with --enable --confirm"),
+                Err(why) => println!("cannot enable yet: {why}"),
+            }
+        }
+        Ok(())
+    }
+
+    pub fn serve(args: &[String]) -> Result<(), Error> {
+        let db = PathBuf::from(value(args, "--db").ok_or("--db is required")?);
+        if !db.exists() {
+            return Err(format!("{} does not exist", db.display()).into());
+        }
+        let port: u16 = value(args, "--port").unwrap_or("8780").parse()?;
+        let ui = value(args, "--ui")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("ui/dist"));
+        let started = Instant::now();
+        let store = Store::open(&db)?;
+        // `--demo-writes`: the synthetic book only. Turns its writes on and
+        // lands them in a stand-in QuickBooks, so the write path can be used
+        // end to end in a browser.
+        let mut demo_qbo = if args.iter().any(|a| a == "--demo-writes") {
+            let realm = qbo_local::domain::RealmId::parse(demo::DEMO_REALM)?;
+            if !store.realms()?.iter().any(|r| r.realm_id == realm) {
+                return Err("--demo-writes needs a replica written by `qbo-local demo`".into());
+            }
+            store.set_write_enabled(&realm, true)?;
+            Some(qbo_local::serve::DemoQbo::new(&store, &realm, chrono::Duration::seconds(3))?)
+        } else {
+            None
+        };
+        let listener = TcpListener::bind(("127.0.0.1", port))?;
+        println!(
+            "replica open in {:.0} ms; serving http://127.0.0.1:{port}/{}",
+            started.elapsed().as_secs_f64() * 1000.0,
+            if demo_qbo.is_some() { " (demo writes on)" } else { "" }
+        );
+        qbo_local::serve::run(listener, &store, &ui, demo_qbo.as_mut())?;
+        Ok(())
+    }
+}
+
+
 /// One line per tick: timestamp, path per entity summarised, next delay, and
 /// the snapshot path when one was taken.
 fn print_tick_line(tick: &Tick) {
@@ -1917,6 +2103,7 @@ fn sync_path_label(path: &SyncPath) -> &'static str {
         SyncPath::FullSweep { .. } => "sweep",
         SyncPath::Cdc { .. } => "cdc",
         SyncPath::CdcThenBackfill { .. } => "backfill",
+        SyncPath::SweepNotDue { .. } => "not-due",
     }
 }
 

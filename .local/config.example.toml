@@ -3,18 +3,24 @@
 # (HANDOFF.md §0); nothing you put in the real copy ever reaches git.
 
 # Where OAuth tokens live. Omitted: "keychain" on macOS (the login keychain,
-# service com.aquamentor.qbo-local.tokens, one item per realm), "file" (under
+# service bunzbooks-qbo-tokens, one item per realm), "file" (under
 # tokens_dir) everywhere else. Must sit above the first [table] header.
 # token_store = "keychain"
 
 [intuit]
-# From the Intuit developer app (HANDOFF.md §0).
-client_id = "YOUR_INTUIT_CLIENT_ID"
-
-# Prefer the QBO_CLIENT_SECRET environment variable over writing the secret
-# here at all. Set this only if there is no reasonable way to supply the
-# environment variable in your setup.
-client_secret = ""
+# BunzBooks has its own Intuit developer app, and never shares one: the
+# QuickBooks MCPs' app has a monthly API quota that qbo-local once spent for
+# all of them. Its Client ID and Secret are NOT written here — a config that
+# sets client_id or client_secret is refused. Store them in the login
+# keychain once:
+#
+#   security add-generic-password -U -s bunzbooks-intuit-app -a client_id -w '<Client ID>'
+#   security add-generic-password -U -s bunzbooks-intuit-app -a client_secret -w
+#
+# (the second form prompts for the secret, so it never sits in shell
+# history), or set BUNZBOOKS_QBO_CLIENT_ID and BUNZBOOKS_QBO_CLIENT_SECRET.
+# app_keychain_service = "bunzbooks-intuit-app"
+# token_keychain_service = "bunzbooks-qbo-tokens"
 
 # "production" or "sandbox". M0 is read-only and can point at production;
 # switch to "sandbox" before any write path is exercised (HANDOFF.md §3).
@@ -41,6 +47,14 @@ name = "Aquamentor, Inc."
 # needed. Both already live under the gitignored .local/ tree.
 # tokens_dir = ".local/tokens"
 # rotation_log = ".local/rotation-log.jsonl"
+
+# A hard ceiling on Intuit API calls per UTC day, across every qbo-local
+# process sharing the ledger file. Past it, calls are refused locally and the
+# daemon sleeps to midnight UTC. 15,000 a day keeps a month under the builder
+# tier's 500,000 CorePlus calls.
+# [budget]
+# daily_calls = 15000
+# ledger = ".local/call-budget.json"
 
 # SurePayroll pay-run journal (docs/PAYROLL.md, D38). Who maps to which §3
 # class. An import refuses any employee or department not listed here, so

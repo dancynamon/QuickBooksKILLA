@@ -9,6 +9,9 @@ apps/desktop/src-tauri/gen
 node_modules/
 dist/
 
+# Tauri's generated capability schemas
+apps/qbo-local-desktop/gen/
+
 # Python — tools/*.py are test-covered scripts, not a package
 __pycache__/
 *.pyc
