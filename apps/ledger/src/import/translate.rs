@@ -384,13 +384,8 @@ pub fn translate(
     });
 
     let pay_from = resolve_pay_from(raw, doc_kind, &ctx.accounts, &mut warnings);
-    let applications = collect_applications(
-        raw,
-        doc_kind,
-        doc.contact_id.as_deref(),
-        ctx,
-        &mut warnings,
-    );
+    let applications =
+        collect_applications(raw, doc_kind, doc.contact_id.as_deref(), ctx, &mut warnings);
     let unapplied = json_money(raw, "UnappliedAmt", &qbo_id)?.unwrap_or(Money::ZERO);
 
     // D29: a QBO Payment's lines are its applications, one per document
