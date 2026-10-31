@@ -3247,8 +3247,8 @@ mod tests {
         let created = &response["result"]["structuredContent"];
         assert_eq!(created["number"], json!("1001"));
         assert_eq!(created["due_date"], json!("2026-10-01"));
-        assert_eq!(created["tax"], json!("6.62"));
-        assert_eq!(created["total"], json!("106.62"));
+        assert_eq!(created["tax"], json!("6.63"));
+        assert_eq!(created["total"], json!("106.63"));
         let invoice_id = created["document_id"].as_str().unwrap().to_string();
 
         let response = call_tool(
@@ -3271,8 +3271,8 @@ mod tests {
             json!({ "book": "receivable", "as_of": "2026-10-15" }),
         );
         let totals = &aging["result"]["structuredContent"]["totals"];
-        assert_eq!(totals["days_1_30"], json!("56.62"));
-        assert_eq!(totals["total"], json!("56.62"));
+        assert_eq!(totals["days_1_30"], json!("56.63"));
+        assert_eq!(totals["total"], json!("56.63"));
         assert_eq!(
             aging["result"]["structuredContent"]["rows"][0]["contact_name"],
             json!("Pool Co")
@@ -3290,7 +3290,7 @@ mod tests {
         );
         assert_eq!(
             open["result"]["structuredContent"][0]["open"],
-            json!("56.62")
+            json!("56.63")
         );
     }
 
@@ -3321,7 +3321,7 @@ mod tests {
         let created = &response["result"]["structuredContent"];
         assert_eq!(created["number"], json!("1001"));
         assert_eq!(created["entry_id"], Value::Null);
-        assert_eq!(created["tax"], json!("6.62"));
+        assert_eq!(created["tax"], json!("6.63"));
         let so_id = created["document_id"].as_str().unwrap().to_string();
 
         let open = call_tool(&mut server, 5, "open_sales_orders", json!({}));

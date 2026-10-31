@@ -854,8 +854,8 @@ mod tests {
         let ar_aging = csv_value(dir, "ar-aging-2026-12-31.csv", 0, "TOTAL", 7);
         let ap_aging = csv_value(dir, "ap-aging-2026-12-31.csv", 0, "TOTAL", 7);
 
-        // 100 + 6.62 tax - 50 paid, 200 + 13.25 tax, 50 untaxed.
-        assert_eq!(ar_tb, "319.87");
+        // 100 + 6.63 tax (half up, W17) - 50 paid, 200 + 13.25 tax, 50 untaxed.
+        assert_eq!(ar_tb, "319.88");
         assert_eq!(ar_aging, ar_tb);
         // 400 - 150 paid, 120; AP is a credit balance on the TB.
         assert_eq!(ap_tb, "-370.00");
@@ -864,7 +864,7 @@ mod tests {
         // Buckets: the August invoice is 122 days past due as of year end.
         assert_eq!(
             csv_value(dir, "ar-aging-2026-12-31.csv", 0, "c-pool", 6),
-            "56.62"
+            "56.63"
         );
         // A contact name with a comma is quoted, not split.
         assert!(std::fs::read_to_string(dir.join("ar-aging-2026-12-31.csv"))
