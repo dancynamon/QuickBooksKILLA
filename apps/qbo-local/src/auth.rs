@@ -144,7 +144,20 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), std::io::Error> {
     // Same directory as the target, so the rename cannot cross a filesystem.
     let temporary = path.with_extension("tmp");
     {
-        let mut file = File::create(&temporary)?;
+        // Owner read/write only: this file holds refresh tokens. The mode is
+        // set at creation, so the tokens are never readable by anyone else
+        // even for a moment, and set again in case a leftover temporary
+        // from a crashed write already existed with a wider one.
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+        let mut file = options.open(&temporary)?;
+        #[cfg(unix)]
+        fs::set_permissions(
+            &temporary,
+            std::os::unix::fs::PermissionsExt::from_mode(0o600),
+        )?;
         file.write_all(bytes)?;
         file.sync_all()?;
     }
@@ -363,6 +376,20 @@ mod tests {
         let nested = directory.path().join("a").join("b").join("tokens.json");
         atomic_write(&nested, b"contents").unwrap();
         assert_eq!(fs::read(&nested).unwrap(), b"contents");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_write_leaves_the_token_file_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("tokens.json");
+        // A leftover temporary from a crashed write, world-readable.
+        fs::write(path.with_extension("tmp"), b"stale").unwrap();
+        fs::set_permissions(path.with_extension("tmp"), fs::Permissions::from_mode(0o644)).unwrap();
+        atomic_write(&path, b"secret").unwrap();
+        let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "{mode:o}");
     }
 
     #[test]
