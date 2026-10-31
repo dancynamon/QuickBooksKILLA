@@ -2705,7 +2705,10 @@ fn render_tax(
         Money::display(lines.d_nontaxable_sales)
     ));
     match lines.e_line_level_taxable {
-        Some(e) => out.push_str(&format!("  E  taxable, line level: {}\n", Money::display(e))),
+        Some(e) => out.push_str(&format!(
+            "  E  taxable, line level: {}\n",
+            Money::display(e)
+        )),
         None => out.push_str("  E  taxable, line level: n/a\n"),
     }
     // Non-zero is expected when C is derived from a rounded B (D23), not
@@ -4621,5 +4624,4 @@ mod tests {
         assert_eq!(rows[0].balance, Money::from_minor(120_000));
         assert_eq!(rows[1].balance, Money::from_minor(50_050));
     }
-
 }

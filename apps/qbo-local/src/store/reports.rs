@@ -74,7 +74,12 @@ pub struct ItemRow {
 
 impl Store {
     /// Aging as of `as_of` (`YYYY-MM-DD`), largest balance first.
-    pub fn aging(&self, realm: &RealmId, side: AgingSide, as_of: &str) -> Result<Vec<AgingRow>, StoreError> {
+    pub fn aging(
+        &self,
+        realm: &RealmId,
+        side: AgingSide,
+        as_of: &str,
+    ) -> Result<Vec<AgingRow>, StoreError> {
         let mut statement = self.connection.prepare(
             "WITH open_docs AS (
                  SELECT d.contact_id, d.balance_minor AS balance,
@@ -100,24 +105,32 @@ impl Store {
             AgingSide::Receivable => "Customer",
             AgingSide::Payable => "Vendor",
         };
-        let rows = statement.query_map(params![realm.as_str(), side.doc_type(), as_of, contact_type], |row| {
-            Ok(AgingRow {
-                contact_id: row.get(0)?,
-                contact_name: row.get(1)?,
-                current: Money::from_minor(row.get(2)?),
-                days_1_30: Money::from_minor(row.get(3)?),
-                days_31_60: Money::from_minor(row.get(4)?),
-                days_61_90: Money::from_minor(row.get(5)?),
-                days_over_90: Money::from_minor(row.get(6)?),
-                total: Money::from_minor(row.get(7)?),
-                documents: row.get(8)?,
-            })
-        })?;
+        let rows = statement.query_map(
+            params![realm.as_str(), side.doc_type(), as_of, contact_type],
+            |row| {
+                Ok(AgingRow {
+                    contact_id: row.get(0)?,
+                    contact_name: row.get(1)?,
+                    current: Money::from_minor(row.get(2)?),
+                    days_1_30: Money::from_minor(row.get(3)?),
+                    days_31_60: Money::from_minor(row.get(4)?),
+                    days_61_90: Money::from_minor(row.get(5)?),
+                    days_over_90: Money::from_minor(row.get(6)?),
+                    total: Money::from_minor(row.get(7)?),
+                    documents: row.get(8)?,
+                })
+            },
+        )?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
     /// Net sales per customer for documents dated `from..=to`, largest first.
-    pub fn sales_by_customer(&self, realm: &RealmId, from: &str, to: &str) -> Result<Vec<SalesRow>, StoreError> {
+    pub fn sales_by_customer(
+        &self,
+        realm: &RealmId,
+        from: &str,
+        to: &str,
+    ) -> Result<Vec<SalesRow>, StoreError> {
         let mut statement = self.connection.prepare(
             "SELECT d.contact_id, c.display_name,
                     SUM(CASE WHEN d.doc_type IN ('CreditMemo', 'RefundReceipt') THEN -l.amount_minor
@@ -196,12 +209,16 @@ mod tests {
     }
 
     fn invoice(id: &str, due: &str, total: f64, balance: f64) -> MirroredEntity {
-        entity(EntityType::Invoice, id, json!({
-            "Id": id, "DocNumber": format!("T{id}"), "TxnDate": "2026-05-01", "DueDate": due,
-            "CustomerRef": { "value": "c1" }, "TotalAmt": total, "Balance": balance,
-            "Line": [ { "LineNum": 1, "Amount": total, "DetailType": "SalesItemLineDetail",
-                        "SalesItemLineDetail": { "ItemRef": { "value": "i1" }, "Qty": 1, "UnitPrice": total } } ]
-        }))
+        entity(
+            EntityType::Invoice,
+            id,
+            json!({
+                "Id": id, "DocNumber": format!("T{id}"), "TxnDate": "2026-05-01", "DueDate": due,
+                "CustomerRef": { "value": "c1" }, "TotalAmt": total, "Balance": balance,
+                "Line": [ { "LineNum": 1, "Amount": total, "DetailType": "SalesItemLineDetail",
+                            "SalesItemLineDetail": { "ItemRef": { "value": "i1" }, "Qty": 1, "UnitPrice": total } } ]
+            }),
+        )
     }
 
     fn book() -> Store {
@@ -209,17 +226,29 @@ mod tests {
         let now = Utc.with_ymd_and_hms(2026, 10, 1, 0, 0, 0).unwrap();
         store.register_realm(&realm(), "Test", now).unwrap();
         let entities = vec![
-            entity(EntityType::Customer, "c1", json!({ "Id": "c1", "DisplayName": "Blue Harbor Swim Club", "Active": true })),
-            entity(EntityType::Item, "i1", json!({ "Id": "i1", "Name": "Rescue tube", "Sku": "RT-1", "Type": "Inventory", "UnitPrice": 49.25, "Active": true })),
+            entity(
+                EntityType::Customer,
+                "c1",
+                json!({ "Id": "c1", "DisplayName": "Blue Harbor Swim Club", "Active": true }),
+            ),
+            entity(
+                EntityType::Item,
+                "i1",
+                json!({ "Id": "i1", "Name": "Rescue tube", "Sku": "RT-1", "Type": "Inventory", "UnitPrice": 49.25, "Active": true }),
+            ),
             invoice("1", "2026-10-15", 100.00, 100.00), // not yet due on 10-01
             invoice("2", "2026-09-20", 200.00, 50.00),  // 11 days late, partly paid
             invoice("3", "2026-07-01", 300.00, 300.00), // 92 days late
             invoice("4", "2026-08-01", 400.00, 0.00),   // paid: not aged
-            entity(EntityType::CreditMemo, "5", json!({
-                "Id": "5", "TxnDate": "2026-06-01", "CustomerRef": { "value": "c1" }, "TotalAmt": 25.0,
-                "Line": [ { "LineNum": 1, "Amount": 25.0, "DetailType": "SalesItemLineDetail",
-                            "SalesItemLineDetail": { "ItemRef": { "value": "i1" } } } ]
-            })),
+            entity(
+                EntityType::CreditMemo,
+                "5",
+                json!({
+                    "Id": "5", "TxnDate": "2026-06-01", "CustomerRef": { "value": "c1" }, "TotalAmt": 25.0,
+                    "Line": [ { "LineNum": 1, "Amount": 25.0, "DetailType": "SalesItemLineDetail",
+                                "SalesItemLineDetail": { "ItemRef": { "value": "i1" } } } ]
+                }),
+            ),
         ];
         store.apply_batch(&realm(), &entities, None, now).unwrap();
         store
@@ -227,7 +256,9 @@ mod tests {
 
     #[test]
     fn open_invoices_land_in_the_right_buckets() {
-        let rows = book().aging(&realm(), AgingSide::Receivable, "2026-10-01").unwrap();
+        let rows = book()
+            .aging(&realm(), AgingSide::Receivable, "2026-10-01")
+            .unwrap();
         assert_eq!(rows.len(), 1);
         let row = &rows[0];
         assert_eq!(row.contact_name.as_deref(), Some("Blue Harbor Swim Club"));
@@ -240,13 +271,21 @@ mod tests {
 
     #[test]
     fn nothing_dated_after_the_as_of_date_is_aged() {
-        assert!(book().aging(&realm(), AgingSide::Receivable, "2026-04-30").unwrap().is_empty());
-        assert!(book().aging(&realm(), AgingSide::Payable, "2026-10-01").unwrap().is_empty());
+        assert!(book()
+            .aging(&realm(), AgingSide::Receivable, "2026-04-30")
+            .unwrap()
+            .is_empty());
+        assert!(book()
+            .aging(&realm(), AgingSide::Payable, "2026-10-01")
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
     fn sales_net_out_credit_memos() {
-        let rows = book().sales_by_customer(&realm(), "2026-01-01", "2026-12-31").unwrap();
+        let rows = book()
+            .sales_by_customer(&realm(), "2026-01-01", "2026-12-31")
+            .unwrap();
         assert_eq!(rows[0].net_sales, Money::from_minor(100_000 - 2_500));
         assert_eq!(rows[0].documents, 5);
     }

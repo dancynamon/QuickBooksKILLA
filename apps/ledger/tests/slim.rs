@@ -1563,16 +1563,30 @@ fn a_vendor_credit_is_a_negative_ap_open_item_and_a_refund_receipt_is_no_open_it
     };
     assert_eq!(open(&ap_items, "qbo:VendorCredit:VC1"), Some(-2_500));
     assert_eq!(open(&ap_items, "qbo:Bill:B1"), Some(50_000));
-    assert_eq!(open(&ap_items, "qbo:BillPayment:BP3"), None, "fully applied");
+    assert_eq!(
+        open(&ap_items, "qbo:BillPayment:BP3"),
+        None,
+        "fully applied"
+    );
     // AP is a credit balance: 500 owed less the 25 of credit left.
-    assert_eq!(balance(&ledger, chart::ACCOUNTS_PAYABLE, as_of()), usd(-47_500));
+    assert_eq!(
+        balance(&ledger, chart::ACCOUNTS_PAYABLE, as_of()),
+        usd(-47_500)
+    );
 
     let ar_items = books::open_documents(&ledger, CO, Book::Receivable, as_of()).unwrap();
     assert!(
-        ar_items.iter().all(|d| !d.document_id.contains("RefundReceipt")),
+        ar_items
+            .iter()
+            .all(|d| !d.document_id.contains("RefundReceipt")),
         "{ar_items:?}"
     );
-    assert!(ap_items.iter().all(|d| !d.document_id.contains("RefundReceipt")));
+    assert!(ap_items
+        .iter()
+        .all(|d| !d.document_id.contains("RefundReceipt")));
     // The cash it paid out is in the opening entry, as QBO had it.
-    assert_eq!(balance(&ledger, chart::UNDEPOSITED_FUNDS, as_of()), usd(-2_500));
+    assert_eq!(
+        balance(&ledger, chart::UNDEPOSITED_FUNDS, as_of()),
+        usd(-2_500)
+    );
 }

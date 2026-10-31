@@ -386,7 +386,11 @@ mod tests {
         let path = directory.path().join("tokens.json");
         // A leftover temporary from a crashed write, world-readable.
         fs::write(path.with_extension("tmp"), b"stale").unwrap();
-        fs::set_permissions(path.with_extension("tmp"), fs::Permissions::from_mode(0o644)).unwrap();
+        fs::set_permissions(
+            path.with_extension("tmp"),
+            fs::Permissions::from_mode(0o644),
+        )
+        .unwrap();
         atomic_write(&path, b"secret").unwrap();
         let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "{mode:o}");

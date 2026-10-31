@@ -1155,7 +1155,11 @@ mod tests {
                 mapped: vec![
                     mapped(CHECKING_QBO, chart::CHECKING, Classification::Asset),
                     mapped(CARD_QBO, chart::CREDIT_CARD, Classification::Liability),
-                    mapped(UNDEPOSITED_QBO, chart::UNDEPOSITED_FUNDS, Classification::Asset),
+                    mapped(
+                        UNDEPOSITED_QBO,
+                        chart::UNDEPOSITED_FUNDS,
+                        Classification::Asset,
+                    ),
                     mapped(SUPPLIES_QBO, chart::SHOP_SUPPLIES, Classification::Expense),
                 ],
             },
@@ -1314,12 +1318,19 @@ mod tests {
             }),
         )
         .document;
-        assert_eq!(doc.pay_from, Some(AccountId(chart::UNDEPOSITED_FUNDS.into())));
+        assert_eq!(
+            doc.pay_from,
+            Some(AccountId(chart::UNDEPOSITED_FUNDS.into()))
+        );
         let entry = posted(&doc);
         assert_eq!(net(&entry, chart::UNDEPOSITED_FUNDS), -4000);
         assert_eq!(net(&entry, chart::CHECKING), 0, "not the default bank");
         assert_eq!(net(&entry, chart::RETURNS_ALLOWANCES), 4000);
-        assert_eq!(net(&entry, chart::ACCOUNTS_RECEIVABLE), 0, "money out, no AR leg");
+        assert_eq!(
+            net(&entry, chart::ACCOUNTS_RECEIVABLE),
+            0,
+            "money out, no AR leg"
+        );
     }
 
     #[test]
@@ -1393,7 +1404,10 @@ mod tests {
             translated.document.pay_from,
             Some(AccountId(chart::CREDIT_CARD.into()))
         );
-        assert!(translated.warnings.iter().any(|w| w.contains("defaulting to 2100")));
+        assert!(translated
+            .warnings
+            .iter()
+            .any(|w| w.contains("defaulting to 2100")));
     }
 
     #[test]
@@ -1453,7 +1467,10 @@ mod tests {
             translated.document.pay_from,
             Some(AccountId(chart::CHECKING.into()))
         );
-        assert!(translated.warnings.iter().any(|w| w.contains("defaulting to 1100")));
+        assert!(translated
+            .warnings
+            .iter()
+            .any(|w| w.contains("defaulting to 1100")));
     }
 
     #[test]
@@ -1474,7 +1491,10 @@ mod tests {
         assert!(credit(Payment, CreditMemo, "1", "31"));
         assert!(credit(Payment, Deposit, "1", "31"));
         assert!(credit(Payment, JournalEntry, "je-ar-cr", "31"));
-        assert!(!credit(Payment, JournalEntry, "je-ar-dr", "31"), "falls back to the whole entry");
+        assert!(
+            !credit(Payment, JournalEntry, "je-ar-dr", "31"),
+            "falls back to the whole entry"
+        );
         assert!(!credit(Payment, JournalEntry, "je-unknown", "31"));
         // Vendor side: the mirror image.
         assert!(!credit(BillPayment, Bill, "1", "77"));

@@ -12,7 +12,9 @@ use thiserror::Error;
 /// There is no currency tag. Both realms are USD and multi-currency is out of
 /// scope. Adding one later means touching every signature, which is the correct
 /// cost to pay at the point the scope actually changes.
-#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Default, Serialize, Deserialize)]
+#[derive(
+    Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Default, Serialize, Deserialize,
+)]
 #[serde(transparent)]
 pub struct Money(i64);
 
@@ -58,11 +60,17 @@ impl Money {
     }
 
     pub fn checked_add(self, rhs: Money) -> Result<Money, MoneyError> {
-        self.0.checked_add(rhs.0).map(Money).ok_or(MoneyError::Overflow)
+        self.0
+            .checked_add(rhs.0)
+            .map(Money)
+            .ok_or(MoneyError::Overflow)
     }
 
     pub fn checked_sub(self, rhs: Money) -> Result<Money, MoneyError> {
-        self.0.checked_sub(rhs.0).map(Money).ok_or(MoneyError::Overflow)
+        self.0
+            .checked_sub(rhs.0)
+            .map(Money)
+            .ok_or(MoneyError::Overflow)
     }
 
     pub fn checked_neg(self) -> Result<Money, MoneyError> {
@@ -123,10 +131,16 @@ mod tests {
     #[test]
     fn overflow_is_an_error_not_a_wrap() {
         let max = Money::from_minor(i64::MAX);
-        assert_eq!(max.checked_add(Money::from_minor(1)), Err(MoneyError::Overflow));
+        assert_eq!(
+            max.checked_add(Money::from_minor(1)),
+            Err(MoneyError::Overflow)
+        );
 
         let min = Money::from_minor(i64::MIN);
-        assert_eq!(min.checked_sub(Money::from_minor(1)), Err(MoneyError::Overflow));
+        assert_eq!(
+            min.checked_sub(Money::from_minor(1)),
+            Err(MoneyError::Overflow)
+        );
         // i64::MIN has no positive counterpart.
         assert_eq!(min.checked_neg(), Err(MoneyError::Overflow));
     }
