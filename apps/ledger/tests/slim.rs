@@ -1026,11 +1026,7 @@ fn the_cutover_books_nightly_replays_only_2027_and_refuses_to_run_unbounded() {
 // ---------------------------------------------------------------------------
 
 fn write_csvs(dir: &std::path::Path, tb: &[QboTbRow]) {
-    let money = |m: Money| {
-        let minor = m.minor();
-        let sign = if minor < 0 { "-" } else { "" };
-        format!("{sign}{}.{:02}", minor.abs() / 100, minor.abs() % 100)
-    };
+    let money = Money::display;
     let mut csv = String::from("qbo_account_id,name,balance\n");
     for row in tb {
         csv.push_str(&format!(

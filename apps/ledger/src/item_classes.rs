@@ -28,7 +28,7 @@ use qbo_local::domain::{EntityType, RealmId};
 use qbo_local::project::{ParsedEntity, Projection};
 use qbo_local::store::{Store, StoreError};
 
-use crate::accountant::{csv_field, csv_money};
+use crate::accountant::csv_field;
 use crate::chart;
 use crate::import::{self, ImportError};
 use crate::store::{Ledger, LedgerError};
@@ -312,7 +312,7 @@ pub fn render_csv(rows: &[WorksheetRow]) -> String {
             csv_field(row.item.category.as_deref().unwrap_or_default()),
             csv_field(row.item.income_account.as_deref().unwrap_or_default()),
             row.sales_lines.to_string(),
-            csv_money(row.sales_amount),
+            Money::display(row.sales_amount),
             csv_field(row.suggested_class.as_deref().unwrap_or_default()),
             csv_field(row.rule.as_deref().unwrap_or_default()),
             String::new(),
@@ -376,8 +376,8 @@ impl SuggestSummary {
         );
         out.push_str(&format!(
             "last-12-month sales {} , {} ({:.1}%) on items with a suggestion\n\n",
-            csv_money(self.sales_total),
-            csv_money(self.sales_covered),
+            Money::display(self.sales_total),
+            Money::display(self.sales_covered),
             self.covered_percent()
         ));
         out.push_str("suggested class    items   12-month sales\n");
@@ -385,7 +385,7 @@ impl SuggestSummary {
             let label = if class.is_empty() { "(none)" } else { class };
             out.push_str(&format!(
                 "  {label:<14} {items:>7}   {:>14}\n",
-                csv_money(*amount)
+                Money::display(*amount)
             ));
         }
         out

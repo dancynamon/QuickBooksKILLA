@@ -41,7 +41,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-use crate::accountant::{self, csv_field, csv_money, AccountantError, AccountantView, AuditRow};
+use crate::accountant::{self, csv_field, AccountantError, AccountantView, AuditRow};
 use crate::books::{self, Aging, Book, BooksError};
 use crate::chart::Classification;
 use crate::report::{self, SalesTaxLines, TrialBalance};
@@ -124,8 +124,8 @@ pub struct ManifestFile {
 impl TbTotals {
     fn of(tb: &TrialBalance) -> Self {
         TbTotals {
-            total_debits: csv_money(tb.total_debits),
-            total_credits: csv_money(tb.total_credits),
+            total_debits: Money::display(tb.total_debits),
+            total_credits: Money::display(tb.total_credits),
             balanced: tb.total_debits == tb.total_credits,
         }
     }
@@ -407,7 +407,7 @@ fn pnl_by_class_csv(
             csv_field(&number),
             csv_field(&name),
             csv_field(&class),
-            csv_money(amount)
+            Money::display(amount)
         );
     }
     Ok(out)
@@ -466,8 +466,8 @@ fn adjustments_csv(requests: &[accountant::AdjustmentRequest]) -> String {
                 line.line_no,
                 csv_field(&line.account.0),
                 line.class.as_ref().map(|c| c.0.as_str()).unwrap_or(""),
-                csv_money(line.debit),
-                csv_money(line.credit),
+                Money::display(line.debit),
+                Money::display(line.credit),
                 csv_field(line.memo.as_deref().unwrap_or("")),
             );
         }
@@ -492,12 +492,12 @@ fn aging_csv(aging: &Aging) -> String {
             "{},{},{},{},{},{},{},{}",
             csv_field(id),
             csv_field(&row.contact_name),
-            csv_money(row.current),
-            csv_money(row.days_1_30),
-            csv_money(row.days_31_60),
-            csv_money(row.days_61_90),
-            csv_money(row.over_90),
-            csv_money(row.total),
+            Money::display(row.current),
+            Money::display(row.days_1_30),
+            Money::display(row.days_31_60),
+            Money::display(row.days_61_90),
+            Money::display(row.over_90),
+            Money::display(row.total),
         );
     }
     out
@@ -515,15 +515,15 @@ fn sales_tax_csv(year: i32, quarters: &[(u32, SalesTaxLines)]) -> String {
         let _ = writeln!(
             out,
             "{year}-Q{q},{},{},{},{},{},{}",
-            csv_money(lines.a_total_income),
-            csv_money(lines.b_tax_collected),
-            csv_money(lines.c_taxable_sales),
-            csv_money(lines.d_nontaxable_sales),
+            Money::display(lines.a_total_income),
+            Money::display(lines.b_tax_collected),
+            Money::display(lines.c_taxable_sales),
+            Money::display(lines.d_nontaxable_sales),
             lines
                 .e_line_level_taxable
-                .map(csv_money)
+                .map(Money::display)
                 .unwrap_or_default(),
-            lines.variance.map(csv_money).unwrap_or_default(),
+            lines.variance.map(Money::display).unwrap_or_default(),
         );
     }
     out
@@ -547,8 +547,8 @@ fn quarter_end(year: i32, q: u32) -> NaiveDate {
 fn totals_text(tb: &TrialBalance) -> String {
     format!(
         "{} / {}",
-        csv_money(tb.total_debits),
-        csv_money(tb.total_credits)
+        Money::display(tb.total_debits),
+        Money::display(tb.total_credits)
     )
 }
 

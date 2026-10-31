@@ -380,7 +380,8 @@ fn a_version_one_book_migrates_to_latest_with_its_trial_balance_intact() {
         .unwrap();
         // Three posted entries and one left unposted, which no trial
         // balance may count either side of the migration.
-        let entries: [(&str, &str, bool, &[(&str, i64, i64)]); 4] = [
+        type Line<'a> = (&'a str, i64, i64);
+        let entries: [(&str, &str, bool, &[Line]); 4] = [
             (
                 "e1",
                 "2026-06-10",

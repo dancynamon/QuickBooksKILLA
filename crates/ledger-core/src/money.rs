@@ -16,6 +16,17 @@ use thiserror::Error;
 #[serde(transparent)]
 pub struct Money(i64);
 
+/// See [`Money::display`]. `unsigned_abs` rather than `abs`: `i64::MIN` has
+/// no positive counterpart, and formatting must never panic on a value that
+/// reached storage safely.
+impl std::fmt::Display for Money {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let sign = if self.0 < 0 { "-" } else { "" };
+        let magnitude = self.0.unsigned_abs();
+        write!(f, "{sign}{}.{:02}", magnitude / 100, magnitude % 100)
+    }
+}
+
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum MoneyError {
     #[error("money arithmetic overflowed i64 minor units")]
@@ -78,6 +89,14 @@ impl Money {
     pub const fn is_negative(self) -> bool {
         self.0 < 0
     }
+
+    /// `1234.56`, `-0.05`: two places, a leading minus, no currency symbol
+    /// and no grouping — the one plain-text form every report, CSV, refusal
+    /// and tool output uses. (A printed document's `$1,234.56` is
+    /// presentation, and lives with the renderer.)
+    pub fn display(self) -> String {
+        self.to_string()
+    }
 }
 
 #[cfg(test)]
@@ -133,6 +152,21 @@ mod tests {
     fn sum_overflow_is_an_error() {
         let lines = [Money::from_minor(i64::MAX), Money::from_minor(1)];
         assert_eq!(Money::checked_sum(lines), Err(MoneyError::Overflow));
+    }
+
+    #[test]
+    fn displays_two_places_with_the_sign_in_front() {
+        let shown = |minor| Money::from_minor(minor).display();
+        assert_eq!(shown(0), "0.00");
+        assert_eq!(shown(5), "0.05");
+        assert_eq!(shown(-5), "-0.05");
+        assert_eq!(shown(-50), "-0.50");
+        assert_eq!(shown(-99), "-0.99");
+        assert_eq!(shown(-100), "-1.00");
+        assert_eq!(shown(-123_456), "-1234.56");
+        assert_eq!(shown(100_000_000), "1000000.00");
+        assert_eq!(shown(i64::MIN), "-92233720368547758.08");
+        assert_eq!(format!("{}", Money::from_minor(-7)), "-0.07");
     }
 
     #[test]
