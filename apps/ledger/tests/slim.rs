@@ -1480,3 +1480,103 @@ fn without_a_sales_order_feed_the_run_fails_rather_than_drop_open_orders() {
         "{failed:?}"
     );
 }
+
+/// A vendor credit, partly used inside a check bill payment before the
+/// date, and a refund receipt paid out of undeposited funds. The credit's
+/// remainder is an AP open item carried negative; the refund is money out
+/// with no AR or AP leg, so it is in the opening entry's cash lines and
+/// nowhere in either book.
+#[test]
+fn a_vendor_credit_is_a_negative_ap_open_item_and_a_refund_receipt_is_no_open_item() {
+    let store = replica(false);
+    // Bill B1 (600) is now 500 open: 100 of it paid by BP3 together with 20
+    // of the 45 credit, so the check was for 80.
+    seed(
+        &store,
+        EntityType::Bill,
+        "B1",
+        json!({ "Id": "B1", "DocNumber": "FS-778", "TxnDate": "2026-12-01", "DueDate": "2026-12-31",
+                "VendorRef": { "value": "77" }, "TotalAmt": 600, "Balance": 500,
+                "Line": [expense_line(600.0)] }),
+    );
+    seed(
+        &store,
+        EntityType::VendorCredit,
+        "VC1",
+        json!({ "Id": "VC1", "DocNumber": "CR-12", "TxnDate": "2026-12-18",
+                "VendorRef": { "value": "77" }, "TotalAmt": 45, "Balance": 25,
+                "Line": [expense_line(45.0)] }),
+    );
+    seed(
+        &store,
+        EntityType::BillPayment,
+        "BP3",
+        json!({ "Id": "BP3", "TxnDate": "2026-12-20", "VendorRef": { "value": "77" }, "TotalAmt": 80,
+                "PayType": "Check", "CheckPayment": { "BankAccountRef": { "value": "BANK1" } },
+                "Line": [
+                    { "Amount": 100, "LinkedTxn": [{ "TxnId": "B1", "TxnType": "Bill" }] },
+                    { "Amount": 20, "LinkedTxn": [{ "TxnId": "VC1", "TxnType": "VendorCredit" }] }
+                ] }),
+    );
+    seed(
+        &store,
+        EntityType::RefundReceipt,
+        "RR1",
+        json!({ "Id": "RR1", "DocNumber": "R-3", "TxnDate": "2026-12-22",
+                "CustomerRef": { "value": "32" }, "TotalAmt": 25,
+                "DepositToAccountRef": { "value": "UDF1" },
+                "Line": [item_line("502", 25.0)] }),
+    );
+
+    // QBO's side: the credit takes 45 off AP and off supplies, the payment
+    // takes 80 out of the bank and 80 more off AP; the refund takes 25 out
+    // of undeposited funds and back off sales.
+    let mut tb = qbo_tb(false);
+    for row in &mut tb {
+        let delta = match row.qbo_account_id.as_str() {
+            "BANK1" => -8_000,
+            "UDF1" => -2_500,
+            "AP1" => 12_500,
+            "EXP1" => -4_500,
+            "INC1" => 2_500,
+            _ => 0,
+        };
+        row.balance = usd(row.balance.minor() + delta);
+    }
+    let opts = SlimOptions {
+        as_of: as_of(),
+        qbo_tb: tb,
+        qbo_ar: Some(qbo_ar(false)),
+        qbo_ap: Some(vec![aging_row(
+            "77",
+            "Foam Supply Co",
+            [50_000, -2_500, 0, 0, 0],
+        )]),
+    };
+
+    let ledger = book();
+    let report = run(&ledger, &store, &opts);
+    assert!(report.passed(), "{}", report.render_text(CO));
+
+    let ap_items = books::open_documents(&ledger, CO, Book::Payable, as_of()).unwrap();
+    let open = |items: &[books::OpenDocument], id: &str| {
+        items
+            .iter()
+            .find(|d| d.document_id == id)
+            .map(|d| d.open.minor())
+    };
+    assert_eq!(open(&ap_items, "qbo:VendorCredit:VC1"), Some(-2_500));
+    assert_eq!(open(&ap_items, "qbo:Bill:B1"), Some(50_000));
+    assert_eq!(open(&ap_items, "qbo:BillPayment:BP3"), None, "fully applied");
+    // AP is a credit balance: 500 owed less the 25 of credit left.
+    assert_eq!(balance(&ledger, chart::ACCOUNTS_PAYABLE, as_of()), usd(-47_500));
+
+    let ar_items = books::open_documents(&ledger, CO, Book::Receivable, as_of()).unwrap();
+    assert!(
+        ar_items.iter().all(|d| !d.document_id.contains("RefundReceipt")),
+        "{ar_items:?}"
+    );
+    assert!(ap_items.iter().all(|d| !d.document_id.contains("RefundReceipt")));
+    // The cash it paid out is in the opening entry, as QBO had it.
+    assert_eq!(balance(&ledger, chart::UNDEPOSITED_FUNDS, as_of()), usd(-2_500));
+}
