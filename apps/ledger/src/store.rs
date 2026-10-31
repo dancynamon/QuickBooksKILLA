@@ -972,6 +972,10 @@ impl Ledger {
             });
         }
 
+        if current > 0 && current < latest_version() {
+            self.backup_before_migrating(current)?;
+        }
+
         for migration in MIGRATIONS.iter().filter(|m| m.version > current) {
             let transaction = self.connection.transaction()?;
             transaction.execute_batch(migration.sql)?;
@@ -981,6 +985,29 @@ impl Ledger {
             )?;
             transaction.commit()?;
         }
+        Ok(())
+    }
+
+    /// A consistent copy of the file, taken before any pending migration
+    /// runs, next to it as `<file>.pre-v<latest>-<UTC timestamp>.bak`.
+    ///
+    /// Each migration commits on its own, so a migration that does the
+    /// wrong thing (rather than one that fails) leaves no way back short of
+    /// this copy. `VACUUM INTO` as in [`crate::handoff`]: one statement,
+    /// consistent under WAL, and it refuses to overwrite a file that is
+    /// already there. A brand-new file (version 0) has nothing to keep, and
+    /// an in-memory ledger has no file; neither is copied. If the copy
+    /// cannot be made, nothing is migrated.
+    fn backup_before_migrating(&self, current: i64) -> Result<(), LedgerError> {
+        let Some(path) = self.connection.path().filter(|path| !path.is_empty()) else {
+            return Ok(());
+        };
+        let backup = format!(
+            "{path}.pre-v{}-from-v{current}-{}.bak",
+            latest_version(),
+            Utc::now().format("%Y%m%dT%H%M%S%.3fZ")
+        );
+        self.connection.execute("VACUUM INTO ?1", [&backup])?;
         Ok(())
     }
 
@@ -2833,7 +2860,9 @@ mod tests {
              VALUES ('aquamentor', 'e-raw', '2026-06-15', NULL, 'invoice', ?1, ?2, 1, 0)",
             params![doc.document_id, doc.version],
         );
-        let message = result.expect_err("a posted insert must be refused").to_string();
+        let message = result
+            .expect_err("a posted insert must be refused")
+            .to_string();
         assert!(message.contains("inserted unposted"), "{message}");
         let count: i64 = conn
             .query_row(
@@ -2859,7 +2888,9 @@ mod tests {
              VALUES ('aquamentor', ?1, 99, ?2, 500, 0)",
             params![entry_id, chart::ACCOUNTS_RECEIVABLE],
         );
-        let message = result.expect_err("a line on a posted entry must be refused").to_string();
+        let message = result
+            .expect_err("a line on a posted entry must be refused")
+            .to_string();
         assert!(message.contains("posted journal entry"), "{message}");
     }
 
