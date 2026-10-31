@@ -26,7 +26,7 @@ use crate::domain::RealmId;
 /// BunzBooks-only. The earlier `com.aquamentor.qbo-local.tokens` holds tokens
 /// minted for the app shared with the QuickBooks MCPs; it is left untouched
 /// and never read.
-pub const DEFAULT_SERVICE: &str = "bunzbooks-qbo-tokens";
+pub const DEFAULT_SERVICE: &str = crate::config::TOKEN_KEYCHAIN_SERVICE;
 
 /// `errSecItemNotFound`.
 const ERR_SEC_ITEM_NOT_FOUND: i32 = -25300;
