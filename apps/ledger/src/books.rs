@@ -856,7 +856,7 @@ const fn is_taxed_sale(kind: DocKind) -> bool {
 ///   [`Terms`]: `txn_date + terms_days`, or the day of the month (D41).
 /// - No header class takes the contact's default class.
 /// - A taxed sale with no tax gets one: the taxable base (taxable lines less
-///   taxable discounts) times the configured rate, banker's rounding
+///   taxable discounts) times the configured rate, rounded half up as QBO does (W17)
 ///   (`RoundingPolicy::TaxCalculation`), zero for an exempt customer.
 ///
 /// Returns the completed document and the posting context built from the
@@ -1377,14 +1377,6 @@ pub(crate) fn far_future() -> NaiveDate {
     NaiveDate::from_ymd_opt(9999, 12, 31).expect("valid date")
 }
 
-/// `1234.56`, for a refusal a person reads.
-fn money_text(money: Money) -> String {
-    let minor = money.minor();
-    let sign = if minor < 0 { "-" } else { "" };
-    let abs = minor.unsigned_abs();
-    format!("{sign}{}.{:02}", abs / 100, abs % 100)
-}
-
 /// What an edit, a void or a credit application did.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Revision {
@@ -1608,8 +1600,8 @@ pub fn update_document(
         if applied > total {
             return Err(BooksError::Overapplied {
                 id: doc.document_id,
-                applied: money_text(applied),
-                total: money_text(total),
+                applied: Money::display(applied),
+                total: Money::display(total),
             });
         }
     }
@@ -1633,8 +1625,8 @@ pub fn update_document(
         if applied > total {
             return Err(BooksError::Overapplied {
                 id: target.document_id,
-                applied: money_text(applied),
-                total: money_text(total),
+                applied: Money::display(applied),
+                total: Money::display(total),
             });
         }
     }
@@ -1672,7 +1664,7 @@ pub fn void_document(
         if !applied.is_zero() {
             return Err(BooksError::HasApplications {
                 id: document_id.to_string(),
-                applied: money_text(applied),
+                applied: Money::display(applied),
             });
         }
     }
@@ -1760,16 +1752,16 @@ pub fn apply_credit(
     if amount <= Money::ZERO {
         return Err(BooksError::BadApplication(format!(
             "nothing to apply: {credit_id} has {} open and {target_id} has {} open",
-            money_text(credit_open),
-            money_text(target_open)
+            Money::display(credit_open),
+            Money::display(target_open)
         )));
     }
     if amount > credit_open || amount > target_open {
         return Err(BooksError::BadApplication(format!(
             "{} is more than is open: {credit_id} has {}, {target_id} has {}",
-            money_text(amount),
-            money_text(credit_open),
-            money_text(target_open)
+            Money::display(amount),
+            Money::display(credit_open),
+            Money::display(target_open)
         )));
     }
 

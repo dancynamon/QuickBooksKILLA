@@ -1744,7 +1744,7 @@ pub(crate) fn serialize_money<S>(money: &Money, serializer: S) -> Result<S::Ok, 
 where
     S: serde::Serializer,
 {
-    serializer.serialize_str(&format_money(*money))
+    serializer.serialize_str(&Money::display(*money))
 }
 
 /// The `Option<Money>` counterpart of [`serialize_money`], for balance and
@@ -1757,19 +1757,9 @@ where
     S: serde::Serializer,
 {
     match money {
-        Some(money) => serializer.serialize_str(&format_money(*money)),
+        Some(money) => serializer.serialize_str(&Money::display(*money)),
         None => serializer.serialize_none(),
     }
-}
-
-fn format_money(money: Money) -> String {
-    // `unsigned_abs` rather than `.abs()`: `i64::MIN` has no positive
-    // counterpart (money.rs's own overflow test makes the same point), and
-    // this path must never panic on a value that reached storage safely.
-    let minor = money.minor();
-    let sign = if minor < 0 { "-" } else { "" };
-    let magnitude = minor.unsigned_abs();
-    format!("{sign}{}.{:02}", magnitude / 100, magnitude % 100)
 }
 
 /// Every projected document read goes through this projection and join, so a

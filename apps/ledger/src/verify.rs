@@ -442,6 +442,20 @@ mod tests {
         version.document_id
     }
 
+    /// Drop migration 9's insert triggers, so a test can seed a posted
+    /// entry with raw SQL. This sweep exists for a file whose triggers did
+    /// not hold — one written before migration 9, or edited outside the
+    /// app — and that is the file these tests stand in for.
+    fn without_insert_gate(ledger: &Ledger) {
+        ledger
+            .conn()
+            .execute_batch(
+                "DROP TRIGGER trg_journal_entries_no_insert_posted;
+                 DROP TRIGGER trg_journal_lines_no_insert_when_posted;",
+            )
+            .unwrap();
+    }
+
     fn invoice_entry(document_id: &str, on: NaiveDate) -> JournalEntry {
         JournalEntry {
             entry_date: on,
@@ -483,11 +497,12 @@ mod tests {
     #[test]
     fn an_unbalanced_entry_inserted_raw_is_caught() {
         let (_dir, ledger) = temp_ledger();
+        without_insert_gate(&ledger);
         let doc = seed_document(&ledger, "doc-1", ymd(2026, 6, 15));
 
         // Bypasses `post_entry` (and so the balance trigger, which only fires
         // on the `is_posted` 0 -> 1 *transition*, never on an INSERT that
-        // sets it to 1 outright).
+        // sets it to 1 outright — the gap migration 9 closed, dropped above).
         ledger
             .conn()
             .execute(
@@ -564,6 +579,7 @@ mod tests {
     #[test]
     fn an_entry_with_no_document_version_is_caught() {
         let (_dir, ledger) = temp_ledger();
+        without_insert_gate(&ledger);
         ledger
             .conn()
             .execute_batch("PRAGMA foreign_keys = OFF;")
@@ -610,6 +626,7 @@ mod tests {
     #[test]
     fn an_income_line_with_no_class_is_caught() {
         let (_dir, ledger) = temp_ledger();
+        without_insert_gate(&ledger);
         let doc = seed_document(&ledger, "doc-1", ymd(2026, 6, 15));
 
         ledger
@@ -654,6 +671,7 @@ mod tests {
     #[test]
     fn a_posting_after_its_period_closed_is_caught() {
         let (_dir, ledger) = temp_ledger();
+        without_insert_gate(&ledger);
         let doc = seed_document(&ledger, "doc-1", ymd(2026, 6, 15));
         ledger
             .post_entry("aquamentor", &invoice_entry(&doc, ymd(2026, 6, 15)), now())

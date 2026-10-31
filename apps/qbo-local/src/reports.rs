@@ -148,13 +148,6 @@ fn signed_balance(debit: Money, credit: Money) -> Money {
     Money::from_minor(debit.minor().saturating_sub(credit.minor()))
 }
 
-fn money_to_csv(amount: Money) -> String {
-    let minor = amount.minor();
-    let sign = if minor < 0 { "-" } else { "" };
-    let abs = minor.unsigned_abs();
-    format!("{sign}{}.{:02}", abs / 100, abs % 100)
-}
-
 /// `qbo_account_id,name,balance` — exactly the shape `ledger tbdiff` /
 /// `ledger opening` / `ledger boundary` read (`apps/ledger/src/main.rs`'s
 /// `read_qbo_csv`), balance signed with debit positive. No quoting, matching
@@ -168,7 +161,7 @@ pub fn trial_balance_csv(rows: &[TrialBalanceRow]) -> String {
             "{},{},{}\n",
             row.qbo_account_id.as_deref().unwrap_or(""),
             row.name.replace(',', " "),
-            money_to_csv(balance),
+            Money::display(balance),
         ));
     }
     out
@@ -223,12 +216,12 @@ pub fn aging_csv(rows: &[AgingRow]) -> String {
             "{},{},{},{},{},{},{},{}\n",
             row.entity_id.as_deref().unwrap_or(""),
             row.name.replace(',', " "),
-            money_to_csv(row.current),
-            money_to_csv(row.d1_30),
-            money_to_csv(row.d31_60),
-            money_to_csv(row.d61_90),
-            money_to_csv(row.over_90),
-            money_to_csv(row.total),
+            Money::display(row.current),
+            Money::display(row.d1_30),
+            Money::display(row.d31_60),
+            Money::display(row.d61_90),
+            Money::display(row.over_90),
+            Money::display(row.total),
         ));
     }
     out

@@ -11,15 +11,18 @@ use crate::money::{Money, MoneyError};
 pub enum RoundingPolicy {
     /// Extending a line: quantity × rate → amount. Half-up, away from zero.
     LineExtension,
-    /// Calculating tax: taxable subtotal × rate → amount. Banker's rounding
-    /// (half-to-even), which avoids the systematic upward bias that half-up
-    /// accumulates across many small lines.
+    /// Calculating tax: taxable subtotal × rate → amount. Half-up, away from
+    /// zero — the rule QBO follows.
     ///
-    /// Note: whether QBO itself rounds tax this way is **unverified** — see
-    /// `DESIGN.md` §1. It does not affect `qbo-local`, which mirrors the tax QBO
-    /// already calculated rather than computing its own. It becomes load-bearing
-    /// if the ledger project ever computes tax independently and reconciles
-    /// against QBO.
+    /// This was banker's rounding (half-to-even) until W17 checked it against
+    /// the replica (`DECISIONS.md` D46, `ledger::tax_audit`): on every one of
+    /// the 25 documents whose tax landed exactly on a half cent, QBO charged
+    /// the half-up amount, and on none the half-to-even one. The ledger
+    /// computes tax itself and diffs 2200 against QBO nightly, so matching
+    /// QBO's rule is what keeps that diff free of one-cent noise. It stays a
+    /// separate policy from [`RoundingPolicy::LineExtension`] even though the
+    /// strategy is now the same, so a jurisdiction that rounds differently
+    /// is still a one-line change here.
     TaxCalculation,
     /// Converting an amount that arrived already rounded by the book of record.
     ///
@@ -36,7 +39,7 @@ impl RoundingPolicy {
     const fn strategy(self) -> RoundingStrategy {
         match self {
             RoundingPolicy::LineExtension => RoundingStrategy::MidpointAwayFromZero,
-            RoundingPolicy::TaxCalculation => RoundingStrategy::MidpointNearestEven,
+            RoundingPolicy::TaxCalculation => RoundingStrategy::MidpointAwayFromZero,
             RoundingPolicy::MirroredAmount => RoundingStrategy::MidpointAwayFromZero,
         }
     }
@@ -91,18 +94,20 @@ mod tests {
     }
 
     #[test]
-    fn tax_rounds_half_to_even() {
-        assert_eq!(tax(dec!(0.005)), Money::from_minor(0)); // 0 is even
-        assert_eq!(tax(dec!(0.015)), Money::from_minor(2)); // 2 is even
-        assert_eq!(tax(dec!(0.025)), Money::from_minor(2)); // 2 is even
-        assert_eq!(tax(dec!(0.035)), Money::from_minor(4)); // 4 is even
+    fn tax_rounds_half_away_from_zero() {
+        assert_eq!(tax(dec!(0.005)), Money::from_minor(1));
+        assert_eq!(tax(dec!(0.015)), Money::from_minor(2));
+        assert_eq!(tax(dec!(0.025)), Money::from_minor(3));
+        assert_eq!(tax(dec!(-0.025)), Money::from_minor(-3));
     }
 
     #[test]
-    fn the_two_policies_actually_differ() {
-        // If this test ever passes with both sides equal, the policy split has
-        // been silently collapsed.
-        assert_ne!(line(dec!(0.025)), tax(dec!(0.025)));
+    fn tax_matches_what_qbo_charged_on_a_half_cent() {
+        // W17 evidence from the replica, where half to even would be a cent
+        // low: estimate 91522 (1,908.00 × NJ 6.625% = 126.405, QBO 126.41)
+        // and invoice 67577 (500.00 × 6.625% = 33.125, QBO 33.13).
+        assert_eq!(tax(dec!(1908.00) * dec!(0.06625)), Money::from_minor(12641));
+        assert_eq!(tax(dec!(500.00) * dec!(0.06625)), Money::from_minor(3313));
     }
 
     #[test]

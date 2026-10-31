@@ -1646,8 +1646,8 @@ fn run_sales_orders(db: &Path, realm: &RealmId, all: bool) -> Result<(), Command
             order.doc_number.as_deref().unwrap_or("-"),
             order.txn_date,
             order.qbo_id,
-            money_text(order.total),
-            money_text(order.open_amount),
+            ledger_core::Money::display(order.total),
+            ledger_core::Money::display(order.open_amount),
             order.invoice_status.as_deref().unwrap_or("-"),
             order.customer_id.as_deref().unwrap_or("-"),
         );
@@ -1662,12 +1662,6 @@ fn run_sales_orders(db: &Path, realm: &RealmId, all: bool) -> Result<(), Command
         }
     );
     Ok(())
-}
-
-fn money_text(money: ledger_core::Money) -> String {
-    let minor = money.minor();
-    let sign = if minor < 0 { "-" } else { "" };
-    format!("{sign}{}.{:02}", (minor / 100).abs(), (minor % 100).abs())
 }
 
 // -- slice ------------------------------------------------------------------

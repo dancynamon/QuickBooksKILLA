@@ -2538,16 +2538,16 @@ fn render_trial_balance(tb: &TrialBalance, company: &str, as_of: NaiveDate) -> S
             "{:<8}{:<32}{:>14}{:>14}{:>14}\n",
             row.number,
             row.name,
-            fmt_money(row.debit),
-            fmt_money(row.credit),
-            fmt_money(row.balance),
+            Money::display(row.debit),
+            Money::display(row.credit),
+            Money::display(row.balance),
         ));
     }
     out.push_str(&format!(
         "\nTOTAL{:<35}{:>14}{:>14}\n",
         "",
-        fmt_money(tb.total_debits),
-        fmt_money(tb.total_credits),
+        Money::display(tb.total_debits),
+        Money::display(tb.total_credits),
     ));
     if tb.total_debits == tb.total_credits {
         out.push_str("balanced\n");
@@ -2582,23 +2582,23 @@ fn render_pnl(pnl: &Pnl, company: &str, from: NaiveDate, to: NaiveDate) -> Strin
     out.push_str(&format!("PROFIT AND LOSS   {company}   {from} .. {to}\n\n"));
     out.push_str(&format!(
         "  income          : {}\n",
-        fmt_money(pnl.income.total)
+        Money::display(pnl.income.total)
     ));
     out.push_str(&format!(
         "  COGS            : {}\n",
-        fmt_money(pnl.cogs.total)
+        Money::display(pnl.cogs.total)
     ));
     out.push_str(&format!(
         "  gross margin    : {}\n",
-        fmt_money(pnl.gross_margin)
+        Money::display(pnl.gross_margin)
     ));
     out.push_str(&format!(
         "  expense         : {}\n",
-        fmt_money(pnl.expense.total)
+        Money::display(pnl.expense.total)
     ));
     out.push_str(&format!(
         "  net income      : {}\n",
-        fmt_money(pnl.net_income)
+        Money::display(pnl.net_income)
     ));
     out
 }
@@ -2620,43 +2620,43 @@ fn render_bs(bs: &BalanceSheet, company: &str, as_of: NaiveDate) -> String {
         out.push_str(&format!(
             "  {:<40}{:>14}\n",
             row.name,
-            fmt_money(row.balance)
+            Money::display(row.balance)
         ));
     }
     out.push_str(&format!(
         "  {:<40}{:>14}\n\n",
         "TOTAL ASSETS",
-        fmt_money(bs.assets.total)
+        Money::display(bs.assets.total)
     ));
     out.push_str("LIABILITIES\n");
     for row in &bs.liabilities.rows {
         out.push_str(&format!(
             "  {:<40}{:>14}\n",
             row.name,
-            fmt_money(row.balance)
+            Money::display(row.balance)
         ));
     }
     out.push_str(&format!(
         "  {:<40}{:>14}\n\n",
         "TOTAL LIABILITIES",
-        fmt_money(bs.liabilities.total)
+        Money::display(bs.liabilities.total)
     ));
     out.push_str("EQUITY\n");
     for row in &bs.equity.rows {
         out.push_str(&format!(
             "  {:<40}{:>14}\n",
             row.name,
-            fmt_money(row.balance)
+            Money::display(row.balance)
         ));
     }
     out.push_str(&format!(
         "  {:<40}{:>14}\n\n",
         "TOTAL EQUITY",
-        fmt_money(bs.equity.total)
+        Money::display(bs.equity.total)
     ));
     out.push_str(&format!(
         "TOTAL LIABILITIES AND EQUITY          {:>14}\n",
-        fmt_money(bs.total_liabilities_and_equity)
+        Money::display(bs.total_liabilities_and_equity)
     ));
     out
 }
@@ -2690,22 +2690,22 @@ fn render_tax(
     ));
     out.push_str(&format!(
         "  A  total income      : {}\n",
-        fmt_money(lines.a_total_income)
+        Money::display(lines.a_total_income)
     ));
     out.push_str(&format!(
         "  B  tax collected      : {}\n",
-        fmt_money(lines.b_tax_collected)
+        Money::display(lines.b_tax_collected)
     ));
     out.push_str(&format!(
         "  C  taxable sales      : {}\n",
-        fmt_money(lines.c_taxable_sales)
+        Money::display(lines.c_taxable_sales)
     ));
     out.push_str(&format!(
         "  D  non-taxable sales  : {}\n",
-        fmt_money(lines.d_nontaxable_sales)
+        Money::display(lines.d_nontaxable_sales)
     ));
     match lines.e_line_level_taxable {
-        Some(e) => out.push_str(&format!("  E  taxable, line level: {}\n", fmt_money(e))),
+        Some(e) => out.push_str(&format!("  E  taxable, line level: {}\n", Money::display(e))),
         None => out.push_str("  E  taxable, line level: n/a\n"),
     }
     // Non-zero is expected when C is derived from a rounded B (D23), not
@@ -2713,12 +2713,12 @@ fn render_tax(
     if let Some(variance) = lines.variance {
         out.push_str(&format!(
             "     variance (E - C)  : {}\n",
-            fmt_money(variance)
+            Money::display(variance)
         ));
     }
     out.push_str("\nST-50 mapping:\n");
     for (line, amount) in lines.st50 {
-        out.push_str(&format!("  line {line}: {}\n", fmt_money(amount)));
+        out.push_str(&format!("  line {line}: {}\n", Money::display(amount)));
     }
     out.push_str("  lines 4-9: 0.00\n");
     out
@@ -2843,7 +2843,7 @@ fn render_gl(gl: &GlDetail, company: &str, from: NaiveDate, to: NaiveDate) -> St
             "\n{} {}   opening {}\n",
             section.number,
             section.name,
-            fmt_money(section.opening_balance)
+            Money::display(section.opening_balance)
         ));
         for line in &section.lines {
             out.push_str(&format!(
@@ -2851,15 +2851,15 @@ fn render_gl(gl: &GlDetail, company: &str, from: NaiveDate, to: NaiveDate) -> St
                 line.entry_date,
                 line.entry_id,
                 line.source_type.as_str(),
-                fmt_money(line.debit),
-                fmt_money(line.credit),
-                fmt_money(line.running_balance),
+                Money::display(line.debit),
+                Money::display(line.credit),
+                Money::display(line.running_balance),
                 if line.is_flagged { "  [flagged]" } else { "" },
             ));
         }
         out.push_str(&format!(
             "  closing {}\n",
-            fmt_money(section.closing_balance)
+            Money::display(section.closing_balance)
         ));
     }
     out
@@ -3182,7 +3182,7 @@ fn run_bank_close(
         }) => {
             println!(
                 "statement {statement} does not close: off by {} with {unmatched} unmatched line(s)",
-                fmt_money(difference)
+                Money::display(difference)
             );
             Ok(ExitCode::from(1))
         }
@@ -3210,7 +3210,7 @@ fn run_bank_status(
             "{:<38}{:<12}{:>12}  {:<10}{}",
             line.line_id,
             line.posted_on,
-            fmt_money(line.amount),
+            Money::display(line.amount),
             line.match_kind.as_deref().unwrap_or("unmatched"),
             line.description,
         );
@@ -3245,7 +3245,7 @@ fn run_bank_status(
             println!(
                 "  - {} {} suggests {} ({reason})",
                 line.line_id,
-                fmt_money(line.amount),
+                Money::display(line.amount),
                 account.0
             );
         }
@@ -3315,15 +3315,7 @@ fn run_payroll_import(
     let config = PayrollConfig::load(&config_path).map_err(runtime)?;
     let text = fs::read_to_string(file).map_err(|e| runtime(format!("{}: {e}", file.display())))?;
     let runs = payroll::parse_csv(&text).map_err(runtime)?;
-    let money = |m: ledger_core::Money| {
-        let minor = m.minor();
-        let sign = if minor < 0 { "-" } else { "" };
-        format!(
-            "{sign}{}.{:02}",
-            minor.unsigned_abs() / 100,
-            minor.unsigned_abs() % 100
-        )
-    };
+    let money = ledger_core::Money::display;
     let print_totals = |totals: &payroll::RunTotals| {
         println!("  gross wages        : {}", money(totals.gross));
         println!("  employer costs     : {}", money(totals.employer_costs));
@@ -3386,7 +3378,7 @@ fn run_authnet_link(
     let minted = link::payment_link(&ledger, company, document, client.as_mut(), Utc::now())
         .map_err(runtime)?;
     println!("invoice     : {}", minted.invoice_number);
-    println!("amount      : {}", fmt_money(minted.amount));
+    println!("amount      : {}", Money::display(minted.amount));
     println!("environment : {}", minted.environment.as_str());
     println!("url         : {} (POST field token)", minted.url);
     println!("expires     : {}", minted.expires_at.to_rfc3339());
@@ -3433,8 +3425,8 @@ fn run_render_document(
     .map_err(runtime)?;
     println!("file        : {}", done.rendered.path.display());
     println!("pages       : {}", done.rendered.page_count);
-    println!("total       : {}", fmt_money(done.figures.total));
-    println!("balance due : {}", fmt_money(done.figures.balance));
+    println!("total       : {}", Money::display(done.figures.total));
+    println!("balance due : {}", Money::display(done.figures.balance));
     match &done.pay_link {
         PayLinkOutcome::Attached { link, page } => println!(
             "pay link    : {} (open before {})",
@@ -3470,7 +3462,7 @@ fn run_render_statement(
     println!("file        : {}", done.rendered.path.display());
     println!("pages       : {}", done.rendered.page_count);
     println!("open items  : {}", done.open_items);
-    println!("total due   : {}", fmt_money(done.aging.total));
+    println!("total due   : {}", Money::display(done.aging.total));
     for warning in &done.rendered.warnings {
         eprintln!("warning: {warning}");
     }
@@ -3517,13 +3509,6 @@ fn run_authnet_credentials(environment: &str) -> Result<(), CommandError> {
             "the keychain is macOS only; set AUTHNET_API_LOGIN_ID and AUTHNET_TRANSACTION_KEY",
         ))
     }
-}
-
-fn fmt_money(amount: Money) -> String {
-    let minor = amount.minor();
-    let sign = if minor < 0 { "-" } else { "" };
-    let abs = minor.unsigned_abs();
-    format!("{sign}{}.{:02}", abs / 100, abs % 100)
 }
 
 fn fmt_pct(value: rust_decimal::Decimal) -> String {
@@ -3600,7 +3585,7 @@ fn run_mfg_material_list(db: &std::path::Path, company: &str) -> Result<(), Comm
             material.name,
             material.unit.as_str(),
             material.qty_on_hand,
-            fmt_money(material.avg_cost_minor_per_unit),
+            Money::display(material.avg_cost_minor_per_unit),
         );
     }
     Ok(())
@@ -3618,15 +3603,15 @@ fn run_mfg_receive(
     println!(
         "posted entry {} - landed {} total",
         result.entry_id,
-        fmt_money(result.total_landed)
+        Money::display(result.total_landed)
     );
     for line in &result.lines {
         println!(
             "  {} lot {} landed {} -> avg {}/unit, {} on hand",
             line.material_id,
             line.lot_id,
-            fmt_money(line.landed_cost),
-            fmt_money(line.new_avg_cost_minor_per_unit),
+            Money::display(line.landed_cost),
+            Money::display(line.new_avg_cost_minor_per_unit),
             line.new_qty_on_hand,
         );
     }
@@ -3690,12 +3675,12 @@ fn run_mfg_sheet_cost(
     println!("STANDARD COST   {sheet_id}\n");
     println!(
         "material   {:>10}   (gross {} bf)",
-        fmt_money(cost.material),
+        Money::display(cost.material),
         cost.material_gross_bf
     );
-    println!("labour     {:>10}", fmt_money(cost.labour));
-    println!("overhead   {:>10}", fmt_money(cost.overhead));
-    println!("total      {:>10}", fmt_money(cost.total));
+    println!("labour     {:>10}", Money::display(cost.labour));
+    println!("overhead   {:>10}", Money::display(cost.overhead));
+    println!("total      {:>10}", Money::display(cost.total));
 
     if let Some(price) = price {
         let margin = if price.is_zero() {
@@ -3706,7 +3691,7 @@ fn run_mfg_sheet_cost(
         };
         println!(
             "\nat price {}: margin {}\n",
-            fmt_money(price),
+            Money::display(price),
             fmt_pct(margin)
         );
         println!("SENSITIVITY\n");
@@ -3736,10 +3721,10 @@ fn run_mfg_build(
         "build {} posted entry {} - standard {} actual material {} applied {} variance {}",
         result.build_id,
         result.entry_id,
-        fmt_money(result.standard_cost),
-        fmt_money(result.actual_material),
-        fmt_money(result.applied),
-        fmt_money(result.variance),
+        Money::display(result.standard_cost),
+        Money::display(result.actual_material),
+        Money::display(result.applied),
+        Money::display(result.variance),
     );
     Ok(())
 }
@@ -3789,8 +3774,8 @@ fn run_mfg_variance(
             "{:<16}{:>8}{:>14}{:>14}{:>10}",
             row.item_id,
             row.build_count,
-            fmt_money(row.total_standard_material),
-            fmt_money(row.total_variance),
+            Money::display(row.total_standard_material),
+            Money::display(row.total_variance),
             row.variance_pct
                 .map(fmt_pct)
                 .unwrap_or_else(|| "-".to_string()),
@@ -3811,14 +3796,14 @@ fn run_mfg_onhand(db: &std::path::Path, company: &str) -> Result<(), CommandErro
             "{:<20}{:>12}{:>14}{:>14}",
             row.material_id,
             row.qty_on_hand,
-            fmt_money(row.avg_cost_minor_per_unit),
-            fmt_money(row.value),
+            Money::display(row.avg_cost_minor_per_unit),
+            Money::display(row.value),
         );
     }
     println!(
         "\ntotal value {}   account 1300 {}   {}",
-        fmt_money(report.total_value),
-        fmt_money(report.account_1300_balance),
+        Money::display(report.total_value),
+        Money::display(report.account_1300_balance),
         if report.total_value == report.account_1300_balance {
             "agree"
         } else {
@@ -4637,10 +4622,4 @@ mod tests {
         assert_eq!(rows[1].balance, Money::from_minor(50_050));
     }
 
-    #[test]
-    fn fmt_money_matches_report_rendering() {
-        assert_eq!(fmt_money(Money::from_minor(-105)), "-1.05");
-        assert_eq!(fmt_money(Money::from_minor(500)), "5.00");
-        assert_eq!(fmt_money(Money::ZERO), "0.00");
-    }
 }

@@ -38,6 +38,8 @@
 //! - [`render`]   — D39: invoice, estimate, sales receipt, credit memo,
 //!   purchase order and customer statement PDFs from saved documents and
 //!   master data, with the D30 pay link on an open invoice
+//! - [`tax_audit`] — W17: recompute QBO's tax lines both ways to see
+//!   whether it rounds half up or half to even
 //! - [`verify`]   — §4, §5: an invariants sweep recomputed independently of
 //!   the schema's own triggers and foreign keys
 //! - [`payroll`]  — §12: the SurePayroll pay-run journal, one flagged
@@ -65,5 +67,6 @@ pub mod report;
 pub mod sales_orders;
 pub mod slim;
 pub mod store;
+pub mod tax_audit;
 pub mod types;
 pub mod verify;

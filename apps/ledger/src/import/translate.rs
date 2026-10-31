@@ -841,6 +841,14 @@ fn resolve_pay_from(
             }
             None
         }
+        // QBO names the account a refund is paid out of `DepositToAccountRef`
+        // (the field is shared with SalesReceipt, where money comes in). It
+        // is the refund's pay-from, which `post` credits; read as
+        // `deposit_to` alone it was ignored and every refund fell back to
+        // checking (the replica holds 68, 16,146.38, refunded out of
+        // undeposited funds).
+        DocKind::RefundReceipt => json_reference(raw, "DepositToAccountRef")
+            .map(|id| resolve_pay_account(Some(id), accounts, chart::CHECKING, warnings)),
         DocKind::Purchase => match json_text(raw, "PaymentType").as_deref() {
             Some("CreditCard") => {
                 let id = json_reference(raw, "AccountRef");
@@ -1109,4 +1117,395 @@ fn json_money(value: &Value, key: &str, qbo_id: &str) -> Result<Option<Money>, T
         });
     }
     Ok(Some(round_money(decimal, RoundingPolicy::MirroredAmount)?))
+}
+
+#[cfg(test)]
+mod tests {
+    //! Each shape the practice run did not exercise, translated and then
+    //! posted, so the assertion is the side each account lands on — the
+    //! thing a sign bug gets wrong — not only the translated fields.
+
+    use super::*;
+    use crate::chart::Classification;
+    use crate::import::accounts::MappedAccount;
+    use crate::post::{post, Posting};
+    use crate::types::{ItemAccounts, JournalEntry, PostingContext};
+    use chrono::{TimeZone, Utc};
+    use serde_json::json;
+
+    const CHECKING_QBO: &str = "35";
+    const CARD_QBO: &str = "41";
+    const UNDEPOSITED_QBO: &str = "4";
+    const SUPPLIES_QBO: &str = "60";
+    const ITEM: &str = "10";
+
+    fn mapped(source_ref: &str, number: &str, classification: Classification) -> MappedAccount {
+        MappedAccount {
+            source_ref: source_ref.to_string(),
+            ledger_number: AccountId(number.to_string()),
+            name: number.to_string(),
+            classification,
+            needs_mapping: false,
+        }
+    }
+
+    fn translate_context() -> TranslateContext {
+        TranslateContext {
+            accounts: AccountMapping {
+                mapped: vec![
+                    mapped(CHECKING_QBO, chart::CHECKING, Classification::Asset),
+                    mapped(CARD_QBO, chart::CREDIT_CARD, Classification::Liability),
+                    mapped(UNDEPOSITED_QBO, chart::UNDEPOSITED_FUNDS, Classification::Asset),
+                    mapped(SUPPLIES_QBO, chart::SHOP_SUPPLIES, Classification::Expense),
+                ],
+            },
+            class_fallback: Some(ClassFallback {
+                class: ClassId("foam".to_string()),
+                before: NaiveDate::from_ymd_opt(2030, 1, 1).unwrap(),
+            }),
+            ..TranslateContext::default()
+        }
+    }
+
+    fn posting_context() -> PostingContext {
+        let mut items = HashMap::new();
+        items.insert(
+            ITEM.to_string(),
+            ItemAccounts {
+                income: AccountId(chart::SALES_INCOME.to_string()),
+                expense: AccountId(chart::COGS.to_string()),
+                asset: None,
+                default_class: None,
+                unit_cost: None,
+            },
+        );
+        PostingContext {
+            items,
+            customers: HashMap::new(),
+            config: Default::default(),
+        }
+    }
+
+    fn entity(entity_type: EntityType, raw: Value) -> MirroredEntity {
+        MirroredEntity {
+            entity_type,
+            qbo_id: raw["Id"].as_str().unwrap().to_string(),
+            sync_token: "0".into(),
+            last_updated_utc: Utc.with_ymd_and_hms(2026, 10, 31, 12, 0, 0).unwrap(),
+            is_deleted: false,
+            raw_json: raw,
+        }
+    }
+
+    fn translated(entity_type: EntityType, raw: Value) -> Translated {
+        translate(&entity(entity_type, raw), &translate_context()).unwrap()
+    }
+
+    fn posted(document: &LedgerDocument) -> JournalEntry {
+        match post(document, 1, &posting_context()).unwrap() {
+            Posting::Entry(entry) => entry,
+            Posting::NonPosting => panic!("{} posted nothing", document.document_id),
+        }
+    }
+
+    /// Debit minus credit on `account`, in cents: positive is a debit.
+    fn net(entry: &JournalEntry, account: &str) -> i64 {
+        entry
+            .lines
+            .iter()
+            .filter(|line| line.account.0 == account)
+            .map(|line| line.debit.minor() - line.credit.minor())
+            .sum()
+    }
+
+    fn item_line(amount: f64) -> Value {
+        json!({
+            "Id": "1", "LineNum": 1, "Amount": amount,
+            "DetailType": "SalesItemLineDetail",
+            "SalesItemLineDetail": { "ItemRef": { "value": ITEM }, "TaxCodeRef": { "value": "TAX" } }
+        })
+    }
+
+    fn expense_line(amount: f64) -> Value {
+        json!({
+            "Id": "1", "Amount": amount,
+            "DetailType": "AccountBasedExpenseLineDetail",
+            "AccountBasedExpenseLineDetail": { "AccountRef": { "value": SUPPLIES_QBO } }
+        })
+    }
+
+    fn linked(amount: f64, txn_id: &str, txn_type: &str) -> Value {
+        json!({ "Amount": amount, "LinkedTxn": [{ "TxnId": txn_id, "TxnType": txn_type }] })
+    }
+
+    #[test]
+    fn a_sales_receipt_debits_its_deposit_account_and_credits_income_and_tax() {
+        let doc = translated(
+            EntityType::SalesReceipt,
+            json!({
+                "Id": "700", "TxnDate": "2026-10-01", "TotalAmt": 106.63,
+                "CustomerRef": { "value": "31" },
+                "DepositToAccountRef": { "value": CHECKING_QBO },
+                "Line": [item_line(100.00)],
+                "TxnTaxDetail": { "TotalTax": 6.63, "TaxLine": [{
+                    "Amount": 6.63, "DetailType": "TaxLineDetail",
+                    "TaxLineDetail": { "NetAmountTaxable": 100.00, "TaxPercent": 6.625, "PercentBased": true }
+                }]}
+            }),
+        )
+        .document;
+        assert_eq!(doc.deposit_to, Some(AccountId(chart::CHECKING.into())));
+        let entry = posted(&doc);
+        assert_eq!(net(&entry, chart::CHECKING), 10663);
+        assert_eq!(net(&entry, chart::SALES_INCOME), -10000);
+        assert_eq!(net(&entry, chart::SALES_TAX_PAYABLE), -663);
+    }
+
+    #[test]
+    fn a_credit_memo_credits_ar_and_debits_returns() {
+        let doc = translated(
+            EntityType::CreditMemo,
+            json!({
+                "Id": "701", "TxnDate": "2026-10-02", "TotalAmt": 40.00,
+                "CustomerRef": { "value": "31" },
+                "Line": [item_line(40.00)]
+            }),
+        )
+        .document;
+        assert!(doc.lines.iter().all(|line| !line.amount.is_negative()));
+        let entry = posted(&doc);
+        assert_eq!(net(&entry, chart::ACCOUNTS_RECEIVABLE), -4000);
+        assert_eq!(net(&entry, chart::RETURNS_ALLOWANCES), 4000);
+        let ar = entry
+            .lines
+            .iter()
+            .find(|line| line.account.0 == chart::ACCOUNTS_RECEIVABLE)
+            .unwrap();
+        assert_eq!(ar.entity.as_ref().map(|e| e.id.as_str()), Some("31"));
+    }
+
+    #[test]
+    fn a_credit_memo_applied_inside_a_payment_is_a_negative_application() {
+        let doc = translated(
+            EntityType::Payment,
+            json!({
+                "Id": "702", "TxnDate": "2026-10-03", "TotalAmt": 60.00, "UnappliedAmt": 0,
+                "CustomerRef": { "value": "31" },
+                "Line": [linked(100.00, "900", "Invoice"), linked(40.00, "701", "CreditMemo")]
+            }),
+        )
+        .document;
+        let amounts: Vec<i64> = doc.applications.iter().map(|a| a.amount.minor()).collect();
+        assert_eq!(amounts, vec![10000, -4000]);
+        let entry = posted(&doc);
+        assert_eq!(net(&entry, chart::ACCOUNTS_RECEIVABLE), -6000);
+        assert_eq!(net(&entry, chart::UNDEPOSITED_FUNDS), 6000);
+    }
+
+    #[test]
+    fn a_refund_receipt_credits_the_account_qbo_refunded_from() {
+        let doc = translated(
+            EntityType::RefundReceipt,
+            json!({
+                "Id": "703", "TxnDate": "2024-05-01", "TotalAmt": 40.00,
+                "CustomerRef": { "value": "31" },
+                "DepositToAccountRef": { "value": UNDEPOSITED_QBO },
+                "Line": [item_line(40.00)]
+            }),
+        )
+        .document;
+        assert_eq!(doc.pay_from, Some(AccountId(chart::UNDEPOSITED_FUNDS.into())));
+        let entry = posted(&doc);
+        assert_eq!(net(&entry, chart::UNDEPOSITED_FUNDS), -4000);
+        assert_eq!(net(&entry, chart::CHECKING), 0, "not the default bank");
+        assert_eq!(net(&entry, chart::RETURNS_ALLOWANCES), 4000);
+        assert_eq!(net(&entry, chart::ACCOUNTS_RECEIVABLE), 0, "money out, no AR leg");
+    }
+
+    #[test]
+    fn a_vendor_credit_debits_ap_and_credits_the_expense() {
+        let doc = translated(
+            EntityType::VendorCredit,
+            json!({
+                "Id": "704", "TxnDate": "2026-10-04", "TotalAmt": 25.00,
+                "VendorRef": { "value": "77" },
+                "Line": [expense_line(25.00)]
+            }),
+        )
+        .document;
+        let entry = posted(&doc);
+        assert_eq!(net(&entry, chart::ACCOUNTS_PAYABLE), 2500);
+        assert_eq!(net(&entry, chart::SHOP_SUPPLIES), -2500);
+    }
+
+    #[test]
+    fn a_vendor_credit_applied_inside_a_check_bill_payment_reduces_what_is_paid() {
+        let doc = translated(
+            EntityType::BillPayment,
+            json!({
+                "Id": "705", "TxnDate": "2026-10-05", "TotalAmt": 275.00, "PayType": "Check",
+                "VendorRef": { "value": "77" },
+                "CheckPayment": { "BankAccountRef": { "value": CHECKING_QBO } },
+                "Line": [linked(300.00, "500", "Bill"), linked(25.00, "704", "VendorCredit")]
+            }),
+        )
+        .document;
+        let amounts: Vec<i64> = doc.applications.iter().map(|a| a.amount.minor()).collect();
+        assert_eq!(amounts, vec![30000, -2500]);
+        assert_eq!(doc.unapplied, Money::ZERO);
+        assert_eq!(doc.pay_from, Some(AccountId(chart::CHECKING.into())));
+        let entry = posted(&doc);
+        assert_eq!(net(&entry, chart::ACCOUNTS_PAYABLE), 27500);
+        assert_eq!(net(&entry, chart::CHECKING), -27500);
+    }
+
+    #[test]
+    fn a_card_bill_payment_credits_the_card_not_the_bank() {
+        let doc = translated(
+            EntityType::BillPayment,
+            json!({
+                "Id": "706", "TxnDate": "2026-10-06", "TotalAmt": 120.00, "PayType": "CreditCard",
+                "VendorRef": { "value": "77" },
+                "CreditCardPayment": { "CCAccountRef": { "value": CARD_QBO } },
+                "Line": [linked(120.00, "502", "Bill")]
+            }),
+        )
+        .document;
+        assert_eq!(doc.pay_from, Some(AccountId(chart::CREDIT_CARD.into())));
+        let entry = posted(&doc);
+        assert_eq!(net(&entry, chart::ACCOUNTS_PAYABLE), 12000);
+        assert_eq!(net(&entry, chart::CREDIT_CARD), -12000);
+        assert_eq!(net(&entry, chart::CHECKING), 0);
+    }
+
+    #[test]
+    fn a_card_bill_payment_on_an_unmapped_card_defaults_to_2100_and_warns() {
+        let translated = translated(
+            EntityType::BillPayment,
+            json!({
+                "Id": "707", "TxnDate": "2026-10-06", "TotalAmt": 10.00, "PayType": "CreditCard",
+                "VendorRef": { "value": "77" },
+                "CreditCardPayment": { "CCAccountRef": { "value": "999" } },
+                "Line": [linked(10.00, "503", "Bill")]
+            }),
+        );
+        assert_eq!(
+            translated.document.pay_from,
+            Some(AccountId(chart::CREDIT_CARD.into()))
+        );
+        assert!(translated.warnings.iter().any(|w| w.contains("defaulting to 2100")));
+    }
+
+    #[test]
+    fn a_credit_card_payment_debits_the_card_and_credits_the_bank() {
+        let doc = translated(
+            EntityType::CreditCardPayment,
+            json!({
+                "Id": "708", "TxnDate": "2026-10-07", "Amount": 500.00,
+                "CreditCardAccountRef": { "value": CARD_QBO },
+                "BankAccountRef": { "value": CHECKING_QBO }
+            }),
+        )
+        .document;
+        assert_eq!(doc.document_id, "qbo:CreditCardPayment:708");
+        let entry = posted(&doc);
+        assert_eq!(net(&entry, chart::CREDIT_CARD), 50000);
+        assert_eq!(net(&entry, chart::CHECKING), -50000);
+    }
+
+    #[test]
+    fn a_check_purchase_debits_the_expense_and_credits_the_bank() {
+        for payment_type in ["Check", "Cash"] {
+            let doc = translated(
+                EntityType::Purchase,
+                json!({
+                    "Id": "709", "TxnDate": "2026-10-08", "TotalAmt": 80.00,
+                    "PaymentType": payment_type,
+                    "AccountRef": { "value": CHECKING_QBO },
+                    "EntityRef": { "value": "77", "type": "Vendor" },
+                    "Line": [expense_line(80.00)]
+                }),
+            )
+            .document;
+            assert_eq!(
+                doc.pay_from,
+                Some(AccountId(chart::CHECKING.into())),
+                "{payment_type}"
+            );
+            let entry = posted(&doc);
+            assert_eq!(net(&entry, chart::SHOP_SUPPLIES), 8000, "{payment_type}");
+            assert_eq!(net(&entry, chart::CHECKING), -8000, "{payment_type}");
+        }
+    }
+
+    #[test]
+    fn a_check_purchase_on_an_unmapped_account_defaults_to_1100_and_warns() {
+        let translated = translated(
+            EntityType::Purchase,
+            json!({
+                "Id": "710", "TxnDate": "2026-10-08", "TotalAmt": 5.00,
+                "PaymentType": "Check",
+                "AccountRef": { "value": "999" },
+                "Line": [expense_line(5.00)]
+            }),
+        );
+        assert_eq!(
+            translated.document.pay_from,
+            Some(AccountId(chart::CHECKING.into()))
+        );
+        assert!(translated.warnings.iter().any(|w| w.contains("defaulting to 1100")));
+    }
+
+    #[test]
+    fn application_is_credit_follows_the_counterparty_side() {
+        let mut ctx = translate_context();
+        ctx.journal_ar_ap_sides
+            .insert(("je-ar-cr".into(), "31".into()), Side::Credit);
+        ctx.journal_ar_ap_sides
+            .insert(("je-ar-dr".into(), String::new()), Side::Debit);
+        ctx.journal_ar_ap_sides
+            .insert(("je-ap-dr".into(), "77".into()), Side::Debit);
+        let credit = |doc, target, id: &str, contact| {
+            application_is_credit(doc, target, id, Some(contact), &ctx)
+        };
+        use DocKind::*;
+        // Customer side: money owed by the customer is applied positive.
+        assert!(!credit(Payment, Invoice, "1", "31"));
+        assert!(credit(Payment, CreditMemo, "1", "31"));
+        assert!(credit(Payment, Deposit, "1", "31"));
+        assert!(credit(Payment, JournalEntry, "je-ar-cr", "31"));
+        assert!(!credit(Payment, JournalEntry, "je-ar-dr", "31"), "falls back to the whole entry");
+        assert!(!credit(Payment, JournalEntry, "je-unknown", "31"));
+        // Vendor side: the mirror image.
+        assert!(!credit(BillPayment, Bill, "1", "77"));
+        assert!(credit(BillPayment, VendorCredit, "1", "77"));
+        assert!(credit(BillPayment, Purchase, "1", "77"));
+        assert!(credit(BillPayment, JournalEntry, "je-ap-dr", "77"));
+        assert!(!credit(BillPayment, JournalEntry, "je-ar-cr", "31"));
+        // Nothing else is ever a credit application.
+        assert!(!credit(Deposit, CreditMemo, "1", "31"));
+    }
+
+    #[test]
+    fn a_linked_journal_entry_takes_its_sign_from_its_ar_side() {
+        let mut ctx = translate_context();
+        ctx.journal_ar_ap_sides
+            .insert(("880".into(), "31".into()), Side::Credit);
+        let doc = translate(
+            &entity(
+                EntityType::Payment,
+                json!({
+                    "Id": "711", "TxnDate": "2026-10-09", "TotalAmt": 70.00, "UnappliedAmt": 0,
+                    "CustomerRef": { "value": "31" },
+                    "Line": [linked(100.00, "900", "Invoice"), linked(30.00, "880", "JournalEntry")]
+                }),
+            ),
+            &ctx,
+        )
+        .unwrap()
+        .document;
+        let amounts: Vec<i64> = doc.applications.iter().map(|a| a.amount.minor()).collect();
+        assert_eq!(amounts, vec![10000, -3000]);
+        assert_eq!(net(&posted(&doc), chart::ACCOUNTS_RECEIVABLE), -7000);
+    }
 }

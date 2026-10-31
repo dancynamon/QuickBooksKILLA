@@ -69,12 +69,30 @@ fn write_status(state: OutboxState) -> &'static str {
 }
 
 /// An amount QBO will read from the payload, as minor units. The payload's
-/// amounts were written by `compose` from `Money`, so they have two places.
-fn minor_of(value: &Value) -> i64 {
-    Decimal::from_str(&value.to_string())
-        .ok()
-        .and_then(|d| (d * Decimal::from(100)).round().to_string().parse().ok())
-        .unwrap_or(0)
+/// amounts were written by `compose` from `Money`, so they have two places;
+/// anything else — not a number, more than two places, out of range — is
+/// refused rather than read as zero, which would understate a total.
+fn minor_of(value: &Value) -> Result<i64, ApiError> {
+    let bad = || ApiError::BadArguments(format!("amount {value} is not a two-place decimal"));
+    let decimal = match value {
+        Value::Number(number) => Decimal::from_str(&number.to_string()),
+        Value::String(text) => Decimal::from_str(text.trim()),
+        _ => return Err(bad()),
+    }
+    .map_err(|_| bad())?;
+    if decimal.scale() > 2 {
+        return Err(bad());
+    }
+    decimal
+        .checked_mul(Decimal::ONE_HUNDRED)
+        .and_then(|minor| rust_decimal::prelude::ToPrimitive::to_i64(&minor))
+        .ok_or_else(bad)
+}
+
+/// [`minor_of`] on `key`, where an absent amount is zero (a description
+/// line carries none) but a present, unreadable one is an error.
+fn amount_at(value: &Value, key: &str) -> Result<i64, ApiError> {
+    Ok(value.get(key).map(minor_of).transpose()?.unwrap_or(0))
 }
 
 fn text(value: &Value, pointer: &str) -> Option<String> {
@@ -124,17 +142,17 @@ pub(super) fn pending_document(store: &Store, realm: &RealmId, record: &OutboxRe
         .into_iter()
         .flatten()
         .enumerate()
-        .map(|(i, line)| LineDto {
+        .map(|(i, line)| -> Result<LineDto, ApiError> { Ok(LineDto {
             line_no: i as i64 + 1,
             item_id: text(line, &format!("/{detail_type}/ItemRef/value")),
             description: text(line, "/Description"),
             qty: line.pointer(&format!("/{detail_type}/Qty")).map(|v| v.to_string()),
             unit_price: line.pointer(&format!("/{detail_type}/UnitPrice")).map(|v| v.to_string()),
-            amount_minor: line.get("Amount").map(minor_of).unwrap_or(0),
+            amount_minor: amount_at(line, "Amount")?,
             class_id: text(line, &format!("/{detail_type}/ClassRef/value")),
             taxable: text(line, &format!("/{detail_type}/TaxCodeRef/value")).as_deref() == Some("TAX"),
-        })
-        .collect();
+        }) })
+        .collect::<Result<_, _>>()?;
     let document = DocumentDto {
         qbo_id: record.local_entity_id.clone(),
         doc_type,
@@ -182,12 +200,12 @@ fn pending_payment(
             description: Some(format!("Applied to {noun} {number}")),
             qty: None,
             unit_price: None,
-            amount_minor: line.get("Amount").map(minor_of).unwrap_or(0),
+            amount_minor: amount_at(line, "Amount")?,
             class_id: None,
             taxable: false,
         });
     }
-    let total = payload.get("TotalAmt").map(minor_of).unwrap_or(0);
+    let total = amount_at(payload, "TotalAmt")?;
     let applied: i64 = lines.iter().map(|l| l.amount_minor).sum();
     let document = DocumentDto {
         qbo_id: record.local_entity_id.clone(),
@@ -221,10 +239,10 @@ fn pending_expense(store: &Store, realm: &RealmId, record: &OutboxRecord) -> Res
         .into_iter()
         .flatten()
         .enumerate()
-        .map(|(i, line)| {
+        .map(|(i, line)| -> Result<LineDto, ApiError> {
             let account = text(line, "/AccountBasedExpenseLineDetail/AccountRef/value").unwrap_or_default();
             let account_name = accounts.iter().find(|a| a.0 == account).map(|a| a.1.clone()).unwrap_or(account);
-            LineDto {
+            Ok(LineDto {
                 line_no: i as i64 + 1,
                 item_id: None,
                 description: Some(match text(line, "/Description") {
@@ -233,12 +251,12 @@ fn pending_expense(store: &Store, realm: &RealmId, record: &OutboxRecord) -> Res
                 }),
                 qty: None,
                 unit_price: None,
-                amount_minor: line.get("Amount").map(minor_of).unwrap_or(0),
+                amount_minor: amount_at(line, "Amount")?,
                 class_id: text(line, "/AccountBasedExpenseLineDetail/ClassRef/value"),
                 taxable: false,
-            }
+            })
         })
-        .collect();
+        .collect::<Result<_, _>>()?;
     let contact_id = text(payload, "/EntityRef/value");
     let contact_name = match &contact_id {
         Some(id) => store.contact_name(realm, ContactType::Vendor, id)?,
@@ -280,7 +298,7 @@ fn pending_deposit(store: &Store, realm: &RealmId, record: &OutboxRecord) -> Res
             description: Some(format!("Payment from {from}")),
             qty: None,
             unit_price: None,
-            amount_minor: line.get("Amount").map(minor_of).unwrap_or(0),
+            amount_minor: amount_at(line, "Amount")?,
             class_id: None,
             taxable: false,
         });
@@ -295,7 +313,7 @@ fn pending_deposit(store: &Store, realm: &RealmId, record: &OutboxRecord) -> Res
         contact_type: None,
         contact_name: None,
         class_id: None,
-        total_minor: payload.get("TotalAmt").map(minor_of).unwrap_or(0),
+        total_minor: amount_at(payload, "TotalAmt")?,
         balance_minor: None,
         status: Some(write_status(record.state).to_string()),
         po_number: None,
@@ -333,7 +351,7 @@ fn queued_applications(store: &Store, realm: &RealmId, payment: EntityType) -> R
         }
         for line in record.payload_json.get("Line").and_then(|l| l.as_array()).into_iter().flatten() {
             if let Some(id) = text(line, "/LinkedTxn/0/TxnId") {
-                *out.entry(id).or_insert(0) += line.get("Amount").map(minor_of).unwrap_or(0);
+                *out.entry(id).or_insert(0) += amount_at(line, "Amount")?;
             }
         }
     }
@@ -792,7 +810,7 @@ fn make_deposit(store: &Store, args: Value, now: DateTime<Utc>) -> Result<Value,
         items.push(DepositItem { qbo_id: row.0.clone(), txn_type: row.1.clone(), amount: ledger_core::Money::from_minor(row.5) });
     }
     let payload = compose::deposit_payload(&args.draft, &items).map_err(|e| ApiError::BadArguments(e.to_string()))?;
-    let total = payload.get("TotalAmt").map(minor_of).unwrap_or(0);
+    let total = amount_at(&payload, "TotalAmt")?;
     let record = writes::queue_create(store, &realm, EntityType::Deposit, payload, now)?;
     to_json(serde_json::json!({ "outboxId": record.id.to_string(), "entityId": record.local_entity_id, "totalMinor": total, "count": items.len() }))
 }
@@ -974,8 +992,18 @@ mod tests {
         assert_eq!(record.base_sync_token.as_deref(), Some("0"));
         assert_eq!(record.payload_json["PrivateNote"], "Ship with the next pallet");
         // The total the editor would send equals what the replica holds.
-        let sent: i64 = record.payload_json["Line"].as_array().unwrap().iter().map(|l| super::minor_of(&l["Amount"])).sum();
+        let sent: i64 = record.payload_json["Line"].as_array().unwrap().iter().map(|l| super::minor_of(&l["Amount"]).unwrap()).sum();
         assert_eq!(sent, invoice.total.minor());
+    }
+
+    #[test]
+    fn minor_of_refuses_what_it_cannot_read_rather_than_reading_zero() {
+        assert_eq!(super::minor_of(&json!(12.5)).unwrap(), 1250);
+        assert_eq!(super::minor_of(&json!(-0.05)).unwrap(), -5);
+        assert_eq!(super::minor_of(&json!("7.10")).unwrap(), 710);
+        assert!(super::minor_of(&json!(1.005)).is_err());
+        assert!(super::minor_of(&json!(null)).is_err());
+        assert!(super::minor_of(&json!("abc")).is_err());
     }
 
     #[test]
