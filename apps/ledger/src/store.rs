@@ -599,6 +599,40 @@ ALTER TABLE contacts ADD COLUMN due_next_month_within INTEGER
 ALTER TABLE contacts ADD COLUMN terms_source_ref TEXT;
 "#,
     },
+    Migration {
+        version: 9,
+        name: "posting gate: no entry inserted already posted, no line added after posting",
+        sql: r#"
+-- The balance trigger (migration 1) checks only the 0 -> 1 transition of
+-- is_posted. An entry inserted with is_posted = 1 never makes that
+-- transition, so it reached the reports unchecked. It cannot be balance-
+-- checked at insert either: its lines reference it and so are inserted
+-- after it. So it is refused outright, and post_entry's insert-unposted,
+-- add-lines, flip-to-posted sequence stays the only way in.
+CREATE TRIGGER trg_journal_entries_no_insert_posted
+BEFORE INSERT ON journal_entries
+FOR EACH ROW
+WHEN NEW.is_posted <> 0
+BEGIN
+    SELECT RAISE(ABORT, 'journal entry must be inserted unposted and posted by update');
+END;
+
+-- The same gap from the other side: a line inserted into an entry that is
+-- already posted changes its balance after the check ran.
+CREATE TRIGGER trg_journal_lines_no_insert_when_posted
+BEFORE INSERT ON journal_lines
+FOR EACH ROW
+WHEN EXISTS (
+    SELECT 1 FROM journal_entries e
+    WHERE e.company_id = NEW.company_id
+      AND e.entry_id   = NEW.entry_id
+      AND e.is_posted  = 1
+)
+BEGIN
+    SELECT RAISE(ABORT, 'cannot add a line to a posted journal entry');
+END;
+"#,
+    },
 ];
 
 pub fn latest_version() -> i64 {
@@ -2782,6 +2816,51 @@ mod tests {
             result.is_err(),
             "the balance trigger must reject this update"
         );
+    }
+
+    /// Migration 9: the balance trigger fires only on the 0 -> 1 update, so
+    /// an entry inserted already posted must be refused at the insert —
+    /// here one with a single unbalanced line that would otherwise reach
+    /// the trial balance.
+    #[test]
+    fn an_entry_inserted_already_posted_is_rejected() {
+        let (ledger, doc) = setup();
+        let conn = &ledger.connection;
+        let result = conn.execute(
+            "INSERT INTO journal_entries
+                 (company_id, entry_id, entry_date, memo, source_type, source_id,
+                  source_version, is_posted, is_flagged)
+             VALUES ('aquamentor', 'e-raw', '2026-06-15', NULL, 'invoice', ?1, ?2, 1, 0)",
+            params![doc.document_id, doc.version],
+        );
+        let message = result.expect_err("a posted insert must be refused").to_string();
+        assert!(message.contains("inserted unposted"), "{message}");
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM journal_entries WHERE entry_id = 'e-raw'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+
+    /// Migration 9: a line added to a posted entry would unbalance it with
+    /// no trigger on the entry left to notice.
+    #[test]
+    fn a_line_cannot_be_added_to_a_posted_entry() {
+        let (ledger, doc) = setup();
+        let entry_id = ledger
+            .post_entry("aquamentor", &balanced_entry(&doc, ymd(2026, 6, 15)), now())
+            .expect("posts");
+        let result = ledger.connection.execute(
+            "INSERT INTO journal_lines
+                 (company_id, entry_id, line_no, account_id, debit_minor, credit_minor)
+             VALUES ('aquamentor', ?1, 99, ?2, 500, 0)",
+            params![entry_id, chart::ACCOUNTS_RECEIVABLE],
+        );
+        let message = result.expect_err("a line on a posted entry must be refused").to_string();
+        assert!(message.contains("posted journal entry"), "{message}");
     }
 
     #[test]
