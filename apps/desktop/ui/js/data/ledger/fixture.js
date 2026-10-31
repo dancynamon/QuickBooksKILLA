@@ -485,7 +485,7 @@ const BOOKS = {
   payable: { opens: { Bill: false, VendorCredit: true }, settles: new Set(["BillPayment", "VendorCredit"]) },
 };
 
-/** base × 6.625%, rounded half to even (`RoundingPolicy::TaxCalculation`),
+/** base × 6.625%, rounded half away from zero (`RoundingPolicy::TaxCalculation`),
  * in integer cents so no float ever touches the result. */
 function taxCents(baseCents) {
   const num = baseCents * NJ_RATE_PER_100K;
@@ -493,7 +493,7 @@ function taxCents(baseCents) {
   const abs = Math.abs(num);
   let q = Math.floor(abs / 100000);
   const r = abs % 100000;
-  if (r * 2 > 100000 || (r * 2 === 100000 && q % 2 === 1)) q += 1;
+  if (r * 2 >= 100000) q += 1;
   return sign * q;
 }
 

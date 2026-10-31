@@ -856,7 +856,7 @@ const fn is_taxed_sale(kind: DocKind) -> bool {
 ///   [`Terms`]: `txn_date + terms_days`, or the day of the month (D41).
 /// - No header class takes the contact's default class.
 /// - A taxed sale with no tax gets one: the taxable base (taxable lines less
-///   taxable discounts) times the configured rate, banker's rounding
+///   taxable discounts) times the configured rate, rounded half up as QBO does (W17)
 ///   (`RoundingPolicy::TaxCalculation`), zero for an exempt customer.
 ///
 /// Returns the completed document and the posting context built from the
