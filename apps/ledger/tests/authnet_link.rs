@@ -120,7 +120,7 @@ fn invoice_to_link_to_settlement_clears_the_ar_aging() {
     seed_master_data(&mut server);
 
     let (invoice_id, number, total) = create_invoice(&mut server, 3, "100.00");
-    assert_eq!(total, "106.62");
+    assert_eq!(total, "106.63");
 
     // A $40 payment already applied: the link charges what is still open.
     ok(&call_tool(
@@ -144,7 +144,7 @@ fn invoice_to_link_to_settlement_clears_the_ar_aging() {
     ))
     .clone();
     assert_eq!(link["invoice_number"], json!(number));
-    assert_eq!(link["amount"], json!("66.62"));
+    assert_eq!(link["amount"], json!("66.63"));
     assert_eq!(link["environment"], json!("sandbox"));
     assert_eq!(
         link["url"],
@@ -163,7 +163,7 @@ fn invoice_to_link_to_settlement_clears_the_ar_aging() {
     let sent = mock.requests();
     assert_eq!(sent.len(), 1);
     assert_eq!(sent[0].invoice_number, number);
-    assert_eq!(sent[0].amount, Money::from_minor(6_662));
+    assert_eq!(sent[0].amount, Money::from_minor(6_663));
     assert_eq!(sent[0].customer_id.as_deref(), Some("cpool"));
     assert_eq!(sent[0].customer_email.as_deref(), Some("ap@pool.example"));
     assert_eq!(sent[0].description, format!("Invoice {number} - Pool Co"));
@@ -240,13 +240,13 @@ fn invoice_to_link_to_settlement_clears_the_ar_aging() {
     assert_eq!(again.applied, 0);
 }
 
-/// One invoice of $100.00 + tax = $106.62, open on the receivable book.
+/// One invoice of $100.00 + tax = $106.63, open on the receivable book.
 fn invoice_and_server(ledger: &Ledger) -> (Server<'_>, String, String) {
     let mut server =
         mcp::new_server_with_payments(ledger, COMPANY.into(), Box::new(MockAuthnet::new()));
     seed_master_data(&mut server);
     let (invoice_id, number, total) = create_invoice(&mut server, 3, "100.00");
-    assert_eq!(total, "106.62");
+    assert_eq!(total, "106.63");
     (server, invoice_id, number)
 }
 
@@ -300,11 +300,11 @@ fn open_on(ledger: &Ledger, invoice_id: &str) -> Money {
 fn an_exact_payment_applies_in_full() {
     let ledger = seed_ledger();
     let (_server, invoice_id, number) = invoice_and_server(&ledger);
-    let report = import(&ledger, &settlement_csv(&[("70001", "106.62", &number)]));
+    let report = import(&ledger, &settlement_csv(&[("70001", "106.63", &number)]));
     assert_eq!((report.applied, report.unapplied), (1, 0), "{report:?}");
     assert!(report.warnings.is_empty());
     let doc = payment(&ledger, "70001");
-    assert_eq!(applied(&doc), Money::from_minor(10_662));
+    assert_eq!(applied(&doc), Money::from_minor(10_663));
     assert_eq!(doc.unapplied, Money::ZERO);
     assert_eq!(open_on(&ledger, &invoice_id), Money::ZERO);
 }
@@ -316,12 +316,12 @@ fn an_overpayment_applies_the_open_balance_and_parks_the_rest() {
     let report = import(&ledger, &settlement_csv(&[("70002", "120.00", &number)]));
     assert_eq!((report.applied, report.unapplied), (0, 1), "{report:?}");
     let doc = payment(&ledger, "70002");
-    assert_eq!(applied(&doc), Money::from_minor(10_662));
-    assert_eq!(doc.unapplied, Money::from_minor(1_338));
+    assert_eq!(applied(&doc), Money::from_minor(10_663));
+    assert_eq!(doc.unapplied, Money::from_minor(1_337));
     assert_eq!(open_on(&ledger, &invoice_id), Money::ZERO);
     let warning = &report.warnings[0];
-    assert!(warning.contains("106.62 applied"), "{warning}");
-    assert!(warning.contains("13.38 over its open balance"), "{warning}");
+    assert!(warning.contains("106.63 applied"), "{warning}");
+    assert!(warning.contains("13.37 over its open balance"), "{warning}");
 }
 
 #[test]
@@ -337,14 +337,14 @@ fn a_payment_against_an_already_paid_invoice_is_all_unapplied() {
             "kind": "Payment", "txn_date": "2026-09-25",
             "contact": { "kind": "Customer", "id": "cpool" },
             "applications": [{ "target_document_id": invoice_id,
-                               "target_kind": "Invoice", "amount": "106.62" }]
+                               "target_kind": "Invoice", "amount": "106.63" }]
         }}),
     ));
-    let report = import(&ledger, &settlement_csv(&[("70003", "106.62", &number)]));
+    let report = import(&ledger, &settlement_csv(&[("70003", "106.63", &number)]));
     assert_eq!((report.applied, report.unapplied), (0, 1), "{report:?}");
     let doc = payment(&ledger, "70003");
     assert!(doc.applications.is_empty());
-    assert_eq!(doc.unapplied, Money::from_minor(10_662));
+    assert_eq!(doc.unapplied, Money::from_minor(10_663));
     assert!(
         report.warnings[0].contains("nothing left open"),
         "{report:?}"
@@ -364,8 +364,8 @@ fn two_sales_in_one_file_for_one_invoice_share_its_open_balance() {
         Money::from_minor(8_000)
     );
     let second = payment(&ledger, "70005");
-    assert_eq!(applied(&second), Money::from_minor(2_662));
-    assert_eq!(second.unapplied, Money::from_minor(5_338));
+    assert_eq!(applied(&second), Money::from_minor(2_663));
+    assert_eq!(second.unapplied, Money::from_minor(5_337));
     assert_eq!(open_on(&ledger, &invoice_id), Money::ZERO);
 
     // A re-import neither posts them again nor re-counts them against the

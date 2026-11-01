@@ -609,8 +609,8 @@ pub fn journal_document(
         if *stated != computed {
             return Err(PayrollError::NetPayMismatch {
                 run_id: run.run_id.clone(),
-                stated: money_str(*stated),
-                computed: money_str(computed),
+                stated: Money::display(*stated),
+                computed: Money::display(computed),
             });
         }
     }
@@ -697,13 +697,6 @@ pub fn journal_document(
         )),
     };
     Ok((doc, totals))
-}
-
-fn money_str(money: Money) -> String {
-    let minor = money.minor();
-    let sign = if minor < 0 { "-" } else { "" };
-    let abs = minor.unsigned_abs();
-    format!("{sign}{}.{:02}", abs / 100, abs % 100)
 }
 
 // ---------------------------------------------------------------------------

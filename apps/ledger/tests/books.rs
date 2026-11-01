@@ -280,13 +280,13 @@ fn prepare_fills_number_due_date_class_and_tax() {
     assert_eq!(prepared.header_class, Some(ClassId("foam".to_string())));
     let tax = prepared.tax.clone().unwrap();
     assert_eq!(tax.taxable_base, usd(10000));
-    assert_eq!(tax.total_tax, usd(662)); // 6.625 rounds half-to-even: 6.62
+    assert_eq!(tax.total_tax, usd(663)); // 6.625 rounds half up, as QBO does (W17): 6.63
     assert_eq!(tax.rate, Decimal::new(6625, 5));
     assert!(context.items.contains_key("mat"));
     assert!(!context.customers["c-pool"].is_tax_exempt);
     assert_eq!(
         books::document_total(&prepared).unwrap(),
-        usd(10000 + 1550 + 662)
+        usd(10000 + 1550 + 663)
     );
 }
 

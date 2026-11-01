@@ -685,9 +685,9 @@ impl TbDiff {
             out.push_str(&format!(
                 "{:<38}{:>14}{:>14}{:>12}  {}\n",
                 row.label,
-                format_money(row.ledger_amount),
-                format_money(row.qbo_amount),
-                format_money(row.delta),
+                Money::display(row.ledger_amount),
+                Money::display(row.qbo_amount),
+                Money::display(row.delta),
                 row.tier.as_str(),
             ));
         }
@@ -711,20 +711,13 @@ impl TbDiff {
                 "{},{},{},{},{}\n",
                 row.label.replace(',', " "),
                 row.tier.as_str(),
-                format_money(row.ledger_amount),
-                format_money(row.qbo_amount),
-                format_money(row.delta),
+                Money::display(row.ledger_amount),
+                Money::display(row.qbo_amount),
+                Money::display(row.delta),
             ));
         }
         out
     }
-}
-
-pub(crate) fn format_money(amount: Money) -> String {
-    let minor = amount.minor();
-    let sign = if minor < 0 { "-" } else { "" };
-    let abs = minor.unsigned_abs();
-    format!("{sign}{}.{:02}", abs / 100, abs % 100)
 }
 
 /// A pure function over two already-computed trial balances — no Intuit
@@ -864,12 +857,5 @@ mod tests {
             csv,
             "account,tier,ledger,qbo,delta\nBank — Checking (1100),must,412884.19,412884.19,0.00\n"
         );
-    }
-
-    #[test]
-    fn format_money_handles_negative_cents() {
-        assert_eq!(format_money(Money::from_minor(-105)), "-1.05");
-        assert_eq!(format_money(Money::from_minor(500)), "5.00");
-        assert_eq!(format_money(Money::ZERO), "0.00");
     }
 }

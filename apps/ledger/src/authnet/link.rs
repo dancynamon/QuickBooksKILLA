@@ -508,14 +508,6 @@ struct Setting {
     setting_value: String,
 }
 
-/// `amount` on the wire: a plain two-place decimal, no currency symbol.
-pub fn amount_str(amount: Money) -> String {
-    let minor = amount.minor();
-    let sign = if minor < 0 { "-" } else { "" };
-    let abs = minor.unsigned_abs();
-    format!("{sign}{}.{:02}", abs / 100, abs % 100)
-}
-
 /// The `getHostedPaymentPageRequest` body, exactly as it goes on the wire.
 /// Holds the credentials — never log it.
 pub fn request_body(
@@ -565,7 +557,7 @@ pub fn request_body(
             ref_id: &request.invoice_number,
             transaction_request: TransactionRequest {
                 transaction_type: "authCaptureTransaction",
-                amount: amount_str(request.amount),
+                amount: Money::display(request.amount),
                 order: Order {
                     invoice_number: &request.invoice_number,
                     description: &request.description,
@@ -866,7 +858,7 @@ impl PaymentLink {
 <button type=\"submit\">Pay {amount}</button>\n</form>\n</body></html>\n",
             url = html_escape(&self.url),
             token = html_escape(&self.token),
-            amount = amount_str(self.amount),
+            amount = Money::display(self.amount),
         )
     }
 }

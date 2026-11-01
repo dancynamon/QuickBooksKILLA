@@ -617,7 +617,7 @@ impl<'a> LedgerToolSet<'a> {
             .find(|so| so.document_id == sales_order_id);
         if let (Value::Object(map), Some(so)) = (&mut result, remaining) {
             map.insert("sales_order_id".into(), json!(sales_order_id));
-            map.insert("sales_order_open".into(), json!(money_str(so.open)));
+            map.insert("sales_order_open".into(), json!(Money::display(so.open)));
             map.insert("sales_order_closed".into(), json!(so.open.is_zero()));
         }
         Ok(result)
@@ -674,8 +674,8 @@ impl<'a> LedgerToolSet<'a> {
             "version": version.version,
             "number": doc.number,
             "due_date": doc.due_date.map(|d| d.to_string()),
-            "total": money_str(books::document_total(&doc).map_err(|e| ToolError::new(e.to_string()))?),
-            "tax": doc.tax.as_ref().map(|t| money_str(t.total_tax)),
+            "total": Money::display(books::document_total(&doc).map_err(|e| ToolError::new(e.to_string()))?),
+            "tax": doc.tax.as_ref().map(|t| Money::display(t.total_tax)),
             "entry_id": entry_id,
             "entry": entry_value,
         }))
@@ -779,7 +779,7 @@ impl<'a> LedgerToolSet<'a> {
             .applications
             .iter()
             .find(|a| a.target_document_id == target_id)
-            .map(|a| money_str(a.amount));
+            .map(|a| Money::display(a.amount));
         let mut result = revision_json(&revision)?;
         if let Value::Object(map) = &mut result {
             map.insert("target_document_id".to_string(), json!(target_id));
@@ -811,7 +811,7 @@ impl<'a> LedgerToolSet<'a> {
         Ok(json!({
             "document_id": minted.document_id,
             "invoice_number": minted.invoice_number,
-            "amount": money_str(minted.amount),
+            "amount": Money::display(minted.amount),
             "environment": minted.environment.as_str(),
             "url": minted.url,
             "token": minted.token,
@@ -869,7 +869,7 @@ impl<'a> LedgerToolSet<'a> {
             PayLinkOutcome::Failed(reason) => json!({ "status": "failed", "reason": reason }),
             PayLinkOutcome::Attached { link, page } => json!({
                 "status": "attached",
-                "amount": money_str(link.amount),
+                "amount": Money::display(link.amount),
                 "environment": link.environment.as_str(),
                 "url": link.url,
                 "expires_at": link.expires_at.to_rfc3339(),
@@ -884,11 +884,11 @@ impl<'a> LedgerToolSet<'a> {
             "kind": done.document.kind.as_str(),
             "number": done.document.number,
             "is_voided": done.document.is_voided,
-            "subtotal": money_str(figures.subtotal),
-            "tax": money_str(figures.tax),
-            "total": money_str(figures.total),
-            "amount_paid": money_str(figures.paid),
-            "balance_due": money_str(figures.balance),
+            "subtotal": Money::display(figures.subtotal),
+            "tax": Money::display(figures.tax),
+            "total": Money::display(figures.total),
+            "amount_paid": Money::display(figures.paid),
+            "balance_due": Money::display(figures.balance),
             "pay_link": pay_link,
             "warnings": done.rendered.warnings,
         }))
@@ -1928,17 +1928,6 @@ fn date_prop(description: &str) -> Value {
 // decimal string, matching `qbo_local::mcp`'s own convention.
 // ---------------------------------------------------------------------------
 
-/// Renders [`Money`] as a decimal string with two places — `"1234.56"`,
-/// negative as `"-12.00"` — for MCP tool output, whose consumers are LLM
-/// skills reading text and JSON, not the bare minor-units integer `Money`'s
-/// own `Serialize` impl produces.
-fn money_str(money: Money) -> String {
-    let minor = money.minor();
-    let sign = if minor < 0 { "-" } else { "" };
-    let abs = minor.unsigned_abs();
-    format!("{sign}{}.{:02}", abs / 100, abs % 100)
-}
-
 fn class_id_json(class: &Option<ClassId>) -> Value {
     json!(class.as_ref().map(|class| class.0.clone()))
 }
@@ -1965,17 +1954,17 @@ fn tb_row_json(row: &report::TbRow) -> Value {
         "is_contra": row.is_contra,
         "needs_mapping": row.needs_mapping,
         "source_ref": row.source_ref,
-        "debit": money_str(row.debit),
-        "credit": money_str(row.credit),
-        "balance": money_str(row.balance),
+        "debit": Money::display(row.debit),
+        "credit": Money::display(row.credit),
+        "balance": Money::display(row.balance),
     })
 }
 
 fn trial_balance_json(tb: &report::TrialBalance) -> Value {
     json!({
         "rows": tb.rows.iter().map(tb_row_json).collect::<Vec<_>>(),
-        "total_debits": money_str(tb.total_debits),
-        "total_credits": money_str(tb.total_credits),
+        "total_debits": Money::display(tb.total_debits),
+        "total_credits": Money::display(tb.total_credits),
         "wrong_side": tb.wrong_side.iter().map(|a| json!(a.0)).collect::<Vec<_>>(),
     })
 }
@@ -1984,13 +1973,13 @@ fn by_section_json(section: &report::BySection) -> Value {
     json!({
         "by_account": section.by_account.iter().map(|(account, amount)| json!({
             "account_id": account.0,
-            "amount": money_str(*amount),
+            "amount": Money::display(*amount),
         })).collect::<Vec<_>>(),
         "by_class": section.by_class.iter().map(|(class, amount)| json!({
             "class_id": class.as_ref().map(|c| c.0.clone()),
-            "amount": money_str(*amount),
+            "amount": Money::display(*amount),
         })).collect::<Vec<_>>(),
-        "total": money_str(section.total),
+        "total": Money::display(section.total),
     })
 }
 
@@ -1999,8 +1988,8 @@ fn pnl_json(pnl: &report::Pnl) -> Value {
         "income": by_section_json(&pnl.income),
         "cogs": by_section_json(&pnl.cogs),
         "expense": by_section_json(&pnl.expense),
-        "gross_margin": money_str(pnl.gross_margin),
-        "net_income": money_str(pnl.net_income),
+        "gross_margin": Money::display(pnl.gross_margin),
+        "net_income": Money::display(pnl.net_income),
     })
 }
 
@@ -2008,14 +1997,14 @@ fn bs_row_json(row: &report::BsRow) -> Value {
     json!({
         "account_id": row.account_id.as_ref().map(|a| a.0.clone()),
         "name": row.name,
-        "balance": money_str(row.balance),
+        "balance": Money::display(row.balance),
     })
 }
 
 fn bs_section_json(section: &report::BsSection) -> Value {
     json!({
         "rows": section.rows.iter().map(bs_row_json).collect::<Vec<_>>(),
-        "total": money_str(section.total),
+        "total": Money::display(section.total),
     })
 }
 
@@ -2024,21 +2013,21 @@ fn balance_sheet_json(bs: &report::BalanceSheet) -> Value {
         "assets": bs_section_json(&bs.assets),
         "liabilities": bs_section_json(&bs.liabilities),
         "equity": bs_section_json(&bs.equity),
-        "total_liabilities_and_equity": money_str(bs.total_liabilities_and_equity),
+        "total_liabilities_and_equity": Money::display(bs.total_liabilities_and_equity),
     })
 }
 
 fn sales_tax_lines_json(lines: &report::SalesTaxLines) -> Value {
     json!({
-        "a_total_income": money_str(lines.a_total_income),
-        "b_tax_collected": money_str(lines.b_tax_collected),
-        "c_taxable_sales": money_str(lines.c_taxable_sales),
-        "d_nontaxable_sales": money_str(lines.d_nontaxable_sales),
-        "e_line_level_taxable": lines.e_line_level_taxable.map(money_str),
-        "variance": lines.variance.map(money_str),
+        "a_total_income": Money::display(lines.a_total_income),
+        "b_tax_collected": Money::display(lines.b_tax_collected),
+        "c_taxable_sales": Money::display(lines.c_taxable_sales),
+        "d_nontaxable_sales": Money::display(lines.d_nontaxable_sales),
+        "e_line_level_taxable": lines.e_line_level_taxable.map(Money::display),
+        "variance": lines.variance.map(Money::display),
         "st50": lines.st50.iter().map(|(line, amount)| json!({
             "line": line,
-            "amount": money_str(*amount),
+            "amount": Money::display(*amount),
         })).collect::<Vec<_>>(),
     })
 }
@@ -2054,9 +2043,9 @@ fn gl_line_json(line: &accountant::GlLine) -> Value {
         "entity": contact_ref_json(&line.entity),
         "is_flagged": line.is_flagged,
         "reversal_of": line.reversal_of,
-        "debit": money_str(line.debit),
-        "credit": money_str(line.credit),
-        "running_balance": money_str(line.running_balance),
+        "debit": Money::display(line.debit),
+        "credit": Money::display(line.credit),
+        "running_balance": Money::display(line.running_balance),
     })
 }
 
@@ -2065,9 +2054,9 @@ fn gl_section_json(section: &accountant::GlAccountSection) -> Value {
         "account_id": section.account_id.0,
         "number": section.number,
         "name": section.name,
-        "opening_balance": money_str(section.opening_balance),
+        "opening_balance": Money::display(section.opening_balance),
         "lines": section.lines.iter().map(gl_line_json).collect::<Vec<_>>(),
-        "closing_balance": money_str(section.closing_balance),
+        "closing_balance": Money::display(section.closing_balance),
     })
 }
 
@@ -2096,12 +2085,12 @@ fn journal_line_json(line: &JournalLine) -> Value {
         "line_no": line.line_no,
         "account": line.account.0,
         "class": class_id_json(&line.class),
-        "debit": money_str(line.debit),
-        "credit": money_str(line.credit),
+        "debit": Money::display(line.debit),
+        "credit": Money::display(line.credit),
         "memo": line.memo,
         "entity": contact_ref_json(&line.entity),
         "is_taxable": line.is_taxable,
-        "tax_amount": line.tax_amount.map(money_str),
+        "tax_amount": line.tax_amount.map(Money::display),
         "tax_rate": line.tax_rate.map(|rate| rate.to_string()),
     })
 }
@@ -2141,8 +2130,8 @@ fn bank_statement_json(statement: &crate::store::BankStatementRow) -> Value {
         "account_id": statement.account_id.0,
         "period_start": statement.period_start.to_string(),
         "period_end": statement.period_end.to_string(),
-        "opening_balance": money_str(statement.opening_balance),
-        "closing_balance": money_str(statement.closing_balance),
+        "opening_balance": Money::display(statement.opening_balance),
+        "closing_balance": Money::display(statement.closing_balance),
         "imported_at": statement.imported_at,
         "closed_at": statement.closed_at,
     })
@@ -2154,7 +2143,7 @@ fn bank_line_json(line: &crate::store::BankLineRow) -> Value {
         "statement_id": line.statement_id,
         "account_id": line.account_id.0,
         "posted_on": line.posted_on.to_string(),
-        "amount": money_str(line.amount),
+        "amount": Money::display(line.amount),
         "description": line.description,
         "external_id": line.external_id,
         "matched_entry_id": line.matched_entry_id,
@@ -2462,9 +2451,9 @@ fn item_json(item: &Item) -> Value {
         "expense_account": item.expense_account.0,
         "asset_account": item.asset_account.as_ref().map(|a| a.0.clone()),
         "default_class": class_id_json(&item.default_class),
-        "sales_price": item.sales_price.map(money_str),
-        "purchase_cost": item.purchase_cost.map(money_str),
-        "unit_cost": item.unit_cost.map(money_str),
+        "sales_price": item.sales_price.map(Money::display),
+        "purchase_cost": item.purchase_cost.map(Money::display),
+        "unit_cost": item.unit_cost.map(Money::display),
         "is_taxable": item.is_taxable,
         "is_active": item.is_active,
         "source_ref": item.source_ref,
@@ -2496,7 +2485,7 @@ fn document_json(doc: &LedgerDocument, version: i64) -> Result<Value, ToolError>
         "lines": doc.lines.iter().map(|line| json!({
             "line_no": line.line_no,
             "kind": line.kind,
-            "amount": money_str(line.amount),
+            "amount": Money::display(line.amount),
             "class": class_id_json(&line.class),
             "item_id": line.item_id,
             "account": line.account.as_ref().map(|a| a.0.clone()),
@@ -2505,8 +2494,8 @@ fn document_json(doc: &LedgerDocument, version: i64) -> Result<Value, ToolError>
             "description": line.description,
         })).collect::<Vec<_>>(),
         "tax": doc.tax.as_ref().map(|t| json!({
-            "total_tax": money_str(t.total_tax),
-            "taxable_base": money_str(t.taxable_base),
+            "total_tax": Money::display(t.total_tax),
+            "taxable_base": Money::display(t.taxable_base),
             "rate": t.rate.to_string(),
         })),
         "deposit_to": doc.deposit_to.as_ref().map(|a| a.0.clone()),
@@ -2514,13 +2503,13 @@ fn document_json(doc: &LedgerDocument, version: i64) -> Result<Value, ToolError>
         "applications": doc.applications.iter().map(|a| json!({
             "target_document_id": a.target_document_id,
             "target_kind": a.target_kind.as_str(),
-            "amount": money_str(a.amount),
+            "amount": Money::display(a.amount),
         })).collect::<Vec<_>>(),
-        "unapplied": money_str(doc.unapplied),
+        "unapplied": Money::display(doc.unapplied),
         "is_voided": doc.is_voided,
         "memo": doc.memo,
         "source_ref": doc.source_ref,
-        "total": money_str(total),
+        "total": Money::display(total),
     }))
 }
 
@@ -2537,8 +2526,8 @@ fn revision_json(revision: &books::Revision) -> Result<Value, ToolError> {
         "version": revision.version,
         "number": doc.number,
         "due_date": doc.due_date.map(|d| d.to_string()),
-        "total": money_str(total),
-        "tax": doc.tax.as_ref().map(|t| money_str(t.total_tax)),
+        "total": Money::display(total),
+        "tax": doc.tax.as_ref().map(|t| Money::display(t.total_tax)),
         "is_voided": doc.is_voided,
         "reversal_entry_ids": revision.reversals,
         "entry_id": entry_id,
@@ -2553,9 +2542,9 @@ fn sales_order_json(so: &sales_orders::OpenSalesOrder) -> Value {
         "contact_id": so.contact_id,
         "contact_name": so.contact_name,
         "txn_date": so.txn_date.to_string(),
-        "subtotal": money_str(so.subtotal),
-        "invoiced": money_str(so.invoiced),
-        "open": money_str(so.open),
+        "subtotal": Money::display(so.subtotal),
+        "invoiced": Money::display(so.invoiced),
+        "open": Money::display(so.open),
         "invoice_ids": so.invoice_ids,
         "memo": so.memo,
         "source_ref": so.source_ref,
@@ -2578,9 +2567,9 @@ fn open_document_json(doc: &books::OpenDocument) -> Value {
         "contact_name": doc.contact_name,
         "txn_date": doc.txn_date.to_string(),
         "due_date": doc.due_date.to_string(),
-        "total": money_str(doc.total),
-        "applied": money_str(doc.applied),
-        "open": money_str(doc.open),
+        "total": Money::display(doc.total),
+        "applied": Money::display(doc.applied),
+        "open": Money::display(doc.open),
     })
 }
 
@@ -2588,12 +2577,12 @@ fn aging_row_json(row: &books::AgingRow) -> Value {
     json!({
         "contact_id": row.contact_id,
         "contact_name": row.contact_name,
-        "current": money_str(row.current),
-        "days_1_30": money_str(row.days_1_30),
-        "days_31_60": money_str(row.days_31_60),
-        "days_61_90": money_str(row.days_61_90),
-        "over_90": money_str(row.over_90),
-        "total": money_str(row.total),
+        "current": Money::display(row.current),
+        "days_1_30": Money::display(row.days_1_30),
+        "days_31_60": Money::display(row.days_31_60),
+        "days_61_90": Money::display(row.days_61_90),
+        "over_90": Money::display(row.over_90),
+        "total": Money::display(row.total),
     })
 }
 
@@ -2629,11 +2618,11 @@ fn payroll_err(err: PayrollError) -> ToolError {
 
 fn payroll_totals_json(totals: &payroll::RunTotals) -> Value {
     json!({
-        "gross": money_str(totals.gross),
-        "employer_costs": money_str(totals.employer_costs),
-        "liabilities": money_str(totals.liabilities),
-        "net_pay": money_str(totals.net_pay),
-        "noncash_not_posted": money_str(totals.noncash),
+        "gross": Money::display(totals.gross),
+        "employer_costs": Money::display(totals.employer_costs),
+        "liabilities": Money::display(totals.liabilities),
+        "net_pay": Money::display(totals.net_pay),
+        "noncash_not_posted": Money::display(totals.noncash),
     })
 }
 
@@ -3247,8 +3236,8 @@ mod tests {
         let created = &response["result"]["structuredContent"];
         assert_eq!(created["number"], json!("1001"));
         assert_eq!(created["due_date"], json!("2026-10-01"));
-        assert_eq!(created["tax"], json!("6.62"));
-        assert_eq!(created["total"], json!("106.62"));
+        assert_eq!(created["tax"], json!("6.63"));
+        assert_eq!(created["total"], json!("106.63"));
         let invoice_id = created["document_id"].as_str().unwrap().to_string();
 
         let response = call_tool(
@@ -3271,8 +3260,8 @@ mod tests {
             json!({ "book": "receivable", "as_of": "2026-10-15" }),
         );
         let totals = &aging["result"]["structuredContent"]["totals"];
-        assert_eq!(totals["days_1_30"], json!("56.62"));
-        assert_eq!(totals["total"], json!("56.62"));
+        assert_eq!(totals["days_1_30"], json!("56.63"));
+        assert_eq!(totals["total"], json!("56.63"));
         assert_eq!(
             aging["result"]["structuredContent"]["rows"][0]["contact_name"],
             json!("Pool Co")
@@ -3290,7 +3279,7 @@ mod tests {
         );
         assert_eq!(
             open["result"]["structuredContent"][0]["open"],
-            json!("56.62")
+            json!("56.63")
         );
     }
 
@@ -3321,7 +3310,7 @@ mod tests {
         let created = &response["result"]["structuredContent"];
         assert_eq!(created["number"], json!("1001"));
         assert_eq!(created["entry_id"], Value::Null);
-        assert_eq!(created["tax"], json!("6.62"));
+        assert_eq!(created["tax"], json!("6.63"));
         let so_id = created["document_id"].as_str().unwrap().to_string();
 
         let open = call_tool(&mut server, 5, "open_sales_orders", json!({}));

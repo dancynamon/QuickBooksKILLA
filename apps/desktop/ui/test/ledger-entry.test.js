@@ -21,13 +21,13 @@ test("lineAmount is quantity × rate, half away from zero to the cent", () => {
   assert.throws(() => lineAmount("abc", "3.00"), /a quantity/);
 });
 
-test("previewTotals adds NJ tax on taxable lines with the book's half-to-even rounding", () => {
+test("previewTotals adds NJ tax on taxable lines with the book's half-up rounding", () => {
   const lines = [
     { amount: "100.00", taxable: true },
     { qty: "2", rate: "50.00", taxable: false },
     { amount: "", qty: "", rate: "" },
   ];
-  assert.deepEqual(previewTotals("Invoice", lines, null), { subtotal: "200.00", tax: "6.62", total: "206.62", exempt: false });
+  assert.deepEqual(previewTotals("Invoice", lines, null), { subtotal: "200.00", tax: "6.63", total: "206.63", exempt: false });
   assert.deepEqual(previewTotals("Invoice", lines, { is_tax_exempt: true }), { subtotal: "200.00", tax: "0.00", total: "200.00", exempt: true });
   assert.equal(previewTotals("Bill", lines, null).tax, "0.00", "a purchase carries no sales tax");
 });

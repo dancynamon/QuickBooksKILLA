@@ -237,17 +237,17 @@ test("ledger fixture provider satisfies the schema for the D28 master-data and o
   assertJournalEntry(created.entry, SCHEMA.create_document, "create_document.entry");
 });
 
-test("create_document fills number, due date, header class and banker's-rounded tax from master data", async () => {
+test("create_document fills number, due date, header class and half-up-rounded tax from master data", async () => {
   const ledger = createFixtureProvider();
   const created = await ledger.createDocument({
     kind: "Invoice", txn_date: "2026-10-01", contact: { kind: "Customer", id: "cust-blue-harbor" },
     lines: [{ kind: "Item", item_id: "sign-custom", amount: "100.00", is_taxable: true }],
   }, "dan");
-  // Next after the seeded 21234; Net 30; 100.00 × 6.625% = 6.625 -> 6.62 (half to even).
+  // Next after the seeded 21234; Net 30; 100.00 × 6.625% = 6.625 -> 6.63 (half up, as QBO).
   assert.equal(created.number, "21235");
   assert.equal(created.due_date, "2026-10-31");
-  assert.equal(created.tax, "6.62");
-  assert.equal(created.total, "106.62");
+  assert.equal(created.tax, "6.63");
+  assert.equal(created.total, "106.63");
   const income = created.entry.lines.find((l) => l.account === "4100");
   assert.equal(income.class, "signs", "an item's default class beats the customer's");
 
@@ -312,7 +312,7 @@ test("the aging ties to 1200 and 2000, and a payment takes an invoice out of it"
   ar = await ledger.aging("receivable", asOf);
   assert.equal(ar.totals.total, await control("1200"));
   const blue = ar.rows.find((r) => r.contact_id === "cust-blue-harbor");
-  assert.equal(blue.current, "106.62", "due 31 Oct, so current on 15 Oct");
+  assert.equal(blue.current, "106.63", "due 31 Oct, so current on 15 Oct");
 
   await ledger.createDocument({
     kind: "Payment", txn_date: "2026-10-10", contact: { kind: "Customer", id: "cust-blue-harbor" },
@@ -320,13 +320,13 @@ test("the aging ties to 1200 and 2000, and a payment takes an invoice out of it"
   }, "dan");
   const open = (await ledger.openDocuments("receivable", asOf)).find((d) => d.document_id === created.document_id);
   assert.equal(open.applied, "50.00");
-  assert.equal(open.open, "56.62");
+  assert.equal(open.open, "56.63");
   ar = await ledger.aging("receivable", asOf);
   assert.equal(ar.totals.total, await control("1200"), "the payment's 1200 credit and the application agree");
 
   // As of the day before the payment, the invoice is still open in full.
   const before = (await ledger.openDocuments("receivable", "2026-10-09")).find((d) => d.document_id === created.document_id);
-  assert.equal(before.open, "106.62");
+  assert.equal(before.open, "106.63");
 });
 
 test("upsert_contact refuses a second customer with the same name; upsert_item enforces the asset-account rule", async () => {
@@ -485,7 +485,7 @@ test("apply_credit nets an open credit memo against an open invoice; an edit to 
   assert.equal(rest.applied, "40.00");
 
   let open = await ledger.openDocuments("receivable", "2026-12-31");
-  assert.equal(open.find((d) => d.document_id === invoice.document_id).open, "66.62");
+  assert.equal(open.find((d) => d.document_id === invoice.document_id).open, "66.63");
   assert.ok(!open.some((d) => d.document_id === credit.document_id), "used up");
   assert.equal((await ledger.aging("receivable", "2026-12-31")).totals.total, await control(ledger, "1200"));
 
@@ -520,7 +520,7 @@ test("payment_link mints a sandbox page for an open invoice's open balance and r
   const link = await ledger.paymentLink(created.document_id);
   assertRow(link, SCHEMA.payment_link.top, "payment_link");
   assert.equal(link.invoice_number, created.number);
-  assert.equal(link.amount, "56.62", "the open balance, not the original total");
+  assert.equal(link.amount, "56.63", "the open balance, not the original total");
   assert.equal(link.environment, "sandbox");
   assert.match(link.html, /name="token"/);
 

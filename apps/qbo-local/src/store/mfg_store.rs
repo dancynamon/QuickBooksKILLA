@@ -14,7 +14,9 @@ use serde::Serialize;
 
 use super::{Store, StoreError};
 use crate::domain::RealmId;
-use crate::mfg::{ActualMaterial, BuildVariance, Component, LandedLine, MaterialPrices, ReceiptLine, StockEvent};
+use crate::mfg::{
+    ActualMaterial, BuildVariance, Component, LandedLine, MaterialPrices, ReceiptLine, StockEvent,
+};
 
 fn dec(raw: &str) -> Result<Decimal, StoreError> {
     Decimal::from_str(raw).map_err(|_| StoreError::Corrupt(format!("not a decimal: {raw:?}")))
@@ -93,15 +95,27 @@ impl MaterialPrices for Prices {
         self.per_bf.get(material_id).copied()
     }
     fn name(&self, material_id: &str) -> String {
-        self.names.get(material_id).cloned().unwrap_or_else(|| material_id.to_string())
+        self.names
+            .get(material_id)
+            .cloned()
+            .unwrap_or_else(|| material_id.to_string())
     }
 }
 
 impl Store {
-    pub fn set_reorder_point(&self, realm: &RealmId, material_id: &str, board_feet: Option<Decimal>) -> Result<(), StoreError> {
+    pub fn set_reorder_point(
+        &self,
+        realm: &RealmId,
+        material_id: &str,
+        board_feet: Option<Decimal>,
+    ) -> Result<(), StoreError> {
         let changed = self.connection.execute(
             "UPDATE materials SET reorder_bf = ?3 WHERE realm_id = ?1 AND material_id = ?2",
-            params![realm.as_str(), material_id, board_feet.map(|b| b.to_string())],
+            params![
+                realm.as_str(),
+                material_id,
+                board_feet.map(|b| b.to_string())
+            ],
         )?;
         if changed == 0 {
             return Err(StoreError::Corrupt(format!("no material {material_id}")));
@@ -109,7 +123,11 @@ impl Store {
         Ok(())
     }
 
-    pub fn reorder_point(&self, realm: &RealmId, material_id: &str) -> Result<Option<Decimal>, StoreError> {
+    pub fn reorder_point(
+        &self,
+        realm: &RealmId,
+        material_id: &str,
+    ) -> Result<Option<Decimal>, StoreError> {
         let raw: Option<Option<String>> = self
             .connection
             .query_row(
@@ -142,13 +160,24 @@ impl Store {
 
     /// Every event that moved this material's stock, unordered: deliveries,
     /// builds (reported board-feet, or the sheet's where none was), counts.
-    pub fn stock_events(&self, realm: &RealmId, material_id: &str) -> Result<Vec<StockEvent>, StoreError> {
+    pub fn stock_events(
+        &self,
+        realm: &RealmId,
+        material_id: &str,
+    ) -> Result<Vec<StockEvent>, StoreError> {
         let mut events = Vec::new();
         for receipt in self.receipts(realm, Some(material_id))? {
-            for line in receipt.lines.iter().filter(|l| l.material_id == material_id) {
+            for line in receipt
+                .lines
+                .iter()
+                .filter(|l| l.material_id == material_id)
+            {
                 events.push(StockEvent::Received {
                     date: receipt.received_on.clone(),
-                    reference: receipt.reference.clone().unwrap_or_else(|| "delivery".into()),
+                    reference: receipt
+                        .reference
+                        .clone()
+                        .unwrap_or_else(|| "delivery".into()),
                     board_feet: line.sheets * line.bf_per_sheet,
                     landed: Money::from_minor(line.goods_minor + line.freight_minor),
                 });
@@ -161,8 +190,14 @@ impl Store {
         )?;
         let pattern = format!("%{material_id}%");
         let rows = statement.query_map(params![realm.as_str(), pattern], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, String>(3)?,
-                row.get::<_, String>(4)?, row.get::<_, Option<String>>(5)?))
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, Option<String>>(5)?,
+            ))
         })?;
         for row in rows {
             let (date, quantity, components, actual, item_id, name) = row?;
@@ -173,7 +208,11 @@ impl Store {
             for (_, board_feet) in used.into_iter().filter(|(m, _)| m == material_id) {
                 events.push(StockEvent::Consumed {
                     date: date.clone(),
-                    reference: format!("{} × {}", quantity, name.clone().unwrap_or_else(|| item_id.clone())),
+                    reference: format!(
+                        "{} × {}",
+                        quantity,
+                        name.clone().unwrap_or_else(|| item_id.clone())
+                    ),
                     board_feet,
                 });
             }
@@ -182,11 +221,19 @@ impl Store {
             "SELECT counted_on, board_feet, note FROM material_counts WHERE realm_id = ?1 AND material_id = ?2",
         )?;
         let rows = statement.query_map(params![realm.as_str(), material_id], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, Option<String>>(2)?))
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+            ))
         })?;
         for row in rows {
             let (date, board_feet, note) = row?;
-            events.push(StockEvent::Counted { date, reference: note.unwrap_or_else(|| "count".into()), board_feet: dec(&board_feet)? });
+            events.push(StockEvent::Counted {
+                date,
+                reference: note.unwrap_or_else(|| "count".into()),
+                board_feet: dec(&board_feet)?,
+            });
         }
         Ok(events)
     }
@@ -295,8 +342,12 @@ impl Store {
         Ok((events, Some(start)))
     }
 
-
-    pub fn save_material(&self, realm: &RealmId, material: &Material, now: DateTime<Utc>) -> Result<(), StoreError> {
+    pub fn save_material(
+        &self,
+        realm: &RealmId,
+        material: &Material,
+        now: DateTime<Utc>,
+    ) -> Result<(), StoreError> {
         self.connection.execute(
             "INSERT INTO materials (realm_id, material_id, name, thickness_in, width_in, length_in, color, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
@@ -311,8 +362,16 @@ impl Store {
         Ok(())
     }
 
-    pub fn material(&self, realm: &RealmId, material_id: &str) -> Result<Option<Material>, StoreError> {
-        Ok(self.materials(realm)?.into_iter().map(|r| r.material).find(|m| m.material_id == material_id))
+    pub fn material(
+        &self,
+        realm: &RealmId,
+        material_id: &str,
+    ) -> Result<Option<Material>, StoreError> {
+        Ok(self
+            .materials(realm)?
+            .into_iter()
+            .map(|r| r.material)
+            .find(|m| m.material_id == material_id))
     }
 
     pub fn materials(&self, realm: &RealmId) -> Result<Vec<MaterialRow>, StoreError> {
@@ -331,9 +390,15 @@ impl Store {
         )?;
         let rows = statement.query_map(params![realm.as_str()], |row| {
             Ok((
-                row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, String>(3)?,
-                row.get::<_, String>(4)?, row.get::<_, Option<String>>(5)?, row.get::<_, Option<String>>(6)?,
-                row.get::<_, Option<String>>(7)?, row.get::<_, i64>(8)?,
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, Option<String>>(5)?,
+                row.get::<_, Option<String>>(6)?,
+                row.get::<_, Option<String>>(7)?,
+                row.get::<_, i64>(8)?,
             ))
         })?;
         let mut out = Vec::new();
@@ -341,8 +406,16 @@ impl Store {
             let (id, name, t, w, l, color, landed, last, receipts) = row?;
             let (t, w, l) = (dec(&t)?, dec(&w)?, dec(&l)?);
             out.push(MaterialRow {
-                bf_per_sheet: crate::mfg::board_feet(t, w, l).map_err(|e| StoreError::Corrupt(e.to_string()))?,
-                material: Material { material_id: id, name, thickness_in: t, width_in: w, length_in: l, color },
+                bf_per_sheet: crate::mfg::board_feet(t, w, l)
+                    .map_err(|e| StoreError::Corrupt(e.to_string()))?,
+                material: Material {
+                    material_id: id,
+                    name,
+                    thickness_in: t,
+                    width_in: w,
+                    length_in: l,
+                    color,
+                },
                 landed_per_bf: landed.as_deref().map(dec).transpose()?,
                 last_received: last,
                 receipts,
@@ -354,8 +427,14 @@ impl Store {
     pub fn material_prices(&self, realm: &RealmId) -> Result<Prices, StoreError> {
         let rows = self.materials(realm)?;
         Ok(Prices {
-            per_bf: rows.iter().filter_map(|r| r.landed_per_bf.map(|p| (r.material.material_id.clone(), p))).collect(),
-            names: rows.into_iter().map(|r| (r.material.material_id, r.material.name)).collect(),
+            per_bf: rows
+                .iter()
+                .filter_map(|r| r.landed_per_bf.map(|p| (r.material.material_id.clone(), p)))
+                .collect(),
+            names: rows
+                .into_iter()
+                .map(|r| (r.material.material_id, r.material.name))
+                .collect(),
         })
     }
 
@@ -397,13 +476,25 @@ impl Store {
     }
 
     /// Receipts, newest first, optionally only those carrying one material.
-    pub fn receipts(&self, realm: &RealmId, material_id: Option<&str>) -> Result<Vec<ReceiptRow>, StoreError> {
+    pub fn receipts(
+        &self,
+        realm: &RealmId,
+        material_id: Option<&str>,
+    ) -> Result<Vec<ReceiptRow>, StoreError> {
         let mut statement = self.connection.prepare(
             "SELECT receipt_id, received_on, vendor_id, reference, freight_minor FROM material_receipts
              WHERE realm_id = ?1 ORDER BY received_on DESC, created_at DESC",
         )?;
         let heads = statement
-            .query_map(params![realm.as_str()], |row| Ok((row.get::<_, String>(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)))?
+            .query_map(params![realm.as_str()], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            })?
             .collect::<Result<Vec<(String, String, Option<String>, Option<String>, i64)>, _>>()?;
         let mut lines_statement = self.connection.prepare(
             "SELECT material_id, sheets, bf_per_sheet, price_per_sheet, surcharge_per_sheet, goods_minor, freight_minor, landed_per_bf
@@ -413,25 +504,54 @@ impl Store {
         for (receipt_id, received_on, vendor_id, reference, freight_minor) in heads {
             let raw = lines_statement
                 .query_map(params![realm.as_str(), receipt_id], |row| {
-                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, String>(3)?,
-                        row.get::<_, String>(4)?, row.get::<_, i64>(5)?, row.get::<_, i64>(6)?, row.get::<_, String>(7)?))
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, i64>(5)?,
+                        row.get::<_, i64>(6)?,
+                        row.get::<_, String>(7)?,
+                    ))
                 })?
                 .collect::<Result<Vec<_>, _>>()?;
             let mut lines = Vec::new();
-            for (material_id, sheets, bf, price, surcharge, goods_minor, freight_minor, landed) in raw {
+            for (material_id, sheets, bf, price, surcharge, goods_minor, freight_minor, landed) in
+                raw
+            {
                 lines.push(ReceiptLineRow {
-                    material_id, sheets: dec(&sheets)?, bf_per_sheet: dec(&bf)?, price_per_sheet: dec(&price)?,
-                    surcharge_per_sheet: dec(&surcharge)?, goods_minor, freight_minor, landed_per_bf: dec(&landed)?,
+                    material_id,
+                    sheets: dec(&sheets)?,
+                    bf_per_sheet: dec(&bf)?,
+                    price_per_sheet: dec(&price)?,
+                    surcharge_per_sheet: dec(&surcharge)?,
+                    goods_minor,
+                    freight_minor,
+                    landed_per_bf: dec(&landed)?,
                 });
             }
             if material_id.is_none_or(|m| lines.iter().any(|l| l.material_id == m)) {
-                out.push(ReceiptRow { receipt_id, received_on, vendor_id, reference, freight_minor, lines });
+                out.push(ReceiptRow {
+                    receipt_id,
+                    received_on,
+                    vendor_id,
+                    reference,
+                    freight_minor,
+                    lines,
+                });
             }
         }
         Ok(out)
     }
 
-    pub fn save_build_sheet(&self, realm: &RealmId, item_id: &str, components: &[Component], now: DateTime<Utc>) -> Result<(), StoreError> {
+    pub fn save_build_sheet(
+        &self,
+        realm: &RealmId,
+        item_id: &str,
+        components: &[Component],
+        now: DateTime<Utc>,
+    ) -> Result<(), StoreError> {
         self.connection.execute(
             "INSERT INTO build_sheets (realm_id, item_id, components_json, updated_at) VALUES (?1, ?2, ?3, ?4)
              ON CONFLICT(realm_id, item_id) DO UPDATE SET components_json = excluded.components_json, updated_at = excluded.updated_at",
@@ -440,7 +560,11 @@ impl Store {
         Ok(())
     }
 
-    pub fn build_sheet(&self, realm: &RealmId, item_id: &str) -> Result<Option<Vec<Component>>, StoreError> {
+    pub fn build_sheet(
+        &self,
+        realm: &RealmId,
+        item_id: &str,
+    ) -> Result<Option<Vec<Component>>, StoreError> {
         let raw: Option<String> = self
             .connection
             .query_row(
@@ -453,11 +577,20 @@ impl Store {
     }
 
     /// Every build sheet as `(item id, components, updated at)`.
-    pub fn build_sheets(&self, realm: &RealmId) -> Result<Vec<(String, Vec<Component>, String)>, StoreError> {
-        let mut statement = self
-            .connection
-            .prepare("SELECT item_id, components_json, updated_at FROM build_sheets WHERE realm_id = ?1")?;
-        let rows = statement.query_map(params![realm.as_str()], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?)))?;
+    pub fn build_sheets(
+        &self,
+        realm: &RealmId,
+    ) -> Result<Vec<(String, Vec<Component>, String)>, StoreError> {
+        let mut statement = self.connection.prepare(
+            "SELECT item_id, components_json, updated_at FROM build_sheets WHERE realm_id = ?1",
+        )?;
+        let rows = statement.query_map(params![realm.as_str()], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?;
         let mut out = Vec::new();
         for row in rows {
             let (item, json, updated) = row?;
@@ -494,23 +627,55 @@ impl Store {
     }
 
     /// Builds, newest first, optionally for one product.
-    pub fn builds(&self, realm: &RealmId, item_id: Option<&str>) -> Result<Vec<BuildRow>, StoreError> {
+    pub fn builds(
+        &self,
+        realm: &RealmId,
+        item_id: Option<&str>,
+    ) -> Result<Vec<BuildRow>, StoreError> {
         let mut statement = self.connection.prepare(
             "SELECT build_id, item_id, built_on, quantity, standard_minor, actual_minor, variance_minor, flagged, note, actual_json
              FROM builds WHERE realm_id = ?1 AND (?2 IS NULL OR item_id = ?2)
              ORDER BY built_on DESC, created_at DESC",
         )?;
         let rows = statement.query_map(params![realm.as_str(), item_id], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, String>(3)?,
-                row.get::<_, i64>(4)?, row.get::<_, i64>(5)?, row.get::<_, i64>(6)?, row.get::<_, i64>(7)?,
-                row.get::<_, Option<String>>(8)?, row.get::<_, String>(9)?))
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, i64>(4)?,
+                row.get::<_, i64>(5)?,
+                row.get::<_, i64>(6)?,
+                row.get::<_, i64>(7)?,
+                row.get::<_, Option<String>>(8)?,
+                row.get::<_, String>(9)?,
+            ))
         })?;
         let mut out = Vec::new();
         for row in rows {
-            let (build_id, item_id, built_on, quantity, standard_minor, actual_minor, variance_minor, flagged, note, actual) = row?;
+            let (
+                build_id,
+                item_id,
+                built_on,
+                quantity,
+                standard_minor,
+                actual_minor,
+                variance_minor,
+                flagged,
+                note,
+                actual,
+            ) = row?;
             out.push(BuildRow {
-                build_id, item_id, built_on, quantity: dec(&quantity)?, standard_minor, actual_minor, variance_minor,
-                flagged: flagged != 0, note, actual: serde_json::from_str(&actual)?,
+                build_id,
+                item_id,
+                built_on,
+                quantity: dec(&quantity)?,
+                standard_minor,
+                actual_minor,
+                variance_minor,
+                flagged: flagged != 0,
+                note,
+                actual: serde_json::from_str(&actual)?,
             });
         }
         Ok(out)
@@ -537,18 +702,44 @@ mod tests {
         let store = Store::open_in_memory().unwrap();
         store.register_realm(&realm(), "Test", now()).unwrap();
         store
-            .save_material(&realm(), &Material {
-                material_id: "xlpe-2-blue".into(), name: "XLPE 2 in blue".into(),
-                thickness_in: dec!(2), width_in: dec!(48), length_in: dec!(96), color: Some("blue".into()),
-            }, now())
+            .save_material(
+                &realm(),
+                &Material {
+                    material_id: "xlpe-2-blue".into(),
+                    name: "XLPE 2 in blue".into(),
+                    thickness_in: dec!(2),
+                    width_in: dec!(48),
+                    length_in: dec!(96),
+                    color: Some("blue".into()),
+                },
+                now(),
+            )
             .unwrap();
         store
     }
 
     fn receive(store: &Store, id: &str, on: &str, price: Decimal) {
-        let lines = vec![ReceiptLine { material_id: "xlpe-2-blue".into(), sheets: dec!(10), bf_per_sheet: dec!(64), price_per_sheet: price, surcharge_per_sheet: dec!(0) }];
+        let lines = vec![ReceiptLine {
+            material_id: "xlpe-2-blue".into(),
+            sheets: dec!(10),
+            bf_per_sheet: dec!(64),
+            price_per_sheet: price,
+            surcharge_per_sheet: dec!(0),
+        }];
         let landed = landed_cost(&lines, Money::from_minor(6_400)).unwrap();
-        store.record_receipt(&realm(), id, on, None, Some("PO-1"), Money::from_minor(6_400), &lines, &landed, now()).unwrap();
+        store
+            .record_receipt(
+                &realm(),
+                id,
+                on,
+                None,
+                Some("PO-1"),
+                Money::from_minor(6_400),
+                &lines,
+                &landed,
+                now(),
+            )
+            .unwrap();
     }
 
     #[test]
@@ -562,36 +753,95 @@ mod tests {
         // (1280 + 64) / 640 bf
         assert_eq!(row.landed_per_bf, Some(dec!(2.1)));
         assert_eq!(row.receipts, 2);
-        assert_eq!(store.receipts(&realm(), Some("xlpe-2-blue")).unwrap()[0].receipt_id, "r2");
-        assert_eq!(store.material_prices(&realm()).unwrap().name("xlpe-2-blue"), "XLPE 2 in blue");
+        assert_eq!(
+            store.receipts(&realm(), Some("xlpe-2-blue")).unwrap()[0].receipt_id,
+            "r2"
+        );
+        assert_eq!(
+            store.material_prices(&realm()).unwrap().name("xlpe-2-blue"),
+            "XLPE 2 in blue"
+        );
     }
 
     #[test]
     fn stock_replays_deliveries_builds_and_counts() {
         let store = store();
         receive(&store, "r1", "2026-09-01", dec!(96));
-        let components = vec![Component::Material { material_id: "xlpe-2-blue".into(), net_bf: dec!(2), yield_pct: dec!(80) }];
+        let components = vec![Component::Material {
+            material_id: "xlpe-2-blue".into(),
+            net_bf: dec!(2),
+            yield_pct: dec!(80),
+        }];
         let prices = store.material_prices(&realm()).unwrap();
         let variance = crate::mfg::build_variance(&components, &prices, dec!(100), &[]).unwrap();
-        store.record_build(&realm(), "b1", "item-1", "2026-09-05", &components, &[], &variance, None, now()).unwrap();
-        store.record_count(&realm(), "c1", "xlpe-2-blue", "2026-09-30", dec!(380), Some("month end"), now()).unwrap();
+        store
+            .record_build(
+                &realm(),
+                "b1",
+                "item-1",
+                "2026-09-05",
+                &components,
+                &[],
+                &variance,
+                None,
+                now(),
+            )
+            .unwrap();
+        store
+            .record_count(
+                &realm(),
+                "c1",
+                "xlpe-2-blue",
+                "2026-09-30",
+                dec!(380),
+                Some("month end"),
+                now(),
+            )
+            .unwrap();
 
-        let state = crate::mfg::stock(store.stock_events(&realm(), "xlpe-2-blue").unwrap()).unwrap();
+        let state =
+            crate::mfg::stock(store.stock_events(&realm(), "xlpe-2-blue").unwrap()).unwrap();
         // 640 in, 250 used (2 / 0.8 × 100), 390 expected, 380 counted.
         assert_eq!(state.moves.len(), 3);
         assert_eq!(state.moves[1].change_bf, dec!(-250));
         assert_eq!(state.on_hand_bf, dec!(380));
         assert_eq!(state.shrinkage_bf, dec!(10));
-        store.set_reorder_point(&realm(), "xlpe-2-blue", Some(dec!(400))).unwrap();
-        assert_eq!(store.reorder_point(&realm(), "xlpe-2-blue").unwrap(), Some(dec!(400)));
+        store
+            .set_reorder_point(&realm(), "xlpe-2-blue", Some(dec!(400)))
+            .unwrap();
+        assert_eq!(
+            store.reorder_point(&realm(), "xlpe-2-blue").unwrap(),
+            Some(dec!(400))
+        );
     }
 
     #[test]
     fn a_receipt_for_an_unknown_material_is_refused() {
         let store = store();
-        let lines = vec![ReceiptLine { material_id: "ghost".into(), sheets: dec!(1), bf_per_sheet: dec!(1), price_per_sheet: dec!(1), surcharge_per_sheet: dec!(0) }];
+        let lines = vec![ReceiptLine {
+            material_id: "ghost".into(),
+            sheets: dec!(1),
+            bf_per_sheet: dec!(1),
+            price_per_sheet: dec!(1),
+            surcharge_per_sheet: dec!(0),
+        }];
         let landed = landed_cost(&lines, Money::from_minor(0)).unwrap();
-        assert!(store.record_receipt(&realm(), "r9", "2026-10-01", None, None, Money::from_minor(0), &lines, &landed, now()).is_err());
-        assert!(store.receipts(&realm(), None).unwrap().is_empty(), "the header rolled back with the line");
+        assert!(store
+            .record_receipt(
+                &realm(),
+                "r9",
+                "2026-10-01",
+                None,
+                None,
+                Money::from_minor(0),
+                &lines,
+                &landed,
+                now()
+            )
+            .is_err());
+        assert!(
+            store.receipts(&realm(), None).unwrap().is_empty(),
+            "the header rolled back with the line"
+        );
     }
 }

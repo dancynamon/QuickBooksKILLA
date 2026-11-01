@@ -402,7 +402,7 @@ sums the taxable lines' credits for the quarter as E, and reports `E - C`.
 The variance is the point, not a defect to chase to zero. E comes from what
 was actually marked taxable on each line; C comes from B (the 2200 balance)
 divided by the rate, and B itself is already a rounded figure — every tax
-amount posted was rounded per line (banker's rounding, §9), so summing them
+amount posted was rounded per line (half up since D46, §9), so summing them
 back and dividing by the rate does not, in general, reproduce the exact
 pre-tax subtotal to the cent. A cent or two of variance most quarters is
 therefore expected and uninteresting; what §9 asks Dan to look at is a
@@ -1871,3 +1871,42 @@ migrations follow this line's as 5–8, and its D14/D15 are D44/D45.
   goods accounts, from a bank account or card. From a bank it is a cheque when it has a
   cheque number and cash otherwise; on a card it is a card charge. The payee is optional
   and, when given, must be a vendor on file.
+
+---
+
+## D46 — W17 closed: QBO rounds sales tax half up, and so does the ledger now
+
+31 Oct 2026. Checked against the local replica, no QBO API call
+(`cargo run -p ledger --example w17_tax_rounding -- --replica COPY.db`,
+`ledger::tax_audit`).
+
+- **Method.** Every taxed Invoice, SalesReceipt, CreditMemo, RefundReceipt and
+  Estimate in the replica states its taxable base (`NetAmountTaxable`), its component
+  rates (`TaxPercent`) and the tax charged (`TotalTax`). Base × combined rate was
+  recomputed and rounded both ways. The two rules differ only when the exact product
+  lands on a half cent, so those documents are the evidence.
+- **Result (replica of 23 Oct 2026, Aquamentor realm).** 1,060 documents recomputed.
+  On a half cent: **25 match half up only, 0 match half to even only**, 18 match both
+  (the even neighbour is also the upper one). They span 2014–2026 and eight rates
+  (NJ 6.625%, 5.5%, 6.3%, 6.75%, 7%, 7.5%, 7.75%, 8.25%, 9.5%), on invoices, estimates
+  and a sales receipt. 489 more match both rules off the half cent, which shows the
+  recomputation itself is sound.
+- **What did not count.** 84 documents charged no tax on a taxable base (exempt
+  customers). 444 match neither rule: 389 of them are dated 2012–2017, when NJ was 7%
+  and then 6.875% — the replica's `TaxPercent` is the rate's *current* value, so an
+  old document recomputes at the wrong rate. The other 55 (2018 on) were not chased
+  one by one; a hand-edited tax amount or a since-edited rate are the likely causes,
+  and neither bears on rounding. 18 documents with
+  tax lines on different bases were skipped.
+- **Per document, not per component.** QBO rounds base × combined rate once and splits
+  that total across components so they sum to it. A single component can then look
+  half-to-even (invoice 84395: 0.7% of 19,875.00 = 139.125, charged 139.12, so that
+  1% + 0.7% + 4.3% sum to 1,192.50). `books.rs::sales_tax` already rounds once on the
+  combined rate, which is the right shape.
+- **Change.** `RoundingPolicy::TaxCalculation` is now `MidpointAwayFromZero`. It stays
+  a named policy separate from `LineExtension`. The desktop UI's tax preview and
+  fixture provider follow. Before, a 100.00 NJ invoice taxed 6.62; it is now 6.63, as
+  QBO charges. Without this the §7 nightly diff on 2200 and AR would carry a one-cent
+  variance on roughly one taxed document in 40.
+- D5's "banker's rounding on tax kept as specified" is superseded. `DESIGN.md` §12
+  item 3 and `LEDGER-DESIGN.md` W17 are closed.

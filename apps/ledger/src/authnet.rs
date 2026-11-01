@@ -56,7 +56,6 @@ use ledger_core::{Money, MoneyError};
 
 use crate::books::{self, Book, BooksError};
 use crate::post::{self, PostError, Posting};
-use crate::report::format_money;
 use crate::store::{CommandMeta, Ledger, LedgerError};
 use crate::types::{
     AccountId, Application, ClassId, ContactKind, ContactRef, DocKind, DocLine, LedgerDocument,
@@ -301,15 +300,15 @@ fn payment_document(
                 format!(
                     "Authorize.net sale {} for invoice {number}: nothing left open on it, {} parked unapplied (batch {})",
                     txn.txn_id,
-                    format_money(excess),
+                    Money::display(excess),
                     batch.batch_id
                 )
             } else {
                 format!(
                     "Authorize.net sale {} for invoice {number}: {} applied, {} over its open balance parked unapplied (batch {})",
                     txn.txn_id,
-                    format_money(applied),
-                    format_money(excess),
+                    Money::display(applied),
+                    Money::display(excess),
                     batch.batch_id
                 )
             };

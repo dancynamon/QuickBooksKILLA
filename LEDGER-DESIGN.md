@@ -511,9 +511,12 @@ conversion point, `RoundingPolicy::{LineExtension, TaxCalculation,
 MirroredAmount}` (D8). No fourth policy is added here. `MirroredAmount` is used
 by the importer in §6 and by nothing else.
 
-⚠️ **Dan/CPA to confirm** (W17, engineering to verify first): `DESIGN.md` §12
-item 3 is still open. Tax is rounded half to even, and whether QBO rounds tax
-half up was asserted and never verified. It did not matter while `qbo-local`
+✅ **W17 closed** (`DECISIONS.md` D46): engineering checked the replica. On all
+25 documents whose tax landed on a half cent, QBO charged the half-up amount;
+none matched half to even. `RoundingPolicy::TaxCalculation` now rounds half
+away from zero, once, on base × combined rate. The original concern, kept for
+the record: tax was rounded half to even, and whether QBO rounds tax half up
+was asserted and never verified. It did not matter while `qbo-local`
 only mirrored the tax QBO had already computed. It matters here, because this
 ledger computes tax itself and then diffs against QBO nightly (§7). If QBO
 rounds half up, every taxable invoice with a half cent tax remainder produces a
@@ -1172,7 +1175,7 @@ a fact to verify rather than a policy to choose.
 | W14 | 2 | Account numbering scheme, and whether QBO names are preserved | Joel | Import mapping table |
 | W15 | 3 | The six class list, and cnc/uv appearing in both books | **Decided, Dan, 12 Sep 2026: yes** | Import, and it cannot be backfilled |
 | W16 | 3 | Unclassed import lines take the item default rather than being quarantined | **Decided, Dan, 12 Sep 2026: yes** | Import volume and the quarantine queue |
-| W17 | 4 | QBO's tax rounding mode, banker's versus half up (`DESIGN.md` §12 item 3) | Engineering to verify, then Joel if it diverges | §7 noise floor on 2200 and AR |
+| W17 | 4 | ~~QBO's tax rounding mode, banker's versus half up~~ Closed: half up, verified on the replica (D46) | — | — |
 | W18 | 4 | Imported QBO journal entries accepted as written and flagged | Joel | Import completion |
 | W19 | 5 | A signed off fiscal year gets a second lock a normal reopen cannot lift | Dan | Close screen |
 | W20 | 5 | All seven close checklist items are hard gates | Dan | Close screen |

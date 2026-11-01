@@ -90,14 +90,14 @@ export function effectiveAmount(line) {
   return lineAmount(line.qty, line.rate);
 }
 
-/** `books.rs::sales_tax`'s rounding: half to even on the cent. */
+/** `books.rs::sales_tax`'s rounding: half away from zero on the cent, as QBO rounds (W17). */
 function taxOn(baseCents) {
   const num = baseCents * NJ_RATE_PER_100K;
   const sign = num < 0 ? -1 : 1;
   const abs = Math.abs(num);
   let q = Math.floor(abs / 100000);
   const r = abs % 100000;
-  if (r * 2 > 100000 || (r * 2 === 100000 && q % 2 === 1)) q += 1;
+  if (r * 2 >= 100000) q += 1;
   return sign * q;
 }
 

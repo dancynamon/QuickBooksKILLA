@@ -295,8 +295,8 @@ pub fn invoice_from_sales_order(
     if asked > open {
         return Err(SalesOrderError::Overinvoiced {
             id: sales_order_id.to_string(),
-            open: money_text(open),
-            asked: money_text(asked),
+            open: Money::display(open),
+            asked: Money::display(asked),
         });
     }
     invoice.applications.push(Application {
@@ -305,10 +305,4 @@ pub fn invoice_from_sales_order(
         amount: asked,
     });
     Ok(invoice)
-}
-
-fn money_text(money: Money) -> String {
-    let minor = money.minor();
-    let sign = if minor < 0 { "-" } else { "" };
-    format!("{sign}{}.{:02}", (minor / 100).abs(), (minor % 100).abs())
 }

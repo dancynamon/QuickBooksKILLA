@@ -211,7 +211,7 @@ impl SlimReport {
         ));
         out.push_str(&format!(
             "  unapplied 1200 -> 2300 : {}\n",
-            format_money(self.unapplied_reclass)
+            Money::display(self.unapplied_reclass)
         ));
 
         out.push_str("\nopen documents (saved, never posted)\n");
@@ -804,8 +804,8 @@ fn read_documents(
                             "{} {}: lines and tax add to {}, QBO's total is {}; carried at QBO's total",
                             entity_type.as_str(),
                             entity.qbo_id,
-                            format_money(books::document_total(&doc)?),
-                            format_money(total)
+                            Money::display(books::document_total(&doc)?),
+                            Money::display(total)
                         ));
                         let account = control_account(doc.kind);
                         doc.lines = vec![account_line(1, account, total, "QBO total".into())];
@@ -1237,8 +1237,8 @@ fn plan_open_documents(
                     "Open balance at {as_of} of {} {}: total {}, {} settled in QBO",
                     original.kind.as_str(),
                     original.number.as_deref().unwrap_or("(no number)"),
-                    format_money(total_abs),
-                    format_money(applied),
+                    Money::display(total_abs),
+                    Money::display(applied),
                 ),
             )];
             doc.tax = None;
@@ -1473,7 +1473,7 @@ fn sales_order_document(
                     "{label} line {}: {} open with no item; carried as a description, \
                      re-enter it when invoicing",
                     line.line_no,
-                    format_money(amount)
+                    Money::display(amount)
                 ));
                 LineKind::Description
             }
@@ -1516,7 +1516,7 @@ fn sales_order_document(
                 Some(format!(
                     "{} (open {})",
                     line.description.clone().unwrap_or_default(),
-                    format_money(amount)
+                    Money::display(amount)
                 ))
             } else {
                 line.description.clone()
@@ -1588,7 +1588,7 @@ fn run_checks(
         } else {
             vec![format!(
                 "QBO's trial balance rows net to {} (debit-positive); the plug took it",
-                format_money(qbo_net)
+                Money::display(qbo_net)
             )]
         },
     });
@@ -1601,7 +1601,7 @@ fn run_checks(
         } else {
             vec![format!(
                 "3950 stands at {}: QBO's own opening balance equity, or the plug above",
-                format_money(obe)
+                Money::display(obe)
             )]
         },
     });
@@ -1633,9 +1633,9 @@ fn run_checks(
             } else {
                 vec![format!(
                     "open items {} against {account} {} (difference {})",
-                    format_money(aging_total),
-                    format_money(control),
-                    format_money(aging_total.checked_sub(control)?)
+                    Money::display(aging_total),
+                    Money::display(control),
+                    Money::display(aging_total.checked_sub(control)?)
                 )]
             },
         });
@@ -1715,9 +1715,9 @@ fn run_checks(
             format!(
                 "{}: ledger {} qbo {} delta {}",
                 row.label,
-                format_money(row.ledger_amount),
-                format_money(row.qbo_amount),
-                format_money(row.delta)
+                Money::display(row.ledger_amount),
+                Money::display(row.qbo_amount),
+                Money::display(row.delta)
             )
         })
         .collect::<Vec<_>>();
@@ -1863,7 +1863,7 @@ fn compare_buckets(
         if details.len() < MAX_DETAILS {
             let render = |b: &Buckets| {
                 b.iter()
-                    .map(|m| format_money(*m))
+                    .map(|m| Money::display(*m))
                     .collect::<Vec<_>>()
                     .join(" / ")
             };
@@ -1947,13 +1947,6 @@ fn abs(m: Money) -> Result<Money, MoneyError> {
     } else {
         Ok(m)
     }
-}
-
-fn format_money(amount: Money) -> String {
-    let minor = amount.minor();
-    let sign = if minor < 0 { "-" } else { "" };
-    let abs = minor.unsigned_abs();
-    format!("{sign}{}.{:02}", abs / 100, abs % 100)
 }
 
 fn text(value: &Value, key: &str) -> Option<String> {

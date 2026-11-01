@@ -689,8 +689,7 @@ impl Store {
 
     fn configure(connection: &Connection) -> Result<(), StoreError> {
         // journal_mode returns a row, so it cannot go through execute_batch.
-        let _: String =
-            connection.query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))?;
+        let _: String = connection.query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))?;
         // The desktop app and the sync process open the same file: the app
         // queues writes while sync drains them and mirrors. Waiting briefly on
         // the other's lock beats failing a save with "database is locked".
@@ -768,9 +767,9 @@ impl Store {
     /// so the copy is a single point in time even while sync is writing, and
     /// it refuses to overwrite an existing file.
     pub fn vacuum_into(&self, path: &std::path::Path) -> Result<(), StoreError> {
-        let target = path
-            .to_str()
-            .ok_or_else(|| StoreError::Corrupt(format!("snapshot path is not UTF-8: {}", path.display())))?;
+        let target = path.to_str().ok_or_else(|| {
+            StoreError::Corrupt(format!("snapshot path is not UTF-8: {}", path.display()))
+        })?;
         self.connection.execute("VACUUM INTO ?1", params![target])?;
         Ok(())
     }
@@ -806,7 +805,11 @@ impl Store {
             "SELECT realm_id, display_name, is_write_enabled FROM realms ORDER BY display_name",
         )?;
         let rows = statement.query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, i64>(2)?))
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
         })?;
         let mut out = Vec::new();
         for row in rows {
@@ -826,7 +829,9 @@ impl Store {
             "SELECT qbo_id, COALESCE(fully_qualified_name, name) FROM classes
              WHERE realm_id = ?1 AND is_deleted = 0 ORDER BY 2",
         )?;
-        let rows = statement.query_map(params![realm.as_str()], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        let rows = statement.query_map(params![realm.as_str()], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
@@ -852,7 +857,9 @@ impl Store {
             })?
             .collect::<Result<Vec<_>, _>>()?;
         let count = |sql: &str| -> Result<i64, StoreError> {
-            Ok(self.connection.query_row(sql, params![realm.as_str()], |row| row.get(0))?)
+            Ok(self
+                .connection
+                .query_row(sql, params![realm.as_str()], |row| row.get(0))?)
         };
         Ok(SyncStatus {
             entity_types: types,
@@ -1744,7 +1751,7 @@ pub(crate) fn serialize_money<S>(money: &Money, serializer: S) -> Result<S::Ok, 
 where
     S: serde::Serializer,
 {
-    serializer.serialize_str(&format_money(*money))
+    serializer.serialize_str(&Money::display(*money))
 }
 
 /// The `Option<Money>` counterpart of [`serialize_money`], for balance and
@@ -1757,19 +1764,9 @@ where
     S: serde::Serializer,
 {
     match money {
-        Some(money) => serializer.serialize_str(&format_money(*money)),
+        Some(money) => serializer.serialize_str(&Money::display(*money)),
         None => serializer.serialize_none(),
     }
-}
-
-fn format_money(money: Money) -> String {
-    // `unsigned_abs` rather than `.abs()`: `i64::MIN` has no positive
-    // counterpart (money.rs's own overflow test makes the same point), and
-    // this path must never panic on a value that reached storage safely.
-    let minor = money.minor();
-    let sign = if minor < 0 { "-" } else { "" };
-    let magnitude = minor.unsigned_abs();
-    format!("{sign}{}.{:02}", magnitude / 100, magnitude % 100)
 }
 
 /// Every projected document read goes through this projection and join, so a

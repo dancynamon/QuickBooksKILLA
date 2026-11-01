@@ -82,8 +82,13 @@ fn default_app_keychain_service() -> String {
     APP_KEYCHAIN_SERVICE.to_string()
 }
 
+/// The keychain service realm tokens are filed under. Defined here rather
+/// than read from `crate::keychain`, which exists only on macOS: the config
+/// must parse (and its default be the same) on every platform.
+pub const TOKEN_KEYCHAIN_SERVICE: &str = "bunzbooks-qbo-tokens";
+
 fn default_token_keychain_service() -> String {
-    crate::keychain::DEFAULT_SERVICE.to_string()
+    TOKEN_KEYCHAIN_SERVICE.to_string()
 }
 
 fn default_daily_calls() -> u32 {
@@ -488,10 +493,7 @@ mod tests {
             config.budget.ledger,
             PathBuf::from(".local/call-budget.json")
         );
-        assert_eq!(
-            config.intuit.token_keychain_service,
-            crate::keychain::DEFAULT_SERVICE
-        );
+        assert_eq!(config.intuit.token_keychain_service, TOKEN_KEYCHAIN_SERVICE);
     }
 
     #[test]

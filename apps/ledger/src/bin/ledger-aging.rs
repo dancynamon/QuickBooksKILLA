@@ -15,24 +15,17 @@ use ledger::books::{self, AgingRow, Book};
 use ledger::store::Ledger;
 use ledger_core::Money;
 
-fn money(amount: Money) -> String {
-    let minor = amount.minor();
-    let sign = if minor < 0 { "-" } else { "" };
-    let abs = minor.unsigned_abs();
-    format!("{sign}{}.{:02}", abs / 100, abs % 100)
-}
-
 fn row(r: &AgingRow) -> String {
     format!(
         "{},{},{},{},{},{},{},{}\n",
         r.contact_id,
         r.contact_name.replace(',', " "),
-        money(r.current),
-        money(r.days_1_30),
-        money(r.days_31_60),
-        money(r.days_61_90),
-        money(r.over_90),
-        money(r.total)
+        Money::display(r.current),
+        Money::display(r.days_1_30),
+        Money::display(r.days_31_60),
+        Money::display(r.days_61_90),
+        Money::display(r.over_90),
+        Money::display(r.total)
     )
 }
 
@@ -63,7 +56,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!(
             "{tag} {as_of}: {} contacts, total {}",
             aging.rows.len(),
-            money(aging.totals.total)
+            Money::display(aging.totals.total)
         );
     }
     Ok(())

@@ -44,31 +44,72 @@ fn timestamp(raw: &str) -> Result<DateTime<Utc>, StoreError> {
 }
 
 type RawRecord = (
-    String, String, String, String, String, String, Option<String>, String, String, i64,
-    Option<String>, Option<String>, String, String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    Option<String>,
+    String,
+    String,
+    i64,
+    Option<String>,
+    Option<String>,
+    String,
+    String,
 );
 
 fn raw_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawRecord> {
     Ok((
-        row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?,
-        row.get(7)?, row.get(8)?, row.get(9)?, row.get(10)?, row.get(11)?, row.get(12)?, row.get(13)?,
+        row.get(0)?,
+        row.get(1)?,
+        row.get(2)?,
+        row.get(3)?,
+        row.get(4)?,
+        row.get(5)?,
+        row.get(6)?,
+        row.get(7)?,
+        row.get(8)?,
+        row.get(9)?,
+        row.get(10)?,
+        row.get(11)?,
+        row.get(12)?,
+        row.get(13)?,
     ))
 }
 
 fn record_from(raw: RawRecord) -> Result<OutboxRecord, StoreError> {
-    let (id, realm, entity_type, operation, payload, local_id, base, request_id, state, attempts, depends_on, last_error, created, updated) = raw;
+    let (
+        id,
+        realm,
+        entity_type,
+        operation,
+        payload,
+        local_id,
+        base,
+        request_id,
+        state,
+        attempts,
+        depends_on,
+        last_error,
+        created,
+        updated,
+    ) = raw;
     let uuid = |s: &str| Uuid::parse_str(s).map_err(|_| corrupt("uuid", s));
     Ok(OutboxRecord {
         id: uuid(&id)?,
         realm_id: RealmId::parse(realm.clone()).map_err(|_| corrupt("realm", &realm))?,
-        entity_type: EntityType::parse(&entity_type).map_err(|_| corrupt("entity type", &entity_type))?,
+        entity_type: EntityType::parse(&entity_type)
+            .map_err(|_| corrupt("entity type", &entity_type))?,
         operation: Operation::parse(&operation).ok_or_else(|| corrupt("operation", &operation))?,
         payload_json: serde_json::from_str(&payload)?,
         local_entity_id: local_id,
         base_sync_token: base,
         request_id: uuid(&request_id)?,
         state: OutboxState::parse(&state).ok_or_else(|| corrupt("state", &state))?,
-        attempts: u32::try_from(attempts).map_err(|_| corrupt("attempts", &attempts.to_string()))?,
+        attempts: u32::try_from(attempts)
+            .map_err(|_| corrupt("attempts", &attempts.to_string()))?,
         depends_on: depends_on.as_deref().map(uuid).transpose()?,
         last_error,
         created_at: timestamp(&created)?,
@@ -84,16 +125,26 @@ impl Store {
     pub fn realm_environment(&self, realm: &RealmId) -> Result<Environment, StoreError> {
         let raw: Option<String> = self
             .connection
-            .query_row("SELECT environment FROM realms WHERE realm_id = ?1", params![realm.as_str()], |row| row.get(0))
+            .query_row(
+                "SELECT environment FROM realms WHERE realm_id = ?1",
+                params![realm.as_str()],
+                |row| row.get(0),
+            )
             .optional()?;
         match raw.as_deref() {
             Some("sandbox") => Ok(Environment::Sandbox),
             Some(_) => Ok(Environment::Production),
-            None => Err(StoreError::Corrupt(format!("realm {realm} is not registered"))),
+            None => Err(StoreError::Corrupt(format!(
+                "realm {realm} is not registered"
+            ))),
         }
     }
 
-    pub fn set_realm_environment(&self, realm: &RealmId, environment: Environment) -> Result<(), StoreError> {
+    pub fn set_realm_environment(
+        &self,
+        realm: &RealmId,
+        environment: Environment,
+    ) -> Result<(), StoreError> {
         self.connection.execute(
             "UPDATE realms SET environment = ?2 WHERE realm_id = ?1",
             params![realm.as_str(), environment.as_str()],
@@ -155,7 +206,10 @@ impl Store {
             ],
         )?;
         if changed == 0 {
-            return Err(StoreError::Corrupt(format!("outbox record {} not found", record.id)));
+            return Err(StoreError::Corrupt(format!(
+                "outbox record {} not found",
+                record.id
+            )));
         }
         Ok(())
     }
@@ -163,13 +217,21 @@ impl Store {
     pub fn outbox_record(&self, id: Uuid) -> Result<Option<OutboxRecord>, StoreError> {
         let raw = self
             .connection
-            .query_row(&format!("SELECT {RECORD_COLUMNS} FROM outbox WHERE id = ?1"), params![id.to_string()], raw_record)
+            .query_row(
+                &format!("SELECT {RECORD_COLUMNS} FROM outbox WHERE id = ?1"),
+                params![id.to_string()],
+                raw_record,
+            )
             .optional()?;
         raw.map(record_from).transpose()
     }
 
     /// Records of a realm in the given states, oldest first (UUIDv7 order).
-    pub fn outbox_records(&self, realm: &RealmId, states: &[OutboxState]) -> Result<Vec<OutboxRecord>, StoreError> {
+    pub fn outbox_records(
+        &self,
+        realm: &RealmId,
+        states: &[OutboxState],
+    ) -> Result<Vec<OutboxRecord>, StoreError> {
         let mut statement = self.connection.prepare(&format!(
             "SELECT {RECORD_COLUMNS} FROM outbox WHERE realm_id = ?1 ORDER BY id"
         ))?;
@@ -186,9 +248,21 @@ impl Store {
 
     /// Records about one entity that have not reached a terminal state —
     /// what the document view shows as "queued" or "needs attention".
-    pub fn open_writes_for(&self, realm: &RealmId, local_entity_id: &str) -> Result<Vec<OutboxRecord>, StoreError> {
+    pub fn open_writes_for(
+        &self,
+        realm: &RealmId,
+        local_entity_id: &str,
+    ) -> Result<Vec<OutboxRecord>, StoreError> {
         Ok(self
-            .outbox_records(realm, &[OutboxState::Pending, OutboxState::InFlight, OutboxState::Conflicted, OutboxState::Rejected])?
+            .outbox_records(
+                realm,
+                &[
+                    OutboxState::Pending,
+                    OutboxState::InFlight,
+                    OutboxState::Conflicted,
+                    OutboxState::Rejected,
+                ],
+            )?
             .into_iter()
             .filter(|r| r.local_entity_id == local_entity_id)
             .collect())
@@ -206,7 +280,13 @@ impl Store {
             "INSERT INTO local_id_map (realm_id, local_entity_id, entity_type, qbo_id, mapped_at)
              VALUES (?1, ?2, ?3, ?4, ?5)
              ON CONFLICT(realm_id, local_entity_id) DO NOTHING",
-            params![realm.as_str(), local_entity_id, entity_type.as_str(), qbo_id, now.to_rfc3339()],
+            params![
+                realm.as_str(),
+                local_entity_id,
+                entity_type.as_str(),
+                qbo_id,
+                now.to_rfc3339()
+            ],
         )?;
         Ok(())
     }
@@ -215,7 +295,9 @@ impl Store {
         let mut statement = self
             .connection
             .prepare("SELECT local_entity_id, qbo_id FROM local_id_map WHERE realm_id = ?1")?;
-        let rows = statement.query_map(params![realm.as_str()], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?;
+        let rows = statement.query_map(params![realm.as_str()], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
         let mut map = HashMap::new();
         for row in rows {
             let (local, qbo) = row?;
@@ -248,45 +330,73 @@ impl Store {
              ORDER BY d.txn_date, d.qbo_id",
         )?;
         let rows = statement.query_map(params![realm.as_str()], |row| {
-            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?))
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+                row.get(5)?,
+            ))
         })?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
     /// Active accounts an expense line can be charged to: `(id, name, type)`.
-    pub fn expense_accounts(&self, realm: &RealmId) -> Result<Vec<(String, String, String)>, StoreError> {
+    pub fn expense_accounts(
+        &self,
+        realm: &RealmId,
+    ) -> Result<Vec<(String, String, String)>, StoreError> {
         let mut statement = self.connection.prepare(
             "SELECT qbo_id, name, account_type FROM accounts
              WHERE realm_id = ?1 AND is_active = 1 AND is_deleted = 0
                AND (account_type IN ('Expense', 'Other Expense', 'Cost of Goods Sold') OR classification = 'Expense')
              ORDER BY name COLLATE NOCASE",
         )?;
-        let rows = statement.query_map(params![realm.as_str()], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
+        let rows = statement.query_map(params![realm.as_str()], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
     /// Active bank and credit card accounts, by name: `(id, name, type)`.
-    pub fn payment_accounts(&self, realm: &RealmId) -> Result<Vec<(String, String, String)>, StoreError> {
+    pub fn payment_accounts(
+        &self,
+        realm: &RealmId,
+    ) -> Result<Vec<(String, String, String)>, StoreError> {
         let mut statement = self.connection.prepare(
             "SELECT qbo_id, name, account_type FROM accounts
              WHERE realm_id = ?1 AND is_active = 1 AND is_deleted = 0 AND account_type IN ('Bank', 'Credit Card')
              ORDER BY account_type, name COLLATE NOCASE",
         )?;
-        let rows = statement.query_map(params![realm.as_str()], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
+        let rows = statement.query_map(params![realm.as_str()], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
-    pub fn contacts(&self, realm: &RealmId, contact_type: crate::domain::ContactType) -> Result<Vec<(String, String, Option<String>)>, StoreError> {
+    pub fn contacts(
+        &self,
+        realm: &RealmId,
+        contact_type: crate::domain::ContactType,
+    ) -> Result<Vec<(String, String, Option<String>)>, StoreError> {
         let mut statement = self.connection.prepare(
             "SELECT qbo_id, display_name, company_name FROM contacts
              WHERE realm_id = ?1 AND contact_type = ?2 AND is_deleted = 0 AND is_active = 1
              ORDER BY display_name COLLATE NOCASE",
         )?;
-        let rows = statement.query_map(params![realm.as_str(), contact_type.as_str()], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
+        let rows = statement.query_map(params![realm.as_str(), contact_type.as_str()], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
-    pub fn contact_name(&self, realm: &RealmId, contact_type: crate::domain::ContactType, qbo_id: &str) -> Result<Option<String>, StoreError> {
+    pub fn contact_name(
+        &self,
+        realm: &RealmId,
+        contact_type: crate::domain::ContactType,
+        qbo_id: &str,
+    ) -> Result<Option<String>, StoreError> {
         Ok(self
             .connection
             .query_row(
@@ -309,9 +419,21 @@ impl Store {
         let rows = statement.query_map(params![realm.as_str()], |row| row.get::<_, String>(0))?;
         for row in rows {
             let value: serde_json::Value = serde_json::from_str(&row?)?;
-            for field in value.get("CustomField").and_then(|f| f.as_array()).into_iter().flatten() {
-                let name = field.get("Name").and_then(|n| n.as_str()).unwrap_or_default();
-                let normalized: String = name.chars().filter(|c| c.is_alphanumeric()).collect::<String>().to_lowercase();
+            for field in value
+                .get("CustomField")
+                .and_then(|f| f.as_array())
+                .into_iter()
+                .flatten()
+            {
+                let name = field
+                    .get("Name")
+                    .and_then(|n| n.as_str())
+                    .unwrap_or_default();
+                let normalized: String = name
+                    .chars()
+                    .filter(|c| c.is_alphanumeric())
+                    .collect::<String>()
+                    .to_lowercase();
                 if normalized == "ponumber" || normalized == "purchaseordernumber" {
                     if let Some(id) = field.get("DefinitionId").and_then(|d| d.as_str()) {
                         return Ok(Some(id.to_string()));
@@ -323,7 +445,11 @@ impl Store {
     }
 
     /// The QBO id a local id became, if it has.
-    pub fn resolve_local_id(&self, realm: &RealmId, local_entity_id: &str) -> Result<Option<String>, StoreError> {
+    pub fn resolve_local_id(
+        &self,
+        realm: &RealmId,
+        local_entity_id: &str,
+    ) -> Result<Option<String>, StoreError> {
         Ok(self
             .connection
             .query_row(
@@ -379,7 +505,10 @@ mod tests {
         assert_eq!(loaded.request_id, original.request_id);
         assert_eq!(loaded.payload_json, original.payload_json);
         assert_eq!(loaded.state, OutboxState::Pending);
-        assert!(store.enqueue(&original).is_err(), "a record is written once");
+        assert!(
+            store.enqueue(&original).is_err(),
+            "a record is written once"
+        );
     }
 
     #[test]
@@ -389,25 +518,52 @@ mod tests {
         store.enqueue(&r).unwrap();
         r.begin_attempt(true, now()).unwrap();
         store.save_outbox_state(&r).unwrap();
-        assert_eq!(store.outbox_records(&realm(), &[OutboxState::InFlight]).unwrap().len(), 1);
-        assert!(store.outbox_records(&realm(), &[OutboxState::Pending]).unwrap().is_empty());
+        assert_eq!(
+            store
+                .outbox_records(&realm(), &[OutboxState::InFlight])
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(store
+            .outbox_records(&realm(), &[OutboxState::Pending])
+            .unwrap()
+            .is_empty());
         assert_eq!(store.open_writes_for(&realm(), "local:1").unwrap().len(), 1);
     }
 
     #[test]
     fn id_mappings_are_first_writer_wins() {
         let store = store();
-        store.record_id_mapping(&realm(), "local:1", EntityType::Customer, "77", now()).unwrap();
-        store.record_id_mapping(&realm(), "local:1", EntityType::Customer, "99", now()).unwrap();
-        assert_eq!(store.resolve_local_id(&realm(), "local:1").unwrap().as_deref(), Some("77"));
+        store
+            .record_id_mapping(&realm(), "local:1", EntityType::Customer, "77", now())
+            .unwrap();
+        store
+            .record_id_mapping(&realm(), "local:1", EntityType::Customer, "99", now())
+            .unwrap();
+        assert_eq!(
+            store
+                .resolve_local_id(&realm(), "local:1")
+                .unwrap()
+                .as_deref(),
+            Some("77")
+        );
         assert_eq!(store.id_map(&realm()).unwrap().len(), 1);
     }
 
     #[test]
     fn realms_default_to_production() {
         let store = store();
-        assert_eq!(store.realm_environment(&realm()).unwrap(), Environment::Production);
-        store.set_realm_environment(&realm(), Environment::Sandbox).unwrap();
-        assert_eq!(store.realm_environment(&realm()).unwrap(), Environment::Sandbox);
+        assert_eq!(
+            store.realm_environment(&realm()).unwrap(),
+            Environment::Production
+        );
+        store
+            .set_realm_environment(&realm(), Environment::Sandbox)
+            .unwrap();
+        assert_eq!(
+            store.realm_environment(&realm()).unwrap(),
+            Environment::Sandbox
+        );
     }
 }

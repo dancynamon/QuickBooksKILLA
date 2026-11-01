@@ -197,10 +197,7 @@ enum Command {
     },
     /// `demo`, `serve`, `writes`: offline commands that never reach Intuit,
     /// handed their raw arguments.
-    Offline {
-        name: String,
-        args: Vec<String>,
-    },
+    Offline { name: String, args: Vec<String> },
     Snapshots {
         realm: RealmId,
         from_year: i32,
@@ -1646,8 +1643,8 @@ fn run_sales_orders(db: &Path, realm: &RealmId, all: bool) -> Result<(), Command
             order.doc_number.as_deref().unwrap_or("-"),
             order.txn_date,
             order.qbo_id,
-            money_text(order.total),
-            money_text(order.open_amount),
+            ledger_core::Money::display(order.total),
+            ledger_core::Money::display(order.open_amount),
             order.invoice_status.as_deref().unwrap_or("-"),
             order.customer_id.as_deref().unwrap_or("-"),
         );
@@ -1662,12 +1659,6 @@ fn run_sales_orders(db: &Path, realm: &RealmId, all: bool) -> Result<(), Command
         }
     );
     Ok(())
-}
-
-fn money_text(money: ledger_core::Money) -> String {
-    let minor = money.minor();
-    let sign = if minor < 0 { "-" } else { "" };
-    format!("{sign}{}.{:02}", (minor / 100).abs(), (minor % 100).abs())
 }
 
 // -- slice ------------------------------------------------------------------
@@ -2003,7 +1994,9 @@ mod offline {
     /// neither flag, reports the current state and what enabling would need.
     pub fn writes(args: &[String]) -> Result<(), Error> {
         let db = PathBuf::from(value(args, "--db").ok_or("--db is required")?);
-        let realm = qbo_local::domain::RealmId::parse(value(args, "--realm").ok_or("--realm is required")?)?;
+        let realm = qbo_local::domain::RealmId::parse(
+            value(args, "--realm").ok_or("--realm is required")?,
+        )?;
         let store = Store::open(&db)?;
         if !store.realms()?.iter().any(|r| r.realm_id == realm) {
             return Err(format!("{realm} is not in this replica").into());
@@ -2017,11 +2010,18 @@ mod offline {
         if has("--enable") {
             qbo_local::writes::check_enable(&store, &realm, has("--confirm"), Utc::now())?;
             store.set_write_enabled(&realm, true)?;
-            println!("writes on for {realm} ({})", store.realm_environment(&realm)?.as_str());
+            println!(
+                "writes on for {realm} ({})",
+                store.realm_environment(&realm)?.as_str()
+            );
             return Ok(());
         }
         let on = store.is_write_enabled(&realm)?;
-        println!("{realm}: {} company, writes {}", store.realm_environment(&realm)?.as_str(), if on { "on" } else { "off" });
+        println!(
+            "{realm}: {} company, writes {}",
+            store.realm_environment(&realm)?.as_str(),
+            if on { "on" } else { "off" }
+        );
         if !on {
             match qbo_local::writes::check_enable(&store, &realm, true, Utc::now()) {
                 Ok(()) => println!("can be enabled now with --enable --confirm"),
@@ -2051,7 +2051,11 @@ mod offline {
                 return Err("--demo-writes needs a replica written by `qbo-local demo`".into());
             }
             store.set_write_enabled(&realm, true)?;
-            Some(qbo_local::serve::DemoQbo::new(&store, &realm, chrono::Duration::seconds(3))?)
+            Some(qbo_local::serve::DemoQbo::new(
+                &store,
+                &realm,
+                chrono::Duration::seconds(3),
+            )?)
         } else {
             None
         };
@@ -2059,13 +2063,16 @@ mod offline {
         println!(
             "replica open in {:.0} ms; serving http://127.0.0.1:{port}/{}",
             started.elapsed().as_secs_f64() * 1000.0,
-            if demo_qbo.is_some() { " (demo writes on)" } else { "" }
+            if demo_qbo.is_some() {
+                " (demo writes on)"
+            } else {
+                ""
+            }
         );
         qbo_local::serve::run(listener, &store, &ui, demo_qbo.as_mut())?;
         Ok(())
     }
 }
-
 
 /// One line per tick: timestamp, path per entity summarised, next delay, and
 /// the snapshot path when one was taken.

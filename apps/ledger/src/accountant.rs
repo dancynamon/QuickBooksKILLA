@@ -267,13 +267,6 @@ pub(crate) fn csv_field(raw: &str) -> String {
     }
 }
 
-pub(crate) fn csv_money(amount: Money) -> String {
-    let minor = amount.minor();
-    let sign = if minor < 0 { "-" } else { "" };
-    let abs = minor.unsigned_abs();
-    format!("{sign}{}.{:02}", abs / 100, abs % 100)
-}
-
 impl ToCsv for TrialBalance {
     fn to_csv(&self) -> String {
         let mut out =
@@ -284,15 +277,15 @@ impl ToCsv for TrialBalance {
                 csv_field(&row.number),
                 csv_field(&row.name),
                 row.classification.as_str(),
-                csv_money(row.debit),
-                csv_money(row.credit),
-                csv_money(row.balance),
+                Money::display(row.debit),
+                Money::display(row.credit),
+                Money::display(row.balance),
             ));
         }
         out.push_str(&format!(
             "TOTAL,,,{},{},\n",
-            csv_money(self.total_debits),
-            csv_money(self.total_credits),
+            Money::display(self.total_debits),
+            Money::display(self.total_credits),
         ));
         out
     }
@@ -310,17 +303,17 @@ impl ToCsv for Pnl {
                 out.push_str(&format!(
                     "{section},{},{}\n",
                     csv_field(&account.0),
-                    csv_money(*amount)
+                    Money::display(*amount)
                 ));
             }
         }
         out.push_str(&format!(
             "summary,gross_margin,{}\n",
-            csv_money(self.gross_margin)
+            Money::display(self.gross_margin)
         ));
         out.push_str(&format!(
             "summary,net_income,{}\n",
-            csv_money(self.net_income)
+            Money::display(self.net_income)
         ));
         out
     }
@@ -339,13 +332,13 @@ impl ToCsv for BalanceSheet {
                     "{section},{},{},{}\n",
                     row.account_id.as_ref().map(|a| a.0.as_str()).unwrap_or(""),
                     csv_field(&row.name),
-                    csv_money(row.balance),
+                    Money::display(row.balance),
                 ));
             }
         }
         out.push_str(&format!(
             "summary,,total_liabilities_and_equity,{}\n",
-            csv_money(self.total_liabilities_and_equity),
+            Money::display(self.total_liabilities_and_equity),
         ));
         out
     }
@@ -373,9 +366,9 @@ impl ToCsv for GlDetail {
                     line.entity.as_ref().map(|e| e.id.as_str()).unwrap_or(""),
                     line.is_flagged,
                     line.reversal_of.as_deref().unwrap_or(""),
-                    csv_money(line.debit),
-                    csv_money(line.credit),
-                    csv_money(line.running_balance),
+                    Money::display(line.debit),
+                    Money::display(line.credit),
+                    Money::display(line.running_balance),
                 ));
             }
         }

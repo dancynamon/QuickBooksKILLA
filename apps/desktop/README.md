@@ -224,7 +224,7 @@ different Node version — the directory form may simply work there.)
   `js/data/ledger/tauri.js`'s `invoke("ledger_query", ...)` calls, all
   twenty-eight tools.
 - `test/ledger-entry.test.js` — the entry form's pure half: quantity ×
-  rate, the tax preview's half-to-even rounding and exemption, the exact
+  rate, the tax preview's half-up rounding and exemption, the exact
   `document` each kind sends, and the drafts it refuses; a saved document
   read back into a draft and sent back for `update_document`; which open
   documents a credit can apply to; and the editors'

@@ -14,7 +14,10 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use super::{parse, realm, to_json, ApiError, DocumentDto, LineDto};
-use crate::compose::{self, BillPaymentDraft, DepositDraft, DepositItem, ExpenseDraft, DocumentDraft, DraftLine, OpenInvoice, PayFrom, PaymentDraft, PaymentPlan};
+use crate::compose::{
+    self, BillPaymentDraft, DepositDraft, DepositItem, DocumentDraft, DraftLine, ExpenseDraft,
+    OpenInvoice, PayFrom, PaymentDraft, PaymentPlan,
+};
 use crate::domain::{ContactType, DocumentType, EntityType, RealmId};
 use crate::outbox::{Operation, OutboxRecord, OutboxState};
 use crate::store::Store;
@@ -55,7 +58,12 @@ impl From<WriteError> for ApiError {
     }
 }
 
-const OPEN: &[OutboxState] = &[OutboxState::Pending, OutboxState::InFlight, OutboxState::Conflicted, OutboxState::Rejected];
+const OPEN: &[OutboxState] = &[
+    OutboxState::Pending,
+    OutboxState::InFlight,
+    OutboxState::Conflicted,
+    OutboxState::Rejected,
+];
 
 /// How a queued write is described to a person.
 fn write_status(state: OutboxState) -> &'static str {
@@ -69,16 +77,37 @@ fn write_status(state: OutboxState) -> &'static str {
 }
 
 /// An amount QBO will read from the payload, as minor units. The payload's
-/// amounts were written by `compose` from `Money`, so they have two places.
-fn minor_of(value: &Value) -> i64 {
-    Decimal::from_str(&value.to_string())
-        .ok()
-        .and_then(|d| (d * Decimal::from(100)).round().to_string().parse().ok())
-        .unwrap_or(0)
+/// amounts were written by `compose` from `Money`, so they have two places;
+/// anything else — not a number, more than two places, out of range — is
+/// refused rather than read as zero, which would understate a total.
+fn minor_of(value: &Value) -> Result<i64, ApiError> {
+    let bad = || ApiError::BadArguments(format!("amount {value} is not a two-place decimal"));
+    let decimal = match value {
+        Value::Number(number) => Decimal::from_str(&number.to_string()),
+        Value::String(text) => Decimal::from_str(text.trim()),
+        _ => return Err(bad()),
+    }
+    .map_err(|_| bad())?;
+    if decimal.scale() > 2 {
+        return Err(bad());
+    }
+    decimal
+        .checked_mul(Decimal::ONE_HUNDRED)
+        .and_then(|minor| rust_decimal::prelude::ToPrimitive::to_i64(&minor))
+        .ok_or_else(bad)
+}
+
+/// [`minor_of`] on `key`, where an absent amount is zero (a description
+/// line carries none) but a present, unreadable one is an error.
+fn amount_at(value: &Value, key: &str) -> Result<i64, ApiError> {
+    Ok(value.get(key).map(minor_of).transpose()?.unwrap_or(0))
 }
 
 fn text(value: &Value, pointer: &str) -> Option<String> {
-    value.pointer(pointer).and_then(|v| v.as_str()).map(str::to_string)
+    value
+        .pointer(pointer)
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
 }
 
 /// Name for a customer reference that may be a local id still in the outbox.
@@ -95,14 +124,29 @@ fn customer_name(store: &Store, realm: &RealmId, id: &str) -> Result<Option<Stri
 
 /// A queued create, shaped like a mirrored document so a register can list it
 /// next to the real ones, marked as what it is.
-pub(super) fn pending_document(store: &Store, realm: &RealmId, record: &OutboxRecord) -> Result<Option<(DocumentDto, Vec<LineDto>)>, ApiError> {
+pub(super) fn pending_document(
+    store: &Store,
+    realm: &RealmId,
+    record: &OutboxRecord,
+) -> Result<Option<(DocumentDto, Vec<LineDto>)>, ApiError> {
     let Some(doc_type) = record.entity_type.as_document() else {
         return Ok(None);
     };
     let payload = &record.payload_json;
     let purchase = crate::compose::is_purchase(doc_type);
-    let contact_type = if purchase { ContactType::Vendor } else { ContactType::Customer };
-    let contact_id = text(payload, if purchase { "/VendorRef/value" } else { "/CustomerRef/value" });
+    let contact_type = if purchase {
+        ContactType::Vendor
+    } else {
+        ContactType::Customer
+    };
+    let contact_id = text(
+        payload,
+        if purchase {
+            "/VendorRef/value"
+        } else {
+            "/CustomerRef/value"
+        },
+    );
     let contact_name = match &contact_id {
         Some(id) if purchase => store.contact_name(realm, ContactType::Vendor, id)?,
         Some(id) => customer_name(store, realm, id)?,
@@ -115,26 +159,43 @@ pub(super) fn pending_document(store: &Store, realm: &RealmId, record: &OutboxRe
         return Ok(Some(pending_deposit(store, realm, record)?));
     }
     if matches!(doc_type, DocumentType::Payment | DocumentType::BillPayment) {
-        return Ok(Some(pending_payment(store, realm, record, contact_id, contact_name)?));
+        return Ok(Some(pending_payment(
+            store,
+            realm,
+            record,
+            contact_id,
+            contact_name,
+        )?));
     }
-    let detail_type = if purchase { "ItemBasedExpenseLineDetail" } else { "SalesItemLineDetail" };
+    let detail_type = if purchase {
+        "ItemBasedExpenseLineDetail"
+    } else {
+        "SalesItemLineDetail"
+    };
     let lines: Vec<LineDto> = payload
         .get("Line")
         .and_then(|l| l.as_array())
         .into_iter()
         .flatten()
         .enumerate()
-        .map(|(i, line)| LineDto {
-            line_no: i as i64 + 1,
-            item_id: text(line, &format!("/{detail_type}/ItemRef/value")),
-            description: text(line, "/Description"),
-            qty: line.pointer(&format!("/{detail_type}/Qty")).map(|v| v.to_string()),
-            unit_price: line.pointer(&format!("/{detail_type}/UnitPrice")).map(|v| v.to_string()),
-            amount_minor: line.get("Amount").map(minor_of).unwrap_or(0),
-            class_id: text(line, &format!("/{detail_type}/ClassRef/value")),
-            taxable: text(line, &format!("/{detail_type}/TaxCodeRef/value")).as_deref() == Some("TAX"),
+        .map(|(i, line)| -> Result<LineDto, ApiError> {
+            Ok(LineDto {
+                line_no: i as i64 + 1,
+                item_id: text(line, &format!("/{detail_type}/ItemRef/value")),
+                description: text(line, "/Description"),
+                qty: line
+                    .pointer(&format!("/{detail_type}/Qty"))
+                    .map(|v| v.to_string()),
+                unit_price: line
+                    .pointer(&format!("/{detail_type}/UnitPrice"))
+                    .map(|v| v.to_string()),
+                amount_minor: amount_at(line, "Amount")?,
+                class_id: text(line, &format!("/{detail_type}/ClassRef/value")),
+                taxable: text(line, &format!("/{detail_type}/TaxCodeRef/value")).as_deref()
+                    == Some("TAX"),
+            })
         })
-        .collect();
+        .collect::<Result<_, _>>()?;
     let document = DocumentDto {
         qbo_id: record.local_entity_id.clone(),
         doc_type,
@@ -170,10 +231,19 @@ fn pending_payment(
     let paying_bills = record.entity_type == EntityType::BillPayment;
     let noun = if paying_bills { "bill" } else { "invoice" };
     let mut lines = Vec::new();
-    for (i, line) in payload.get("Line").and_then(|l| l.as_array()).into_iter().flatten().enumerate() {
+    for (i, line) in payload
+        .get("Line")
+        .and_then(|l| l.as_array())
+        .into_iter()
+        .flatten()
+        .enumerate()
+    {
         let invoice = text(line, "/LinkedTxn/0/TxnId");
         let number = match &invoice {
-            Some(id) => store.get_document(realm, id)?.and_then(|d| d.doc_number).unwrap_or_else(|| id.clone()),
+            Some(id) => store
+                .get_document(realm, id)?
+                .and_then(|d| d.doc_number)
+                .unwrap_or_else(|| id.clone()),
             None => String::new(),
         };
         lines.push(LineDto {
@@ -182,21 +252,29 @@ fn pending_payment(
             description: Some(format!("Applied to {noun} {number}")),
             qty: None,
             unit_price: None,
-            amount_minor: line.get("Amount").map(minor_of).unwrap_or(0),
+            amount_minor: amount_at(line, "Amount")?,
             class_id: None,
             taxable: false,
         });
     }
-    let total = payload.get("TotalAmt").map(minor_of).unwrap_or(0);
+    let total = amount_at(payload, "TotalAmt")?;
     let applied: i64 = lines.iter().map(|l| l.amount_minor).sum();
     let document = DocumentDto {
         qbo_id: record.local_entity_id.clone(),
-        doc_type: if paying_bills { DocumentType::BillPayment } else { DocumentType::Payment },
+        doc_type: if paying_bills {
+            DocumentType::BillPayment
+        } else {
+            DocumentType::Payment
+        },
         doc_number: text(payload, "/PaymentRefNum").or_else(|| text(payload, "/DocNumber")),
         txn_date: text(payload, "/TxnDate").unwrap_or_default(),
         due_date: None,
         contact_id,
-        contact_type: Some(if paying_bills { ContactType::Vendor } else { ContactType::Customer }),
+        contact_type: Some(if paying_bills {
+            ContactType::Vendor
+        } else {
+            ContactType::Customer
+        }),
         contact_name,
         class_id: None,
         total_minor: total,
@@ -212,7 +290,11 @@ fn pending_payment(
 }
 
 /// A queued expense: its lines named by the account they are charged to.
-fn pending_expense(store: &Store, realm: &RealmId, record: &OutboxRecord) -> Result<(DocumentDto, Vec<LineDto>), ApiError> {
+fn pending_expense(
+    store: &Store,
+    realm: &RealmId,
+    record: &OutboxRecord,
+) -> Result<(DocumentDto, Vec<LineDto>), ApiError> {
     let payload = &record.payload_json;
     let accounts = store.expense_accounts(realm)?;
     let lines: Vec<LineDto> = payload
@@ -221,10 +303,15 @@ fn pending_expense(store: &Store, realm: &RealmId, record: &OutboxRecord) -> Res
         .into_iter()
         .flatten()
         .enumerate()
-        .map(|(i, line)| {
-            let account = text(line, "/AccountBasedExpenseLineDetail/AccountRef/value").unwrap_or_default();
-            let account_name = accounts.iter().find(|a| a.0 == account).map(|a| a.1.clone()).unwrap_or(account);
-            LineDto {
+        .map(|(i, line)| -> Result<LineDto, ApiError> {
+            let account =
+                text(line, "/AccountBasedExpenseLineDetail/AccountRef/value").unwrap_or_default();
+            let account_name = accounts
+                .iter()
+                .find(|a| a.0 == account)
+                .map(|a| a.1.clone())
+                .unwrap_or(account);
+            Ok(LineDto {
                 line_no: i as i64 + 1,
                 item_id: None,
                 description: Some(match text(line, "/Description") {
@@ -233,12 +320,12 @@ fn pending_expense(store: &Store, realm: &RealmId, record: &OutboxRecord) -> Res
                 }),
                 qty: None,
                 unit_price: None,
-                amount_minor: line.get("Amount").map(minor_of).unwrap_or(0),
+                amount_minor: amount_at(line, "Amount")?,
                 class_id: text(line, "/AccountBasedExpenseLineDetail/ClassRef/value"),
                 taxable: false,
-            }
+            })
         })
-        .collect();
+        .collect::<Result<_, _>>()?;
     let contact_id = text(payload, "/EntityRef/value");
     let contact_name = match &contact_id {
         Some(id) => store.contact_name(realm, ContactType::Vendor, id)?,
@@ -266,12 +353,25 @@ fn pending_expense(store: &Store, realm: &RealmId, record: &OutboxRecord) -> Res
 }
 
 /// A queued deposit: one line per payment it banks.
-fn pending_deposit(store: &Store, realm: &RealmId, record: &OutboxRecord) -> Result<(DocumentDto, Vec<LineDto>), ApiError> {
+fn pending_deposit(
+    store: &Store,
+    realm: &RealmId,
+    record: &OutboxRecord,
+) -> Result<(DocumentDto, Vec<LineDto>), ApiError> {
     let payload = &record.payload_json;
     let mut lines = Vec::new();
-    for (i, line) in payload.get("Line").and_then(|l| l.as_array()).into_iter().flatten().enumerate() {
+    for (i, line) in payload
+        .get("Line")
+        .and_then(|l| l.as_array())
+        .into_iter()
+        .flatten()
+        .enumerate()
+    {
         let from = match text(line, "/LinkedTxn/0/TxnId") {
-            Some(id) => store.get_document(realm, &id)?.and_then(|d| d.contact_name).unwrap_or(id),
+            Some(id) => store
+                .get_document(realm, &id)?
+                .and_then(|d| d.contact_name)
+                .unwrap_or(id),
             None => String::new(),
         };
         lines.push(LineDto {
@@ -280,7 +380,7 @@ fn pending_deposit(store: &Store, realm: &RealmId, record: &OutboxRecord) -> Res
             description: Some(format!("Payment from {from}")),
             qty: None,
             unit_price: None,
-            amount_minor: line.get("Amount").map(minor_of).unwrap_or(0),
+            amount_minor: amount_at(line, "Amount")?,
             class_id: None,
             taxable: false,
         });
@@ -295,7 +395,7 @@ fn pending_deposit(store: &Store, realm: &RealmId, record: &OutboxRecord) -> Res
         contact_type: None,
         contact_name: None,
         class_id: None,
-        total_minor: payload.get("TotalAmt").map(minor_of).unwrap_or(0),
+        total_minor: amount_at(payload, "TotalAmt")?,
         balance_minor: None,
         status: Some(write_status(record.state).to_string()),
         po_number: None,
@@ -307,7 +407,10 @@ fn pending_deposit(store: &Store, realm: &RealmId, record: &OutboxRecord) -> Res
 }
 
 /// Payments already on a deposit that has not landed yet.
-fn queued_deposits(store: &Store, realm: &RealmId) -> Result<std::collections::HashSet<String>, ApiError> {
+fn queued_deposits(
+    store: &Store,
+    realm: &RealmId,
+) -> Result<std::collections::HashSet<String>, ApiError> {
     Ok(store
         .outbox_records(realm, OPEN)?
         .into_iter()
@@ -325,15 +428,25 @@ fn queued_deposits(store: &Store, realm: &RealmId) -> Result<std::collections::H
 }
 
 /// Amounts queued payments will take off each invoice once they land.
-fn queued_applications(store: &Store, realm: &RealmId, payment: EntityType) -> Result<std::collections::HashMap<String, i64>, ApiError> {
+fn queued_applications(
+    store: &Store,
+    realm: &RealmId,
+    payment: EntityType,
+) -> Result<std::collections::HashMap<String, i64>, ApiError> {
     let mut out = std::collections::HashMap::new();
     for record in store.outbox_records(realm, OPEN)? {
         if record.entity_type != payment || record.operation != Operation::Create {
             continue;
         }
-        for line in record.payload_json.get("Line").and_then(|l| l.as_array()).into_iter().flatten() {
+        for line in record
+            .payload_json
+            .get("Line")
+            .and_then(|l| l.as_array())
+            .into_iter()
+            .flatten()
+        {
             if let Some(id) = text(line, "/LinkedTxn/0/TxnId") {
-                *out.entry(id).or_insert(0) += line.get("Amount").map(minor_of).unwrap_or(0);
+                *out.entry(id).or_insert(0) += amount_at(line, "Amount")?;
             }
         }
     }
@@ -343,7 +456,11 @@ fn queued_applications(store: &Store, realm: &RealmId, payment: EntityType) -> R
 /// A customer's invoices with money still owed, oldest due first, net of
 /// payments already queued against them — so the same cheque cannot be
 /// applied twice while the first is on its way.
-fn open_invoices(store: &Store, realm: &RealmId, customer_id: &str) -> Result<(Vec<OpenInvoice>, Vec<i64>), ApiError> {
+fn open_invoices(
+    store: &Store,
+    realm: &RealmId,
+    customer_id: &str,
+) -> Result<(Vec<OpenInvoice>, Vec<i64>), ApiError> {
     open_documents(store, realm, ContactType::Customer, customer_id)
 }
 
@@ -366,8 +483,13 @@ fn open_documents(
         .filter(|d| d.doc_type == doc_type && d.balance.is_some_and(|b| b.minor() > 0))
         .collect();
     rows.sort_by(|a, b| {
-        let due = |d: &crate::store::DocumentRow| d.due_date.clone().unwrap_or_else(|| d.txn_date.clone());
-        due(a).cmp(&due(b)).then(a.txn_date.cmp(&b.txn_date)).then(a.doc_number.cmp(&b.doc_number))
+        let due = |d: &crate::store::DocumentRow| {
+            d.due_date.clone().unwrap_or_else(|| d.txn_date.clone())
+        };
+        due(a)
+            .cmp(&due(b))
+            .then(a.txn_date.cmp(&b.txn_date))
+            .then(a.doc_number.cmp(&b.doc_number))
     });
     let mut open = Vec::new();
     let mut held = Vec::new();
@@ -402,7 +524,11 @@ fn plan_json(plan: &PaymentPlan, open: &[OpenInvoice]) -> Value {
 }
 
 /// Queued creates of one document type, newest first, for a register.
-pub(super) fn pending_documents(store: &Store, realm: &RealmId, doc_type: DocumentType) -> Result<Vec<DocumentDto>, ApiError> {
+pub(super) fn pending_documents(
+    store: &Store,
+    realm: &RealmId,
+    doc_type: DocumentType,
+) -> Result<Vec<DocumentDto>, ApiError> {
     let mut out = Vec::new();
     for record in store.outbox_records(realm, OPEN)?.iter().rev() {
         if record.operation == Operation::Create && record.entity_type == doc_type.as_entity() {
@@ -438,7 +564,17 @@ fn write_dto(record: &OutboxRecord, blocked_by: Option<String>) -> WriteDto {
     let p = &record.payload_json;
     let label = text(p, "/DisplayName")
         .or_else(|| text(p, "/DocNumber").map(|n| format!("{} {n}", record.entity_type.as_str())))
-        .unwrap_or_else(|| format!("{} {}", record.entity_type.as_str(), if record.local_entity_id.starts_with("local:") { "(new)" } else { &record.local_entity_id }));
+        .unwrap_or_else(|| {
+            format!(
+                "{} {}",
+                record.entity_type.as_str(),
+                if record.local_entity_id.starts_with("local:") {
+                    "(new)"
+                } else {
+                    &record.local_entity_id
+                }
+            )
+        });
     WriteDto {
         id: record.id.to_string(),
         entity_type: record.entity_type.as_str().to_string(),
@@ -456,8 +592,16 @@ fn write_dto(record: &OutboxRecord, blocked_by: Option<String>) -> WriteDto {
 }
 
 /// Open writes about one document, for its banner.
-pub(super) fn open_writes(store: &Store, realm: &RealmId, entity_id: &str) -> Result<Vec<WriteDto>, ApiError> {
-    Ok(store.open_writes_for(realm, entity_id)?.iter().map(|r| write_dto(r, None)).collect())
+pub(super) fn open_writes(
+    store: &Store,
+    realm: &RealmId,
+    entity_id: &str,
+) -> Result<Vec<WriteDto>, ApiError> {
+    Ok(store
+        .open_writes_for(realm, entity_id)?
+        .iter()
+        .map(|r| write_dto(r, None))
+        .collect())
 }
 
 #[derive(Deserialize)]
@@ -527,7 +671,12 @@ struct ResolveArgs {
     action: String,
 }
 
-pub(super) fn dispatch(store: &Store, command: &str, args: Value, now: DateTime<Utc>) -> Option<Result<Value, ApiError>> {
+pub(super) fn dispatch(
+    store: &Store,
+    command: &str,
+    args: Value,
+    now: DateTime<Utc>,
+) -> Option<Result<Value, ApiError>> {
     let result = match command {
         "customers" => customers(store, args),
         "vendors" => vendors(store, args),
@@ -589,9 +738,14 @@ fn vendors(store: &Store, args: Value) -> Result<Value, ApiError> {
 fn document_draft(store: &Store, args: Value) -> Result<Value, ApiError> {
     let args: DraftArgs = parse(args)?;
     let realm = realm(&args.realm)?;
-    let doc = store.get_document(&realm, &args.qbo_id)?.ok_or(ApiError::NotFound)?;
+    let doc = store
+        .get_document(&realm, &args.qbo_id)?
+        .ok_or(ApiError::NotFound)?;
     if !compose::EDITABLE.contains(&doc.doc_type) {
-        return Err(ApiError::BadArguments(format!("{} is not editable here yet", doc.doc_type.as_str())));
+        return Err(ApiError::BadArguments(format!(
+            "{} is not editable here yet",
+            doc.doc_type.as_str()
+        )));
     }
     let lines: Vec<DraftLine> = store
         .document_lines(&realm, &args.qbo_id)?
@@ -601,7 +755,9 @@ fn document_draft(store: &Store, args: Value) -> Result<Value, ApiError> {
             description: l.description,
             qty: l.qty.unwrap_or_else(|| "1".into()),
             // A line with no rate was entered as an amount; keep the amount.
-            rate: l.unit_price.unwrap_or_else(|| Decimal::new(l.amount.minor(), 2).to_string()),
+            rate: l
+                .unit_price
+                .unwrap_or_else(|| Decimal::new(l.amount.minor(), 2).to_string()),
             class_id: l.class_id,
             taxable: l.is_taxable,
         })
@@ -621,7 +777,9 @@ fn document_draft(store: &Store, args: Value) -> Result<Value, ApiError> {
             "classId": l.class_id, "taxable": l.taxable,
         })).collect::<Vec<_>>(),
     });
-    to_json(serde_json::json!({ "draft": draft, "contactName": doc.contact_name, "openWrites": store.open_writes_for(&realm, &args.qbo_id)?.len() }))
+    to_json(
+        serde_json::json!({ "draft": draft, "contactName": doc.contact_name, "openWrites": store.open_writes_for(&realm, &args.qbo_id)?.len() }),
+    )
 }
 
 fn save_document(store: &Store, args: Value, now: DateTime<Utc>) -> Result<Value, ApiError> {
@@ -631,31 +789,42 @@ fn save_document(store: &Store, args: Value, now: DateTime<Utc>) -> Result<Value
     let entity_type = args.draft.doc_type.as_entity();
     let record = match &args.qbo_id {
         None => {
-            let payload = compose::to_payload(&args.draft, po.as_deref(), false).map_err(|e| ApiError::BadArguments(e.to_string()))?;
+            let payload = compose::to_payload(&args.draft, po.as_deref(), false)
+                .map_err(|e| ApiError::BadArguments(e.to_string()))?;
             writes::queue_create(store, &realm, entity_type, payload, now)?
         }
         Some(id) if id.starts_with(crate::worker::LOCAL_ID_PREFIX) => {
             return Err(ApiError::BadArguments(
-                "this document is still on its way to QuickBooks; edit it once it has landed".into(),
+                "this document is still on its way to QuickBooks; edit it once it has landed"
+                    .into(),
             ))
         }
         Some(id) => {
             let existing = store.get_document(&realm, id)?.ok_or(ApiError::NotFound)?;
             if existing.doc_type != args.draft.doc_type {
-                return Err(ApiError::BadArguments("a document cannot change type".into()));
+                return Err(ApiError::BadArguments(
+                    "a document cannot change type".into(),
+                ));
             }
-            let payload = compose::to_payload(&args.draft, po.as_deref(), true).map_err(|e| ApiError::BadArguments(e.to_string()))?;
+            let payload = compose::to_payload(&args.draft, po.as_deref(), true)
+                .map_err(|e| ApiError::BadArguments(e.to_string()))?;
             writes::queue_update(store, &realm, entity_type, id, payload, now)?
         }
     };
-    to_json(serde_json::json!({ "outboxId": record.id.to_string(), "entityId": record.local_entity_id, "state": record.state.as_str() }))
+    to_json(
+        serde_json::json!({ "outboxId": record.id.to_string(), "entityId": record.local_entity_id, "state": record.state.as_str() }),
+    )
 }
 
 fn create_customer(store: &Store, args: Value, now: DateTime<Utc>) -> Result<Value, ApiError> {
     let args: CustomerArgs = parse(args)?;
     let realm = realm(&args.realm)?;
-    let payload = compose::customer_payload(&args.display_name, args.company_name.as_deref(), args.email.as_deref())
-        .map_err(|e| ApiError::BadArguments(e.to_string()))?;
+    let payload = compose::customer_payload(
+        &args.display_name,
+        args.company_name.as_deref(),
+        args.email.as_deref(),
+    )
+    .map_err(|e| ApiError::BadArguments(e.to_string()))?;
     let name = text(&payload, "/DisplayName").unwrap_or_default();
     // QBO rejects a duplicate DisplayName; say so now rather than after a drain.
     let pending = store
@@ -670,10 +839,14 @@ fn create_customer(store: &Store, args: Value, now: DateTime<Utc>) -> Result<Val
         .chain(pending)
         .any(|existing| existing.eq_ignore_ascii_case(&name));
     if taken {
-        return Err(ApiError::BadArguments(format!("a customer named {name:?} already exists")));
+        return Err(ApiError::BadArguments(format!(
+            "a customer named {name:?} already exists"
+        )));
     }
     let record = writes::queue_create(store, &realm, EntityType::Customer, payload, now)?;
-    to_json(serde_json::json!({ "outboxId": record.id.to_string(), "entityId": record.local_entity_id, "displayName": name }))
+    to_json(
+        serde_json::json!({ "outboxId": record.id.to_string(), "entityId": record.local_entity_id, "displayName": name }),
+    )
 }
 
 fn outbox(store: &Store, args: Value) -> Result<Value, ApiError> {
@@ -701,7 +874,12 @@ fn open_invoices_command(store: &Store, args: Value) -> Result<Value, ApiError> 
 
 fn open_bills_command(store: &Store, args: Value) -> Result<Value, ApiError> {
     let args: OpenBillsArgs = parse(args)?;
-    let (open, held) = open_documents(store, &realm(&args.realm)?, ContactType::Vendor, &args.vendor_id)?;
+    let (open, held) = open_documents(
+        store,
+        &realm(&args.realm)?,
+        ContactType::Vendor,
+        &args.vendor_id,
+    )?;
     open_json(open, held)
 }
 
@@ -728,8 +906,14 @@ fn pay_from(store: &Store, realm: &RealmId, account_id: &str) -> Result<PayFrom,
 
 fn bill_payment_preview(store: &Store, args: Value) -> Result<Value, ApiError> {
     let args: BillPaymentArgs = parse(args)?;
-    let (open, _) = open_documents(store, &realm(&args.realm)?, ContactType::Vendor, &args.draft.vendor_id)?;
-    let plan = compose::plan_bill_payment(&args.draft, &open).map_err(|e| ApiError::BadArguments(e.to_string()))?;
+    let (open, _) = open_documents(
+        store,
+        &realm(&args.realm)?,
+        ContactType::Vendor,
+        &args.draft.vendor_id,
+    )?;
+    let plan = compose::plan_bill_payment(&args.draft, &open)
+        .map_err(|e| ApiError::BadArguments(e.to_string()))?;
     to_json(plan_json(&plan, &open))
 }
 
@@ -737,9 +921,11 @@ fn pay_bills(store: &Store, args: Value, now: DateTime<Utc>) -> Result<Value, Ap
     let args: BillPaymentArgs = parse(args)?;
     let realm = realm(&args.realm)?;
     let (open, _) = open_documents(store, &realm, ContactType::Vendor, &args.draft.vendor_id)?;
-    let plan = compose::plan_bill_payment(&args.draft, &open).map_err(|e| ApiError::BadArguments(e.to_string()))?;
+    let plan = compose::plan_bill_payment(&args.draft, &open)
+        .map_err(|e| ApiError::BadArguments(e.to_string()))?;
     let from = pay_from(store, &realm, &args.draft.account_id)?;
-    let payload = compose::bill_payment_payload(&args.draft, &plan, from).map_err(|e| ApiError::BadArguments(e.to_string()))?;
+    let payload = compose::bill_payment_payload(&args.draft, &plan, from)
+        .map_err(|e| ApiError::BadArguments(e.to_string()))?;
     let record = writes::queue_create(store, &realm, EntityType::BillPayment, payload, now)?;
     let mut out = plan_json(&plan, &open);
     out["outboxId"] = serde_json::json!(record.id.to_string());
@@ -755,9 +941,16 @@ struct DepositArgs {
 }
 
 /// What is waiting to be banked, less anything already on a queued deposit.
-fn undeposited_rows(store: &Store, realm: &RealmId) -> Result<Vec<crate::store::outbox_store::UndepositedRow>, ApiError> {
+fn undeposited_rows(
+    store: &Store,
+    realm: &RealmId,
+) -> Result<Vec<crate::store::outbox_store::UndepositedRow>, ApiError> {
     let queued = queued_deposits(store, realm)?;
-    Ok(store.undeposited(realm)?.into_iter().filter(|r| !queued.contains(&r.0)).collect())
+    Ok(store
+        .undeposited(realm)?
+        .into_iter()
+        .filter(|r| !queued.contains(&r.0))
+        .collect())
 }
 
 fn undeposited(store: &Store, args: Value) -> Result<Value, ApiError> {
@@ -775,26 +968,37 @@ fn undeposited(store: &Store, args: Value) -> Result<Value, ApiError> {
 fn make_deposit(store: &Store, args: Value, now: DateTime<Utc>) -> Result<Value, ApiError> {
     let args: DepositArgs = parse(args)?;
     let realm = realm(&args.realm)?;
-    let bank = store.payment_accounts(&realm)?.into_iter().any(|(id, _, t)| id == args.draft.account_id && t == "Bank");
+    let bank = store
+        .payment_accounts(&realm)?
+        .into_iter()
+        .any(|(id, _, t)| id == args.draft.account_id && t == "Bank");
     if !bank {
         return Err(ApiError::BadArguments("deposit to a bank account".into()));
     }
     let waiting = undeposited_rows(store, &realm)?;
     let mut items = Vec::new();
     for id in &args.draft.payment_ids {
-        let row = waiting
-            .iter()
-            .find(|r| &r.0 == id)
-            .ok_or_else(|| ApiError::BadArguments(format!("payment {id} is not waiting to be deposited")))?;
+        let row = waiting.iter().find(|r| &r.0 == id).ok_or_else(|| {
+            ApiError::BadArguments(format!("payment {id} is not waiting to be deposited"))
+        })?;
         if items.iter().any(|i: &DepositItem| &i.qbo_id == id) {
-            return Err(ApiError::BadArguments(format!("payment {id} is ticked twice")));
+            return Err(ApiError::BadArguments(format!(
+                "payment {id} is ticked twice"
+            )));
         }
-        items.push(DepositItem { qbo_id: row.0.clone(), txn_type: row.1.clone(), amount: ledger_core::Money::from_minor(row.5) });
+        items.push(DepositItem {
+            qbo_id: row.0.clone(),
+            txn_type: row.1.clone(),
+            amount: ledger_core::Money::from_minor(row.5),
+        });
     }
-    let payload = compose::deposit_payload(&args.draft, &items).map_err(|e| ApiError::BadArguments(e.to_string()))?;
-    let total = payload.get("TotalAmt").map(minor_of).unwrap_or(0);
+    let payload = compose::deposit_payload(&args.draft, &items)
+        .map_err(|e| ApiError::BadArguments(e.to_string()))?;
+    let total = amount_at(&payload, "TotalAmt")?;
     let record = writes::queue_create(store, &realm, EntityType::Deposit, payload, now)?;
-    to_json(serde_json::json!({ "outboxId": record.id.to_string(), "entityId": record.local_entity_id, "totalMinor": total, "count": items.len() }))
+    to_json(
+        serde_json::json!({ "outboxId": record.id.to_string(), "entityId": record.local_entity_id, "totalMinor": total, "count": items.len() }),
+    )
 }
 
 #[derive(Deserialize)]
@@ -819,18 +1023,39 @@ fn save_expense(store: &Store, args: Value, now: DateTime<Utc>) -> Result<Value,
     let args: ExpenseArgs = parse(args)?;
     let realm = realm(&args.realm)?;
     let from = pay_from(store, &realm, &args.draft.account_id)?;
-    let known: Vec<String> = store.expense_accounts(&realm)?.into_iter().map(|a| a.0).collect();
-    if let Some((index, _)) = args.draft.lines.iter().enumerate().find(|(_, l)| !l.account_id.is_empty() && !known.contains(&l.account_id)) {
-        return Err(ApiError::BadArguments(format!("line {}: charge it to an expense account", index + 1)));
+    let known: Vec<String> = store
+        .expense_accounts(&realm)?
+        .into_iter()
+        .map(|a| a.0)
+        .collect();
+    if let Some((index, _)) = args
+        .draft
+        .lines
+        .iter()
+        .enumerate()
+        .find(|(_, l)| !l.account_id.is_empty() && !known.contains(&l.account_id))
+    {
+        return Err(ApiError::BadArguments(format!(
+            "line {}: charge it to an expense account",
+            index + 1
+        )));
     }
     if let Some(payee) = args.draft.payee_id.as_deref().filter(|p| !p.is_empty()) {
-        if store.contact_name(&realm, ContactType::Vendor, payee)?.is_none() {
-            return Err(ApiError::BadArguments("choose the payee from the vendor list".into()));
+        if store
+            .contact_name(&realm, ContactType::Vendor, payee)?
+            .is_none()
+        {
+            return Err(ApiError::BadArguments(
+                "choose the payee from the vendor list".into(),
+            ));
         }
     }
-    let (payload, total) = compose::expense_payload(&args.draft, from).map_err(|e| ApiError::BadArguments(e.to_string()))?;
+    let (payload, total) = compose::expense_payload(&args.draft, from)
+        .map_err(|e| ApiError::BadArguments(e.to_string()))?;
     let record = writes::queue_create(store, &realm, EntityType::Purchase, payload, now)?;
-    to_json(serde_json::json!({ "outboxId": record.id.to_string(), "entityId": record.local_entity_id, "totalMinor": total.minor() }))
+    to_json(
+        serde_json::json!({ "outboxId": record.id.to_string(), "entityId": record.local_entity_id, "totalMinor": total.minor() }),
+    )
 }
 
 fn open_json(open: Vec<OpenInvoice>, held: Vec<i64>) -> Result<Value, ApiError> {
@@ -851,19 +1076,28 @@ fn open_json(open: Vec<OpenInvoice>, held: Vec<i64>) -> Result<Value, ApiError> 
 fn payment_preview(store: &Store, args: Value) -> Result<Value, ApiError> {
     let args: PaymentArgs = parse(args)?;
     let (open, _) = open_invoices(store, &realm(&args.realm)?, &args.draft.customer_id)?;
-    let plan = compose::plan_payment(&args.draft, &open).map_err(|e| ApiError::BadArguments(e.to_string()))?;
+    let plan = compose::plan_payment(&args.draft, &open)
+        .map_err(|e| ApiError::BadArguments(e.to_string()))?;
     to_json(plan_json(&plan, &open))
 }
 
 fn receive_payment(store: &Store, args: Value, now: DateTime<Utc>) -> Result<Value, ApiError> {
     let args: PaymentArgs = parse(args)?;
     let realm = realm(&args.realm)?;
-    if args.draft.customer_id.starts_with(crate::worker::LOCAL_ID_PREFIX) {
-        return Err(ApiError::BadArguments("this customer is still on its way to QuickBooks and has no invoices to pay yet".into()));
+    if args
+        .draft
+        .customer_id
+        .starts_with(crate::worker::LOCAL_ID_PREFIX)
+    {
+        return Err(ApiError::BadArguments(
+            "this customer is still on its way to QuickBooks and has no invoices to pay yet".into(),
+        ));
     }
     let (open, _) = open_invoices(store, &realm, &args.draft.customer_id)?;
-    let plan = compose::plan_payment(&args.draft, &open).map_err(|e| ApiError::BadArguments(e.to_string()))?;
-    let payload = compose::payment_payload(&args.draft, &plan).map_err(|e| ApiError::BadArguments(e.to_string()))?;
+    let plan = compose::plan_payment(&args.draft, &open)
+        .map_err(|e| ApiError::BadArguments(e.to_string()))?;
+    let payload = compose::payment_payload(&args.draft, &plan)
+        .map_err(|e| ApiError::BadArguments(e.to_string()))?;
     let record = writes::queue_create(store, &realm, EntityType::Payment, payload, now)?;
     let mut out = plan_json(&plan, &open);
     out["outboxId"] = serde_json::json!(record.id.to_string());
@@ -874,11 +1108,16 @@ fn receive_payment(store: &Store, args: Value, now: DateTime<Utc>) -> Result<Val
 fn resolve_write(store: &Store, args: Value, now: DateTime<Utc>) -> Result<Value, ApiError> {
     let args: ResolveArgs = parse(args)?;
     let realm = realm(&args.realm)?;
-    let id = Uuid::parse_str(&args.id).map_err(|_| ApiError::BadArguments("not an outbox id".into()))?;
+    let id =
+        Uuid::parse_str(&args.id).map_err(|_| ApiError::BadArguments("not an outbox id".into()))?;
     let resolution = match args.action.as_str() {
         "retry" => Resolution::Retry,
         "discard" => Resolution::Discard,
-        other => return Err(ApiError::BadArguments(format!("action must be retry or discard, not {other:?}"))),
+        other => {
+            return Err(ApiError::BadArguments(format!(
+                "action must be retry or discard, not {other:?}"
+            )))
+        }
     };
     let record = writes::resolve(store, &realm, id, resolution, now)?;
     to_json(write_dto(&record, None))
@@ -900,7 +1139,13 @@ mod tests {
 
     fn book(writes: bool) -> Store {
         let store = Store::open_in_memory().unwrap();
-        let size = DemoSize { customers: 6, vendors: 2, items: 8, invoices: 20, purchase_orders: 2 };
+        let size = DemoSize {
+            customers: 6,
+            vendors: 2,
+            items: 8,
+            invoices: 20,
+            purchase_orders: 2,
+        };
         demo::seed(&store, size, 5, now()).unwrap();
         let realm = crate::domain::RealmId::parse(DEMO_REALM).unwrap();
         store.set_write_enabled(&realm, writes).unwrap();
@@ -917,7 +1162,13 @@ mod tests {
     #[test]
     fn saving_while_writes_are_off_is_refused_plainly() {
         let store = book(false);
-        let error = dispatch_at(&store, "saveDocument", json!({ "realm": DEMO_REALM, "draft": draft("1005") }), now()).unwrap_err();
+        let error = dispatch_at(
+            &store,
+            "saveDocument",
+            json!({ "realm": DEMO_REALM, "draft": draft("1005") }),
+            now(),
+        )
+        .unwrap_err();
         assert_eq!(error.status(), 403);
         assert!(error.to_string().contains("writes are off"));
     }
@@ -925,18 +1176,40 @@ mod tests {
     #[test]
     fn a_new_invoice_shows_in_its_register_as_not_yet_in_quickbooks() {
         let store = book(true);
-        let saved = dispatch_at(&store, "saveDocument", json!({ "realm": DEMO_REALM, "draft": draft("1005") }), now()).unwrap();
+        let saved = dispatch_at(
+            &store,
+            "saveDocument",
+            json!({ "realm": DEMO_REALM, "draft": draft("1005") }),
+            now(),
+        )
+        .unwrap();
         let local = saved["entityId"].as_str().unwrap().to_string();
         assert!(local.starts_with("local:"));
 
-        let register = dispatch_at(&store, "documents", json!({ "realm": DEMO_REALM, "docType": "Invoice" }), now()).unwrap();
+        let register = dispatch_at(
+            &store,
+            "documents",
+            json!({ "realm": DEMO_REALM, "docType": "Invoice" }),
+            now(),
+        )
+        .unwrap();
         let first = &register[0];
-        assert_eq!(first["qboId"], local.as_str(), "queued documents list first");
+        assert_eq!(
+            first["qboId"],
+            local.as_str(),
+            "queued documents list first"
+        );
         assert_eq!(first["totalMinor"], 98_500);
         assert_eq!(first["status"], "Not yet in QuickBooks");
         assert_eq!(first["pendingWrite"], "pending");
 
-        let detail = dispatch_at(&store, "document", json!({ "realm": DEMO_REALM, "qboId": local }), now()).unwrap();
+        let detail = dispatch_at(
+            &store,
+            "document",
+            json!({ "realm": DEMO_REALM, "qboId": local }),
+            now(),
+        )
+        .unwrap();
         assert_eq!(detail["lines"][0]["amountMinor"], 98_500);
         let status = dispatch_at(&store, "status", json!({ "realm": DEMO_REALM }), now()).unwrap();
         assert_eq!(status["outboxPending"], 1);
@@ -945,49 +1218,131 @@ mod tests {
     #[test]
     fn a_new_customer_is_pickable_at_once_and_its_invoice_waits_for_it() {
         let store = book(true);
-        let customer = dispatch_at(&store, "createCustomer", json!({ "realm": DEMO_REALM, "displayName": "Gull Pond Swim Team" }), now()).unwrap();
+        let customer = dispatch_at(
+            &store,
+            "createCustomer",
+            json!({ "realm": DEMO_REALM, "displayName": "Gull Pond Swim Team" }),
+            now(),
+        )
+        .unwrap();
         let local = customer["entityId"].as_str().unwrap().to_string();
-        let picker = dispatch_at(&store, "customers", json!({ "realm": DEMO_REALM }), now()).unwrap();
-        assert!(picker.as_array().unwrap().iter().any(|c| c["qboId"] == local.as_str() && c["pending"] == true));
+        let picker =
+            dispatch_at(&store, "customers", json!({ "realm": DEMO_REALM }), now()).unwrap();
+        assert!(picker
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c["qboId"] == local.as_str() && c["pending"] == true));
 
-        dispatch_at(&store, "saveDocument", json!({ "realm": DEMO_REALM, "draft": draft(&local) }), now()).unwrap();
+        dispatch_at(
+            &store,
+            "saveDocument",
+            json!({ "realm": DEMO_REALM, "draft": draft(&local) }),
+            now(),
+        )
+        .unwrap();
         let writes = dispatch_at(&store, "outbox", json!({ "realm": DEMO_REALM }), now()).unwrap();
-        let invoice = writes.as_array().unwrap().iter().find(|w| w["entityType"] == "Invoice").unwrap();
+        let invoice = writes
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|w| w["entityType"] == "Invoice")
+            .unwrap();
         assert_eq!(invoice["blockedBy"], "Gull Pond Swim Team");
 
-        let duplicate = dispatch_at(&store, "createCustomer", json!({ "realm": DEMO_REALM, "displayName": "gull pond swim team" }), now());
-        assert_eq!(duplicate.unwrap_err().status(), 400, "QBO would refuse the duplicate name");
+        let duplicate = dispatch_at(
+            &store,
+            "createCustomer",
+            json!({ "realm": DEMO_REALM, "displayName": "gull pond swim team" }),
+            now(),
+        );
+        assert_eq!(
+            duplicate.unwrap_err().status(),
+            400,
+            "QBO would refuse the duplicate name"
+        );
     }
 
     #[test]
     fn an_existing_invoice_round_trips_through_the_editor_as_a_sparse_update() {
         let store = book(true);
         let realm = crate::domain::RealmId::parse(DEMO_REALM).unwrap();
-        let invoice = store.list_documents(&realm, crate::domain::DocumentType::Invoice, 1).unwrap().remove(0);
-        let loaded = dispatch_at(&store, "documentDraft", json!({ "realm": DEMO_REALM, "qboId": invoice.qbo_id }), now()).unwrap();
+        let invoice = store
+            .list_documents(&realm, crate::domain::DocumentType::Invoice, 1)
+            .unwrap()
+            .remove(0);
+        let loaded = dispatch_at(
+            &store,
+            "documentDraft",
+            json!({ "realm": DEMO_REALM, "qboId": invoice.qbo_id }),
+            now(),
+        )
+        .unwrap();
         let mut draft = loaded["draft"].clone();
         draft["privateNote"] = json!("Ship with the next pallet");
-        dispatch_at(&store, "saveDocument", json!({ "realm": DEMO_REALM, "qboId": invoice.qbo_id, "draft": draft }), now()).unwrap();
+        dispatch_at(
+            &store,
+            "saveDocument",
+            json!({ "realm": DEMO_REALM, "qboId": invoice.qbo_id, "draft": draft }),
+            now(),
+        )
+        .unwrap();
 
-        let record = store.open_writes_for(&realm, &invoice.qbo_id).unwrap().remove(0);
+        let record = store
+            .open_writes_for(&realm, &invoice.qbo_id)
+            .unwrap()
+            .remove(0);
         assert_eq!(record.payload_json["sparse"], true);
         assert_eq!(record.base_sync_token.as_deref(), Some("0"));
-        assert_eq!(record.payload_json["PrivateNote"], "Ship with the next pallet");
+        assert_eq!(
+            record.payload_json["PrivateNote"],
+            "Ship with the next pallet"
+        );
         // The total the editor would send equals what the replica holds.
-        let sent: i64 = record.payload_json["Line"].as_array().unwrap().iter().map(|l| super::minor_of(&l["Amount"])).sum();
+        let sent: i64 = record.payload_json["Line"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|l| super::minor_of(&l["Amount"]).unwrap())
+            .sum();
         assert_eq!(sent, invoice.total.minor());
+    }
+
+    #[test]
+    fn minor_of_refuses_what_it_cannot_read_rather_than_reading_zero() {
+        assert_eq!(super::minor_of(&json!(12.5)).unwrap(), 1250);
+        assert_eq!(super::minor_of(&json!(-0.05)).unwrap(), -5);
+        assert_eq!(super::minor_of(&json!("7.10")).unwrap(), 710);
+        assert!(super::minor_of(&json!(1.005)).is_err());
+        assert!(super::minor_of(&json!(null)).is_err());
+        assert!(super::minor_of(&json!("abc")).is_err());
     }
 
     #[test]
     fn a_purchase_order_queues_for_a_vendor_and_lists_under_purchase_orders() {
         let store = book(true);
         let realm = crate::domain::RealmId::parse(DEMO_REALM).unwrap();
-        let vendor = store.contacts(&realm, crate::domain::ContactType::Vendor).unwrap().remove(0);
+        let vendor = store
+            .contacts(&realm, crate::domain::ContactType::Vendor)
+            .unwrap()
+            .remove(0);
         let item = store.items(&realm).unwrap().remove(0).qbo_id;
         let po = json!({ "docType": "PurchaseOrder", "contactId": vendor.0, "txnDate": "2026-11-02",
                          "lines": [ { "itemId": item, "description": "XLPE sheet", "qty": "40", "rate": "18.4375" } ] });
-        dispatch_at(&store, "saveDocument", json!({ "realm": DEMO_REALM, "draft": po }), now()).unwrap();
-        let register = dispatch_at(&store, "documents", json!({ "realm": DEMO_REALM, "docType": "PurchaseOrder" }), now()).unwrap();
+        dispatch_at(
+            &store,
+            "saveDocument",
+            json!({ "realm": DEMO_REALM, "draft": po }),
+            now(),
+        )
+        .unwrap();
+        let register = dispatch_at(
+            &store,
+            "documents",
+            json!({ "realm": DEMO_REALM, "docType": "PurchaseOrder" }),
+            now(),
+        )
+        .unwrap();
         assert_eq!(register[0]["contactName"], vendor.1.as_str());
         assert_eq!(register[0]["contactType"], "Vendor");
         assert_eq!(register[0]["totalMinor"], 73_750);
@@ -997,17 +1352,40 @@ mod tests {
     fn a_refused_write_is_listed_and_can_be_discarded() {
         let store = book(true);
         let realm = crate::domain::RealmId::parse(DEMO_REALM).unwrap();
-        dispatch_at(&store, "saveDocument", json!({ "realm": DEMO_REALM, "draft": draft("1005") }), now()).unwrap();
+        dispatch_at(
+            &store,
+            "saveDocument",
+            json!({ "realm": DEMO_REALM, "draft": draft("1005") }),
+            now(),
+        )
+        .unwrap();
         let mut qbo = MockQbo::new(now());
-        qbo.fail_next(crate::client::QboError::Validation("Invalid account".into()));
+        qbo.fail_next(crate::client::QboError::Validation(
+            "Invalid account".into(),
+        ));
         crate::writes::drain_once(&store, &realm, &mut qbo, now()).unwrap();
 
         let writes = dispatch_at(&store, "outbox", json!({ "realm": DEMO_REALM }), now()).unwrap();
         assert_eq!(writes[0]["status"], "Refused by QuickBooks");
-        assert!(writes[0]["lastError"].as_str().unwrap().contains("Invalid account"));
+        assert!(writes[0]["lastError"]
+            .as_str()
+            .unwrap()
+            .contains("Invalid account"));
         let id = writes[0]["id"].as_str().unwrap();
-        dispatch_at(&store, "resolveWrite", json!({ "realm": DEMO_REALM, "id": id, "action": "discard" }), now()).unwrap();
-        assert!(dispatch_at(&store, "outbox", json!({ "realm": DEMO_REALM }), now()).unwrap().as_array().unwrap().is_empty());
+        dispatch_at(
+            &store,
+            "resolveWrite",
+            json!({ "realm": DEMO_REALM, "id": id, "action": "discard" }),
+            now(),
+        )
+        .unwrap();
+        assert!(
+            dispatch_at(&store, "outbox", json!({ "realm": DEMO_REALM }), now())
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
     }
 
     fn open_for(store: &Store) -> (String, Vec<serde_json::Value>) {
@@ -1018,10 +1396,26 @@ mod tests {
             .into_iter()
             .map(|c| c.0)
             .find(|id| {
-                dispatch_at(store, "openInvoices", json!({ "realm": DEMO_REALM, "customerId": id }), now()).unwrap().as_array().unwrap().len() >= 2
+                dispatch_at(
+                    store,
+                    "openInvoices",
+                    json!({ "realm": DEMO_REALM, "customerId": id }),
+                    now(),
+                )
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .len()
+                    >= 2
             })
             .expect("a demo customer with two open invoices");
-        let open = dispatch_at(store, "openInvoices", json!({ "realm": DEMO_REALM, "customerId": customer }), now()).unwrap();
+        let open = dispatch_at(
+            store,
+            "openInvoices",
+            json!({ "realm": DEMO_REALM, "customerId": customer }),
+            now(),
+        )
+        .unwrap();
         (customer, open.as_array().unwrap().clone())
     }
 
@@ -1033,30 +1427,88 @@ mod tests {
         let amount = format!("{}.{:02}", (first + 100) / 100, (first + 100) % 100);
         let draft = json!({ "customerId": customer, "txnDate": "2026-11-02", "amount": amount, "reference": "4417" });
 
-        let preview = dispatch_at(&store, "paymentPreview", json!({ "realm": DEMO_REALM, "draft": draft }), now()).unwrap();
+        let preview = dispatch_at(
+            &store,
+            "paymentPreview",
+            json!({ "realm": DEMO_REALM, "draft": draft }),
+            now(),
+        )
+        .unwrap();
         assert_eq!(preview["applied"][0]["invoiceId"], open[0]["qboId"]);
         assert_eq!(preview["applied"][0]["amountMinor"], first);
         assert_eq!(preview["applied"][1]["amountMinor"], 100);
-        assert!(store.outbox_records(&crate::domain::RealmId::parse(DEMO_REALM).unwrap(), super::OPEN).unwrap().is_empty(), "a preview queues nothing");
+        assert!(
+            store
+                .outbox_records(
+                    &crate::domain::RealmId::parse(DEMO_REALM).unwrap(),
+                    super::OPEN
+                )
+                .unwrap()
+                .is_empty(),
+            "a preview queues nothing"
+        );
 
-        let saved = dispatch_at(&store, "receivePayment", json!({ "realm": DEMO_REALM, "draft": draft }), now()).unwrap();
+        let saved = dispatch_at(
+            &store,
+            "receivePayment",
+            json!({ "realm": DEMO_REALM, "draft": draft }),
+            now(),
+        )
+        .unwrap();
         let local = saved["entityId"].as_str().unwrap().to_string();
 
-        let after = dispatch_at(&store, "openInvoices", json!({ "realm": DEMO_REALM, "customerId": customer }), now()).unwrap();
-        assert!(after.as_array().unwrap().iter().all(|i| i["qboId"] != open[0]["qboId"]), "the paid invoice is no longer open");
-        assert_eq!(after[0]["queuedMinor"], 100, "the part-paid one shows what is on its way");
+        let after = dispatch_at(
+            &store,
+            "openInvoices",
+            json!({ "realm": DEMO_REALM, "customerId": customer }),
+            now(),
+        )
+        .unwrap();
+        assert!(
+            after
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|i| i["qboId"] != open[0]["qboId"]),
+            "the paid invoice is no longer open"
+        );
+        assert_eq!(
+            after[0]["queuedMinor"], 100,
+            "the part-paid one shows what is on its way"
+        );
 
         let doubled = json!({ "customerId": customer, "txnDate": "2026-11-02", "amount": "1.00",
                               "applications": [ { "invoiceId": open[0]["qboId"], "amount": "1.00" } ] });
-        let refused = dispatch_at(&store, "receivePayment", json!({ "realm": DEMO_REALM, "draft": doubled }), now()).unwrap_err();
+        let refused = dispatch_at(
+            &store,
+            "receivePayment",
+            json!({ "realm": DEMO_REALM, "draft": doubled }),
+            now(),
+        )
+        .unwrap_err();
         assert!(refused.to_string().contains("not open"), "{refused}");
 
-        let register = dispatch_at(&store, "documents", json!({ "realm": DEMO_REALM, "docType": "Payment" }), now()).unwrap();
+        let register = dispatch_at(
+            &store,
+            "documents",
+            json!({ "realm": DEMO_REALM, "docType": "Payment" }),
+            now(),
+        )
+        .unwrap();
         assert_eq!(register[0]["qboId"], local.as_str());
         assert_eq!(register[0]["docNumber"], "4417");
         assert_eq!(register[0]["totalMinor"], first + 100);
-        let detail = dispatch_at(&store, "document", json!({ "realm": DEMO_REALM, "qboId": local }), now()).unwrap();
-        assert!(detail["lines"][0]["description"].as_str().unwrap().starts_with("Applied to invoice"));
+        let detail = dispatch_at(
+            &store,
+            "document",
+            json!({ "realm": DEMO_REALM, "qboId": local }),
+            now(),
+        )
+        .unwrap();
+        assert!(detail["lines"][0]["description"]
+            .as_str()
+            .unwrap()
+            .starts_with("Applied to invoice"));
     }
 
     #[test]
@@ -1065,26 +1517,61 @@ mod tests {
         let realm = crate::domain::RealmId::parse(DEMO_REALM).unwrap();
         let (customer, open) = open_for(&store);
         let draft = json!({ "customerId": customer, "txnDate": "2026-11-02", "amount": "25.00" });
-        dispatch_at(&store, "receivePayment", json!({ "realm": DEMO_REALM, "draft": draft }), now()).unwrap();
+        dispatch_at(
+            &store,
+            "receivePayment",
+            json!({ "realm": DEMO_REALM, "draft": draft }),
+            now(),
+        )
+        .unwrap();
         let mut qbo = MockQbo::new(now());
         crate::writes::drain_once(&store, &realm, &mut qbo, now()).unwrap();
         assert_eq!(qbo.count(&realm, crate::domain::EntityType::Payment), 1);
         let writes = dispatch_at(&store, "outbox", json!({ "realm": DEMO_REALM }), now()).unwrap();
-        assert!(writes.as_array().unwrap().is_empty(), "applied writes leave the open list");
+        assert!(
+            writes.as_array().unwrap().is_empty(),
+            "applied writes leave the open list"
+        );
         let _ = open;
     }
 
     #[test]
     fn bills_are_paid_from_a_bank_or_card_account_and_land_through_the_drain() {
         let store = Store::open_in_memory().unwrap();
-        let size = DemoSize { customers: 4, vendors: 3, items: 8, invoices: 4, purchase_orders: 60 };
+        let size = DemoSize {
+            customers: 4,
+            vendors: 3,
+            items: 8,
+            invoices: 4,
+            purchase_orders: 60,
+        };
         demo::seed(&store, size, 5, now()).unwrap();
         let realm = crate::domain::RealmId::parse(DEMO_REALM).unwrap();
         store.set_write_enabled(&realm, true).unwrap();
-        let accounts = dispatch_at(&store, "paymentAccounts", json!({ "realm": DEMO_REALM }), now()).unwrap();
-        let types: Vec<_> = accounts.as_array().unwrap().iter().map(|a| a["accountType"].as_str().unwrap().to_string()).collect();
-        assert!(types.iter().all(|t| t == "Bank" || t == "Credit Card"), "{types:?}");
-        let checking = accounts.as_array().unwrap().iter().find(|a| a["accountType"] == "Bank").unwrap()["qboId"].clone();
+        let accounts = dispatch_at(
+            &store,
+            "paymentAccounts",
+            json!({ "realm": DEMO_REALM }),
+            now(),
+        )
+        .unwrap();
+        let types: Vec<_> = accounts
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|a| a["accountType"].as_str().unwrap().to_string())
+            .collect();
+        assert!(
+            types.iter().all(|t| t == "Bank" || t == "Credit Card"),
+            "{types:?}"
+        );
+        let checking = accounts
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["accountType"] == "Bank")
+            .unwrap()["qboId"]
+            .clone();
         let receivable = json!("92");
 
         let vendor = store
@@ -1092,21 +1579,70 @@ mod tests {
             .unwrap()
             .into_iter()
             .map(|c| c.0)
-            .find(|id| !dispatch_at(&store, "openBills", json!({ "realm": DEMO_REALM, "vendorId": id }), now()).unwrap().as_array().unwrap().is_empty())
+            .find(|id| {
+                !dispatch_at(
+                    &store,
+                    "openBills",
+                    json!({ "realm": DEMO_REALM, "vendorId": id }),
+                    now(),
+                )
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .is_empty()
+            })
             .expect("a demo vendor with an open bill");
-        let bills = dispatch_at(&store, "openBills", json!({ "realm": DEMO_REALM, "vendorId": vendor }), now()).unwrap();
+        let bills = dispatch_at(
+            &store,
+            "openBills",
+            json!({ "realm": DEMO_REALM, "vendorId": vendor }),
+            now(),
+        )
+        .unwrap();
         let owed = bills[0]["balanceMinor"].as_i64().unwrap();
         let amount = format!("{}.{:02}", owed / 100, owed % 100);
         let draft = json!({ "vendorId": vendor, "txnDate": "2026-11-02", "amount": amount, "accountId": checking, "reference": "1207" });
 
         let wrong = json!({ "vendorId": vendor, "txnDate": "2026-11-02", "amount": amount, "accountId": receivable });
-        assert_eq!(dispatch_at(&store, "payBills", json!({ "realm": DEMO_REALM, "draft": wrong }), now()).unwrap_err().status(), 400);
+        assert_eq!(
+            dispatch_at(
+                &store,
+                "payBills",
+                json!({ "realm": DEMO_REALM, "draft": wrong }),
+                now()
+            )
+            .unwrap_err()
+            .status(),
+            400
+        );
 
-        let saved = dispatch_at(&store, "payBills", json!({ "realm": DEMO_REALM, "draft": draft }), now()).unwrap();
+        let saved = dispatch_at(
+            &store,
+            "payBills",
+            json!({ "realm": DEMO_REALM, "draft": draft }),
+            now(),
+        )
+        .unwrap();
         assert_eq!(saved["applied"][0]["amountMinor"], owed);
-        let after = dispatch_at(&store, "openBills", json!({ "realm": DEMO_REALM, "vendorId": vendor }), now()).unwrap();
-        assert!(after.as_array().unwrap().iter().all(|b| b["qboId"] != bills[0]["qboId"]));
-        let register = dispatch_at(&store, "documents", json!({ "realm": DEMO_REALM, "docType": "BillPayment" }), now()).unwrap();
+        let after = dispatch_at(
+            &store,
+            "openBills",
+            json!({ "realm": DEMO_REALM, "vendorId": vendor }),
+            now(),
+        )
+        .unwrap();
+        assert!(after
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|b| b["qboId"] != bills[0]["qboId"]));
+        let register = dispatch_at(
+            &store,
+            "documents",
+            json!({ "realm": DEMO_REALM, "docType": "BillPayment" }),
+            now(),
+        )
+        .unwrap();
         assert_eq!(register[0]["docNumber"], "1207");
         assert_eq!(register[0]["contactType"], "Vendor");
 
@@ -1118,28 +1654,75 @@ mod tests {
     #[test]
     fn a_deposit_banks_waiting_payments_once() {
         let store = Store::open_in_memory().unwrap();
-        let size = DemoSize { customers: 6, vendors: 2, items: 8, invoices: 400, purchase_orders: 2 };
+        let size = DemoSize {
+            customers: 6,
+            vendors: 2,
+            items: 8,
+            invoices: 400,
+            purchase_orders: 2,
+        };
         demo::seed(&store, size, 5, now()).unwrap();
         let realm = crate::domain::RealmId::parse(DEMO_REALM).unwrap();
         store.set_write_enabled(&realm, true).unwrap();
-        let waiting = dispatch_at(&store, "undeposited", json!({ "realm": DEMO_REALM }), now()).unwrap();
+        let waiting =
+            dispatch_at(&store, "undeposited", json!({ "realm": DEMO_REALM }), now()).unwrap();
         let waiting = waiting.as_array().unwrap().clone();
-        assert!(!waiting.is_empty(), "the demo leaves recent cheques in Undeposited Funds");
+        assert!(
+            !waiting.is_empty(),
+            "the demo leaves recent cheques in Undeposited Funds"
+        );
         let ids: Vec<_> = waiting.iter().take(2).map(|w| w["qboId"].clone()).collect();
-        let expected: i64 = waiting.iter().take(2).map(|w| w["amountMinor"].as_i64().unwrap()).sum();
+        let expected: i64 = waiting
+            .iter()
+            .take(2)
+            .map(|w| w["amountMinor"].as_i64().unwrap())
+            .sum();
 
         let wrong = json!({ "accountId": "92", "txnDate": "2026-11-02", "paymentIds": ids });
-        assert_eq!(dispatch_at(&store, "makeDeposit", json!({ "realm": DEMO_REALM, "draft": wrong }), now()).unwrap_err().status(), 400);
+        assert_eq!(
+            dispatch_at(
+                &store,
+                "makeDeposit",
+                json!({ "realm": DEMO_REALM, "draft": wrong }),
+                now()
+            )
+            .unwrap_err()
+            .status(),
+            400
+        );
 
         let draft = json!({ "accountId": "90", "txnDate": "2026-11-02", "paymentIds": ids });
-        let saved = dispatch_at(&store, "makeDeposit", json!({ "realm": DEMO_REALM, "draft": draft }), now()).unwrap();
+        let saved = dispatch_at(
+            &store,
+            "makeDeposit",
+            json!({ "realm": DEMO_REALM, "draft": draft }),
+            now(),
+        )
+        .unwrap();
         assert_eq!(saved["totalMinor"], expected);
-        let after = dispatch_at(&store, "undeposited", json!({ "realm": DEMO_REALM }), now()).unwrap();
-        assert_eq!(after.as_array().unwrap().len(), waiting.len() - 2, "banked payments leave the list");
-        let again = dispatch_at(&store, "makeDeposit", json!({ "realm": DEMO_REALM, "draft": draft }), now()).unwrap_err();
+        let after =
+            dispatch_at(&store, "undeposited", json!({ "realm": DEMO_REALM }), now()).unwrap();
+        assert_eq!(
+            after.as_array().unwrap().len(),
+            waiting.len() - 2,
+            "banked payments leave the list"
+        );
+        let again = dispatch_at(
+            &store,
+            "makeDeposit",
+            json!({ "realm": DEMO_REALM, "draft": draft }),
+            now(),
+        )
+        .unwrap_err();
         assert!(again.to_string().contains("not waiting"), "{again}");
 
-        let register = dispatch_at(&store, "documents", json!({ "realm": DEMO_REALM, "docType": "Deposit" }), now()).unwrap();
+        let register = dispatch_at(
+            &store,
+            "documents",
+            json!({ "realm": DEMO_REALM, "docType": "Deposit" }),
+            now(),
+        )
+        .unwrap();
         assert_eq!(register[0]["totalMinor"], expected);
         let mut qbo = MockQbo::new(now());
         crate::writes::drain_once(&store, &realm, &mut qbo, now()).unwrap();
@@ -1150,23 +1733,68 @@ mod tests {
     fn an_expense_on_the_card_is_charged_to_expense_accounts() {
         let store = book(true);
         let realm = crate::domain::RealmId::parse(DEMO_REALM).unwrap();
-        let accounts = dispatch_at(&store, "expenseAccounts", json!({ "realm": DEMO_REALM }), now()).unwrap();
-        assert!(accounts.as_array().unwrap().iter().any(|a| a["name"] == "Shipping and Freight"));
-        assert!(accounts.as_array().unwrap().iter().all(|a| a["accountType"] != "Bank"));
-        let vendor = store.contacts(&realm, crate::domain::ContactType::Vendor).unwrap().remove(0).0;
+        let accounts = dispatch_at(
+            &store,
+            "expenseAccounts",
+            json!({ "realm": DEMO_REALM }),
+            now(),
+        )
+        .unwrap();
+        assert!(accounts
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|a| a["name"] == "Shipping and Freight"));
+        assert!(accounts
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|a| a["accountType"] != "Bank"));
+        let vendor = store
+            .contacts(&realm, crate::domain::ContactType::Vendor)
+            .unwrap()
+            .remove(0)
+            .0;
 
         let draft = json!({ "payeeId": vendor, "txnDate": "2026-11-02", "accountId": "93",
                             "lines": [ { "accountId": "95", "description": "LTL to Garwood", "amount": "412.50" } ] });
-        let saved = dispatch_at(&store, "saveExpense", json!({ "realm": DEMO_REALM, "draft": draft }), now()).unwrap();
+        let saved = dispatch_at(
+            &store,
+            "saveExpense",
+            json!({ "realm": DEMO_REALM, "draft": draft }),
+            now(),
+        )
+        .unwrap();
         assert_eq!(saved["totalMinor"], 41_250);
-        let register = dispatch_at(&store, "documents", json!({ "realm": DEMO_REALM, "docType": "Purchase" }), now()).unwrap();
+        let register = dispatch_at(
+            &store,
+            "documents",
+            json!({ "realm": DEMO_REALM, "docType": "Purchase" }),
+            now(),
+        )
+        .unwrap();
         assert_eq!(register[0]["qboId"], saved["entityId"]);
         assert_eq!(register[0]["contactType"], "Vendor");
-        let detail = dispatch_at(&store, "document", json!({ "realm": DEMO_REALM, "qboId": saved["entityId"] }), now()).unwrap();
-        assert_eq!(detail["lines"][0]["description"], "Shipping and Freight: LTL to Garwood");
+        let detail = dispatch_at(
+            &store,
+            "document",
+            json!({ "realm": DEMO_REALM, "qboId": saved["entityId"] }),
+            now(),
+        )
+        .unwrap();
+        assert_eq!(
+            detail["lines"][0]["description"],
+            "Shipping and Freight: LTL to Garwood"
+        );
 
         let to_a_bank = json!({ "txnDate": "2026-11-02", "accountId": "93", "lines": [ { "accountId": "90", "amount": "5" } ] });
-        let refused = dispatch_at(&store, "saveExpense", json!({ "realm": DEMO_REALM, "draft": to_a_bank }), now()).unwrap_err();
+        let refused = dispatch_at(
+            &store,
+            "saveExpense",
+            json!({ "realm": DEMO_REALM, "draft": to_a_bank }),
+            now(),
+        )
+        .unwrap_err();
         assert!(refused.to_string().contains("expense account"), "{refused}");
 
         let mut qbo = MockQbo::new(now());
