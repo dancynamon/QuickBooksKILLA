@@ -182,7 +182,7 @@ fn xml_escape(raw: &str) -> String {
 /// built-in "run B only if A succeeded", and a shell `&&` says the same thing
 /// in a form anyone reading this file can verify by eye. `from`, when given,
 /// is baked into the job as `--from`: the cutover book's job carries
-/// `--from 2027-01-01` (D29).
+/// `--from` [`crate::chart::BOOKS_OPEN`] (D29).
 #[allow(clippy::too_many_arguments)]
 pub fn render_launchd_plist(
     label: &str,
@@ -496,7 +496,7 @@ mod tests {
             Path::new("/Users/dan/.local/replica.db"),
             Path::new("/Users/dan/.local/qbo-tb.csv"),
             Path::new("/Users/dan/.local/nightly"),
-            Some(ymd(2027, 1, 1)),
+            Some(chart::BOOKS_OPEN),
         );
         assert!(
             plist.contains("--out /Users/dan/.local/nightly --from 2027-01-01 --as-of"),
@@ -508,6 +508,6 @@ mod tests {
     fn a_book_without_the_slim_opening_may_run_unbounded() {
         let (ledger, _store) = empty("aquamentor");
         check_window(&ledger, "aquamentor", None).unwrap();
-        check_window(&ledger, "aquamentor", Some(ymd(2027, 1, 1))).unwrap();
+        check_window(&ledger, "aquamentor", Some(chart::BOOKS_OPEN)).unwrap();
     }
 }
