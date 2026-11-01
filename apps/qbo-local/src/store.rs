@@ -1048,6 +1048,41 @@ impl Store {
         Ok(report)
     }
 
+    /// [`Store::apply_batch`] for what a CDC poll or its backfill read.
+    ///
+    /// Polls overlap (`sync::DEFAULT_CDC_OVERLAP_MINUTES`), so the same version
+    /// of a record arrives more than once. A version the replica already holds
+    /// is skipped, neither re-written nor counted as mirrored: a re-delivery
+    /// is not a change, and counting it would hold the daemon at its focused
+    /// cadence for as long as the overlap reaches back. A version older than
+    /// the one held (a lower `SyncToken`) is skipped too, so a late
+    /// re-delivery can never roll a record back.
+    ///
+    /// Sweeps keep [`Store::apply_batch`]'s re-write of every record, which is
+    /// what re-projects a record a newer parser would read differently.
+    pub fn apply_changes(
+        &self,
+        realm: &RealmId,
+        entities: &[MirroredEntity],
+        cursor: Option<&SyncCursor>,
+        now: DateTime<Utc>,
+    ) -> Result<BatchReport, StoreError> {
+        let transaction = self.connection.unchecked_transaction()?;
+        let mut fresh = Vec::with_capacity(entities.len());
+        let mut already_held = 0;
+        for entity in entities {
+            if holds_this_version_or_newer(&transaction, realm, entity)? {
+                already_held += 1;
+            } else {
+                fresh.push(entity.clone());
+            }
+        }
+        let mut report = apply_batch_in(&transaction, realm, &fresh, cursor, now)?;
+        report.already_held = already_held;
+        transaction.commit()?;
+        Ok(report)
+    }
+
     /// [`Store::apply_batch`] for one page of a full sweep, recording in the
     /// same transaction where the sweep has got to. `Some(checkpoint)` means
     /// more pages follow; `None` means this was the last one, so the
@@ -1927,6 +1962,34 @@ fn quarantine_in(
     Ok(())
 }
 
+/// Whether the replica already holds `entity` at this version or a later one.
+/// See [`Store::apply_changes`].
+fn holds_this_version_or_newer(
+    connection: &rusqlite::Connection,
+    realm: &RealmId,
+    entity: &MirroredEntity,
+) -> Result<bool, StoreError> {
+    let held: Option<(String, String, bool)> = connection
+        .query_row(
+            "SELECT sync_token, last_updated_utc, is_deleted FROM entities
+             WHERE realm_id = ?1 AND entity_type = ?2 AND qbo_id = ?3",
+            params![realm.as_str(), entity.entity_type.as_str(), entity.qbo_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()?;
+    let Some((sync_token, last_updated_utc, is_deleted)) = held else {
+        return Ok(false);
+    };
+    let identical = sync_token == entity.sync_token
+        && last_updated_utc == entity.last_updated_utc.to_rfc3339()
+        && is_deleted == entity.is_deleted;
+    let older = matches!(
+        (entity.sync_token.parse::<u64>(), sync_token.parse::<u64>()),
+        (Ok(incoming), Ok(held)) if incoming < held
+    );
+    Ok(identical || older)
+}
+
 /// The body of [`Store::apply_batch`], inside a caller's transaction.
 fn apply_batch_in(
     transaction: &rusqlite::Transaction,
@@ -2006,6 +2069,9 @@ pub struct BatchReport {
     pub projected: usize,
     pub not_projected: usize,
     pub quarantined: usize,
+    /// Records skipped because the replica already held that version or a
+    /// newer one ([`Store::apply_changes`] only).
+    pub already_held: usize,
 }
 
 fn parse_timestamp(raw: &str) -> DateTime<Utc> {

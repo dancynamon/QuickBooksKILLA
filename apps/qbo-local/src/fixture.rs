@@ -29,7 +29,8 @@ use serde_json::{json, Value};
 use uuid::Uuid;
 
 use crate::client::{
-    EntityPayload, IndexEntry, QboClient, QboError, ReportName, ReportParams, UpdatedRange,
+    EntityPayload, IndexEntry, QboClient, QboError, ReadPage, ReportName, ReportParams,
+    UpdatedRange,
 };
 use crate::domain::{EntityType, RealmId};
 
@@ -372,17 +373,17 @@ impl<C: QboClient> RecordingQbo<C> {
 }
 
 impl<C: QboClient> QboClient for RecordingQbo<C> {
-    fn query(
+    fn query_page(
         &mut self,
         realm: &RealmId,
         entity_type: EntityType,
         updated: Option<UpdatedRange>,
         start_position: usize,
         max_results: usize,
-    ) -> Result<Vec<EntityPayload>, QboError> {
-        let result = self
-            .inner
-            .query(realm, entity_type, updated, start_position, max_results);
+    ) -> Result<ReadPage, QboError> {
+        let result =
+            self.inner
+                .query_page(realm, entity_type, updated, start_position, max_results);
         let rel = query_path(entity_type, updated, start_position);
         let params = json!({
             "realm": realm.as_str(),
@@ -392,20 +393,20 @@ impl<C: QboClient> QboClient for RecordingQbo<C> {
             "max_results": max_results,
         });
         let body = match &result {
-            Ok(payloads) => Value::Array(payloads.iter().map(payload_to_json).collect()),
+            Ok(page) => Value::Array(page.entities.iter().map(payload_to_json).collect()),
             Err(error) => error_to_json(error),
         };
         self.record("query", Some(entity_type), params, rel, body)?;
         result
     }
 
-    fn cdc(
+    fn cdc_page(
         &mut self,
         realm: &RealmId,
         entity_types: &[EntityType],
         changed_since: DateTime<Utc>,
-    ) -> Result<Vec<EntityPayload>, QboError> {
-        let result = self.inner.cdc(realm, entity_types, changed_since);
+    ) -> Result<ReadPage, QboError> {
+        let result = self.inner.cdc_page(realm, entity_types, changed_since);
         let rel = cdc_path(changed_since, entity_types);
         let params = json!({
             "realm": realm.as_str(),
@@ -413,7 +414,7 @@ impl<C: QboClient> QboClient for RecordingQbo<C> {
             "changed_since": changed_since.to_rfc3339(),
         });
         let body = match &result {
-            Ok(payloads) => Value::Array(payloads.iter().map(payload_to_json).collect()),
+            Ok(page) => Value::Array(page.entities.iter().map(payload_to_json).collect()),
             Err(error) => error_to_json(error),
         };
         self.record("cdc", None, params, rel, body)?;
@@ -584,14 +585,16 @@ impl FixtureQbo {
 const READ_ONLY: &str = "fixtures are read-only";
 
 impl QboClient for FixtureQbo {
-    fn query(
+    /// A replay has no server clock to report: `server_time` is `None`, and
+    /// the driver falls back to the records' own timestamps.
+    fn query_page(
         &mut self,
         _realm: &RealmId,
         entity_type: EntityType,
         updated: Option<UpdatedRange>,
         start_position: usize,
         max_results: usize,
-    ) -> Result<Vec<EntityPayload>, QboError> {
+    ) -> Result<ReadPage, QboError> {
         let rel = query_path(entity_type, updated, start_position);
         let value = self.load(&rel)?;
         if let Some(error) = as_recorded_error(&value) {
@@ -604,15 +607,18 @@ impl QboClient for FixtureQbo {
             .iter()
             .map(|v| payload_from_json(&rel, v))
             .collect::<Result<Vec<_>, _>>()?;
-        Ok(payloads.into_iter().take(max_results).collect())
+        Ok(ReadPage {
+            entities: payloads.into_iter().take(max_results).collect(),
+            server_time: None,
+        })
     }
 
-    fn cdc(
+    fn cdc_page(
         &mut self,
         _realm: &RealmId,
         entity_types: &[EntityType],
         changed_since: DateTime<Utc>,
-    ) -> Result<Vec<EntityPayload>, QboError> {
+    ) -> Result<ReadPage, QboError> {
         let rel = cdc_path(changed_since, entity_types);
         let value = self.load(&rel)?;
         if let Some(error) = as_recorded_error(&value) {
@@ -621,7 +627,13 @@ impl QboClient for FixtureQbo {
         let array = value
             .as_array()
             .ok_or_else(|| corrupt(&rel, "expected an array"))?;
-        array.iter().map(|v| payload_from_json(&rel, v)).collect()
+        Ok(ReadPage {
+            entities: array
+                .iter()
+                .map(|v| payload_from_json(&rel, v))
+                .collect::<Result<_, _>>()?,
+            server_time: None,
+        })
     }
 
     fn create(

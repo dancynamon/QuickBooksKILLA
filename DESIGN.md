@@ -506,7 +506,32 @@ sweep-based baseline that is always correct. This converts "CDC does not cover
 entity X" from a production incident into a slower refresh for that entity.
 
 **Clock skew.** Cursors are Intuit's timestamps, never the local clock. The local
-clock is used only for cadence.
+clock is used only for cadence (poll intervals, the rate limiter, when an
+uncovered type's next sweep is due, `last_full_sweep`).
+
+- Every query and CDC response carries a top-level `time`, Intuit's clock when it
+  answered. A complete poll advances the cursor to exactly that. An empty poll
+  still advances it, so a quiet book does not age into a sweep.
+- A full sweep's cursor is the `time` of its first page. A backfill reads
+  `[cursor − overlap, time of the truncated poll)` and advances to that `time`.
+- Each poll reaches back **5 minutes** before its cursor (`cdc_overlap`), for a
+  write still committing when the last poll was answered. Records that come back
+  twice are recognised by `SyncToken` and skipped, not re-written or counted as
+  changes (`Store::apply_changes`); an older `SyncToken` than the one held is
+  never applied, so a late re-delivery cannot roll a record back.
+- If Intuit's `time` is earlier than the stored cursor, the cursor was written by a
+  clock running ahead (any cursor from before this rule). What changed between the
+  two was never fetched and no poll can say what it was, so the type is swept
+  (`SweepReason::CursorAheadOfServer`).
+- A client that cannot report `time` (a replayed fixture) cursors on the newest
+  `MetaData.LastUpdatedTime` it read instead, and an empty read leaves the cursor
+  where it was. The Mac's clock is never the fallback for a CDC cursor. A full
+  sweep without a `time` still starts from the local clock, which only a fixture
+  replay can reach.
+
+Covered by `apps/qbo-local/tests/clock_skew.rs`, including a property test that no
+edit is ever skipped across a cursor advance under ±3 h skew, multi-day sleeps and
+CDC truncation.
 
 ### 4.4 Rate limiting
 
@@ -865,6 +890,7 @@ Measured through the HTTP dev server, so the Tauri IPC path will differ.
 | 2 | OAuth client id/secret and a sandbox company, on the machine that will run the first live sync | M0 completion |
 | 3 | ~~Confirm QBO's tax rounding mode (§1)~~ Closed: half up, from the replica (`DECISIONS.md` D46) | — |
 | 4 | Confirm the query endpoint accepts a `MetaData.LastUpdatedTime` range and honours `ORDERBY` on it (§4.3) — CDC truncation recovery depends on it | M1 |
-| 5 | §4.3 says cursors are Intuit's timestamps, never the local clock, but `SyncDriver` still writes the caller's `now`, and the daemon passes the Mac's wall clock. A Mac clock ahead of Intuit's silently skips changes made in the gap. Take the server time from the CDC/query response and cursor on that. Carried over from the stale `claude/happy-lehmann-b4dffd` branch | Relying on the daemon alone after cutover |
+| 5 | ~~Cursors written from the Mac's clock rather than Intuit's~~ Closed: cursors are the response `time`, with a 5-minute overlap and idempotent upserts (§4.3) | — |
+| 6 | A backfill (and a sweep) pages a live result set by `STARTPOSITION`. A record in an already-read page that changes mid-backfill leaves the window, every later record shifts down one position, and one unchanged record can fall between two pages. Its timestamp is behind the new cursor, so no poll will find it, though the next reconciliation sweep (§7) will. Sweeps resume one page early for the same reason, but only after a pause. Fix: keyset paging (`WHERE Id > last`) or a re-read of the window until a pass returns no new versions | Relying on the daemon alone after cutover |
 
 Closed: WaterLine CNC sizing — not being measured, see §0.

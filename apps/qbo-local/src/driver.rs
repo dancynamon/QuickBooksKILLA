@@ -11,13 +11,14 @@
 use chrono::{DateTime, Duration, Utc};
 use thiserror::Error;
 
-use crate::client::{EntityPayload, QboClient, QboError, UpdatedRange};
+use crate::client::{EntityPayload, QboClient, QboError, ReadPage, UpdatedRange};
 use crate::domain::{EntityType, RealmId};
 use crate::ratelimit::{BucketClass, RealmLimiter, RealmLimits};
 use crate::store::{MirroredEntity, Store, StoreError, SweepCheckpoint};
 use crate::sync::{
-    cdc_coverage_confirmed, classify_response_with_cap, plan_sync, CdcOutcome, SweepReason,
-    SyncCursor, SyncStrategy, CDC_RESPONSE_CAP, DEFAULT_CDC_MAX_AGE_DAYS,
+    cdc_coverage_confirmed, classify_response_with_cap, cursor_after_read, plan_sync, CdcOutcome,
+    SweepReason, SyncCursor, SyncStrategy, CDC_RESPONSE_CAP, DEFAULT_CDC_MAX_AGE_DAYS,
+    DEFAULT_CDC_OVERLAP_MINUTES,
 };
 
 mod reconcile;
@@ -53,6 +54,10 @@ pub struct SyncOptions {
     /// have only the sweep; run every tick it was most of a tick's requests,
     /// for records that change a few times a year. D43.
     pub uncovered_sweep_interval: Duration,
+    /// How far before its cursor each poll reaches back, so a record still
+    /// committing when Intuit answered is not stepped over. Re-read records
+    /// the replica already holds are skipped, so this costs bandwidth only.
+    pub cdc_overlap: Duration,
 }
 
 impl Default for SyncOptions {
@@ -63,6 +68,7 @@ impl Default for SyncOptions {
             cdc_response_cap: CDC_RESPONSE_CAP,
             limits: RealmLimits::default(),
             uncovered_sweep_interval: Duration::hours(DEFAULT_UNCOVERED_SWEEP_HOURS),
+            cdc_overlap: Duration::minutes(DEFAULT_CDC_OVERLAP_MINUTES),
         }
     }
 }
@@ -249,9 +255,10 @@ impl<C: QboClient> SyncDriver<C> {
         let resumed = store
             .load_sweep_checkpoint(realm, entity_type)?
             .filter(|checkpoint| now - checkpoint.started_at < self.options.cdc_max_age);
-        let started_at = resumed
-            .as_ref()
-            .map_or(now, |checkpoint| checkpoint.started_at);
+        // A fresh sweep's start is Intuit's clock when it served the first
+        // page, not ours (§4.3): that page is the earliest snapshot the sweep
+        // holds, so anything changed after it carries a later timestamp.
+        let mut started_at = resumed.as_ref().map(|checkpoint| checkpoint.started_at);
         // Back up one page: pages are ordered by Id, so a record deleted
         // during the pause shifts every later one down a position, and an
         // exact resume would skip whichever record slid across the boundary.
@@ -263,18 +270,24 @@ impl<C: QboClient> SyncDriver<C> {
         loop {
             let page = self.fetch_page(realm, entity_type, None, start, now, &mut report)?;
             pages += 1;
+            // Only a client that cannot report Intuit's clock (a replayed
+            // fixture) leaves the local one standing in.
+            let started_at = *started_at.get_or_insert(page.server_time.unwrap_or(now));
+            let page = page.entities;
             let returned = page.len();
 
             // The sweep's own cursor is the moment the sweep started. Using the
             // newest record's timestamp instead would leave a gap for anything
             // changed mid-sweep, which is the same silent loss §4.3 guards CDC
-            // against.
+            // against. `last_full_sweep` is cadence, not a cursor (when the
+            // next sweep of an uncovered type is due, when the soak began), so
+            // it stays on the local clock that cadence runs on.
             let final_page = returned < self.options.page_size;
             let cursor = final_page.then(|| SyncCursor {
                 realm_id: realm.clone(),
                 entity_type,
                 last_cdc_cursor: Some(started_at),
-                last_full_sweep: Some(started_at),
+                last_full_sweep: Some(now),
             });
             let checkpoint = (!final_page).then(|| SweepCheckpoint {
                 next_start: start + returned,
@@ -324,26 +337,77 @@ impl<C: QboClient> SyncDriver<C> {
 
         self.spend(realm, BucketClass::General, now)?;
         report.requests += 1;
-        let changed = self.client.cdc(realm, &[entity_type], changed_since)?;
+        // Reach back past the cursor by the overlap: a record still
+        // committing when the last poll was answered may be stamped just
+        // before it. What comes back twice is skipped by `apply_changes`.
+        let reach_back = changed_since - self.options.cdc_overlap;
+        let changed = self.client.cdc_page(realm, &[entity_type], reach_back)?;
 
-        match classify_response_with_cap(changed.len(), self.options.cdc_response_cap) {
+        // Intuit's clock is behind the cursor, so the cursor was written by a
+        // clock running ahead. What changed between the two was never
+        // fetched, and only a sweep can find it.
+        if changed
+            .server_time
+            .is_some_and(|server_time| server_time < changed_since)
+        {
+            let swept = self.full_sweep(
+                store,
+                realm,
+                entity_type,
+                SweepReason::CursorAheadOfServer,
+                now,
+            )?;
+            return Ok(EntitySyncReport {
+                requests: swept.requests + report.requests,
+                ..swept
+            });
+        }
+
+        match classify_response_with_cap(changed.entities.len(), self.options.cdc_response_cap) {
             CdcOutcome::Complete => {
                 let mut advanced = cursor;
-                advanced.advance(&CdcOutcome::Complete, now);
-                self.apply(store, realm, &changed, Some(&advanced), now, &mut report)?;
+                let up_to = cursor_after_read(
+                    changed_since,
+                    changed.server_time,
+                    changed
+                        .entities
+                        .iter()
+                        .map(|entity| entity.last_updated_utc),
+                );
+                advanced.advance(&CdcOutcome::Complete, up_to);
+                self.apply(
+                    store,
+                    realm,
+                    &changed.entities,
+                    Some(&advanced),
+                    now,
+                    &mut report,
+                )?;
                 Ok(report)
             }
             CdcOutcome::PossiblyTruncated => {
                 // The response may be missing records, so none of it can be
                 // trusted to define a new cursor. Discard it and re-read the
                 // window through the bounded endpoint, where the size of each
-                // request is under our control rather than Intuit's.
-                self.backfill(store, realm, entity_type, changed_since, now, &mut report)
+                // request is under our control rather than Intuit's. Its
+                // server time is kept: it bounds the window.
+                self.backfill(
+                    store,
+                    realm,
+                    entity_type,
+                    BackfillWindow {
+                        cursor: changed_since,
+                        from: reach_back,
+                        server_time: changed.server_time,
+                    },
+                    now,
+                    &mut report,
+                )
             }
         }
     }
 
-    /// Re-read `[changed_since, now)` through the query endpoint, paged.
+    /// Re-read `[from, server_time)` through the query endpoint, paged.
     ///
     /// This is why the bounded window matters. CDC takes only a `changedSince`
     /// and has no upper bound, so a truncated CDC response cannot be narrowed:
@@ -353,38 +417,53 @@ impl<C: QboClient> SyncDriver<C> {
     /// window can be re-read completely, at a page size we choose rather than
     /// one Intuit imposes.
     ///
-    /// The cursor advances to the moment the sync started, never to the newest
-    /// record seen. Anything modified while the backfill was running has a later
-    /// timestamp and is picked up by the next poll rather than skipped by this
-    /// one.
+    /// The window closes at Intuit's clock when it answered the truncated
+    /// poll, and the cursor advances to exactly that, never to the newest
+    /// record seen and never to the local clock (§4.3). Anything modified
+    /// while the backfill was running has a later timestamp and is picked up
+    /// by the next poll rather than skipped by this one.
     fn backfill(
         &mut self,
         store: &Store,
         realm: &RealmId,
         entity_type: EntityType,
-        changed_since: DateTime<Utc>,
+        window: BackfillWindow,
         now: DateTime<Utc>,
         report: &mut EntitySyncReport,
     ) -> Result<EntitySyncReport, SyncError> {
-        let window = UpdatedRange {
-            from: changed_since,
-            to: now,
+        let changed_since = window.cursor;
+        // Without Intuit's clock (a replayed fixture), the local one only
+        // bounds the read. The cursor is still made of what was read.
+        let range = UpdatedRange {
+            from: window.from,
+            to: window.server_time.unwrap_or(now),
         };
         let last_full_sweep = store.load_cursor(realm, entity_type)?.last_full_sweep;
+        let mut newest_read: Option<DateTime<Utc>> = None;
 
         let mut start = 0usize;
         let mut pages = 0usize;
 
         loop {
-            let page = self.fetch_page(realm, entity_type, Some(window), start, now, report)?;
+            let page = self.fetch_page(realm, entity_type, Some(range), start, now, report)?;
             pages += 1;
+            let page = page.entities;
             let returned = page.len();
             let final_page = returned < self.options.page_size;
+            newest_read = page
+                .iter()
+                .map(|entity| entity.last_updated_utc)
+                .chain(newest_read)
+                .max();
 
             let cursor = final_page.then(|| SyncCursor {
                 realm_id: realm.clone(),
                 entity_type,
-                last_cdc_cursor: Some(now),
+                last_cdc_cursor: Some(cursor_after_read(
+                    changed_since,
+                    window.server_time,
+                    newest_read,
+                )),
                 last_full_sweep,
             });
 
@@ -413,10 +492,10 @@ impl<C: QboClient> SyncDriver<C> {
         start_position: usize,
         now: DateTime<Utc>,
         report: &mut EntitySyncReport,
-    ) -> Result<Vec<EntityPayload>, SyncError> {
+    ) -> Result<ReadPage, SyncError> {
         self.spend(realm, BucketClass::General, now)?;
         report.requests += 1;
-        Ok(self.client.query(
+        Ok(self.client.query_page(
             realm,
             entity_type,
             updated,
@@ -435,7 +514,7 @@ impl<C: QboClient> SyncDriver<C> {
         report: &mut EntitySyncReport,
     ) -> Result<(), SyncError> {
         let entities: Vec<MirroredEntity> = payloads.iter().cloned().map(mirrored).collect();
-        let applied = store.apply_batch(realm, &entities, cursor, now)?;
+        let applied = store.apply_changes(realm, &entities, cursor, now)?;
         report.mirrored += applied.mirrored;
         report.projected += applied.projected;
         report.quarantined += applied.quarantined;
@@ -461,6 +540,17 @@ impl<C: QboClient> SyncDriver<C> {
             })
         }
     }
+}
+
+/// What a backfill re-reads after a truncated poll.
+#[derive(Clone, Copy, Debug)]
+struct BackfillWindow {
+    /// The stored cursor the poll started from.
+    cursor: DateTime<Utc>,
+    /// Where the read starts: the cursor less the overlap.
+    from: DateTime<Utc>,
+    /// Intuit's clock when it answered the truncated poll.
+    server_time: Option<DateTime<Utc>>,
 }
 
 fn mirrored(payload: EntityPayload) -> MirroredEntity {

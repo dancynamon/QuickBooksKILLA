@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use chrono::{DateTime, TimeZone, Utc};
-use qbo_local::client::{EntityPayload, MockQbo, QboClient, QboError, UpdatedRange};
+use qbo_local::client::{EntityPayload, MockQbo, QboClient, QboError, ReadPage, UpdatedRange};
 use qbo_local::clock::{Clock, FakeClock};
 use qbo_local::daemon::{Cadence, Daemon, DaemonOptions};
 use qbo_local::domain::{DocumentType, EntityType, RealmId};
@@ -528,27 +528,27 @@ impl FailOn {
 }
 
 impl QboClient for FailOn {
-    fn query(
+    fn query_page(
         &mut self,
         realm: &RealmId,
         entity_type: EntityType,
         updated: Option<UpdatedRange>,
         start_position: usize,
         max_results: usize,
-    ) -> Result<Vec<EntityPayload>, QboError> {
+    ) -> Result<ReadPage, QboError> {
         self.check(&[entity_type])?;
         self.inner
-            .query(realm, entity_type, updated, start_position, max_results)
+            .query_page(realm, entity_type, updated, start_position, max_results)
     }
 
-    fn cdc(
+    fn cdc_page(
         &mut self,
         realm: &RealmId,
         entity_types: &[EntityType],
         changed_since: DateTime<Utc>,
-    ) -> Result<Vec<EntityPayload>, QboError> {
+    ) -> Result<ReadPage, QboError> {
         self.check(entity_types)?;
-        self.inner.cdc(realm, entity_types, changed_since)
+        self.inner.cdc_page(realm, entity_types, changed_since)
     }
 
     fn create(

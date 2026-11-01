@@ -364,6 +364,7 @@ fn a_truncated_poll_is_backfilled_through_bounded_windows() {
         );
     }
     driver.client_mut().set_cdc_cap(2);
+    driver.client_mut().advance(at(20));
 
     let report = driver
         .sync_entity_type(&store, &realm(), EntityType::Invoice, at(20))
@@ -415,13 +416,14 @@ fn a_truncated_poll_does_not_advance_the_cursor_past_what_it_proved() {
         );
     }
 
+    driver.client_mut().advance(at(20));
     driver
         .sync_entity_type(&store, &realm(), EntityType::Invoice, at(20))
         .unwrap();
 
-    // The cursor advances to the moment the sync started, not to the newest
-    // record CDC happened to return — which is the whole difference between a
-    // complete backfill and a silent gap.
+    // The cursor advances to Intuit's clock when it answered the poll, not to
+    // the newest record CDC happened to return — which is the whole
+    // difference between a complete backfill and a silent gap.
     let cursor = store.load_cursor(&realm(), EntityType::Invoice).unwrap();
     assert_eq!(cursor.last_cdc_cursor, Some(at(20)));
 
@@ -554,7 +556,7 @@ fn sync_refuses_rather_than_burning_through_the_rate_budget() {
 #[test]
 fn a_sync_that_returned_nothing_still_records_that_it_ran() {
     let store = store();
-    let mut driver = driver(MockQbo::new(at(0)), options(100));
+    let mut driver = driver(MockQbo::new(at(2)), options(100));
 
     let report = driver
         .sync_entity_type(&store, &realm(), EntityType::Invoice, at(2))
@@ -574,7 +576,7 @@ fn a_sync_that_returned_nothing_still_records_that_it_ran() {
 fn a_backfill_pages_through_a_window_bigger_than_one_page() {
     // The first test's window fitted in a single page, so it never proved the
     // loop terminates. This one makes the window larger than the page.
-    let mut qbo = MockQbo::new(at(0));
+    let mut qbo = MockQbo::new(at(2));
     qbo.seed(&realm(), invoice("1", "7001", 100.0, at(1)));
 
     let store = store();
@@ -602,6 +604,7 @@ fn a_backfill_pages_through_a_window_bigger_than_one_page() {
         );
     }
 
+    driver.client_mut().advance(at(30));
     let report = driver
         .sync_entity_type(&store, &realm(), EntityType::Invoice, at(30))
         .unwrap();
@@ -625,7 +628,7 @@ fn a_backfill_pages_through_a_window_bigger_than_one_page() {
 fn an_interrupted_full_sweep_resumes_from_its_checkpoint() {
     // The pull that spent the October quota restarted big types from page
     // one each time it was cut off. It must pick up where it stopped.
-    let mut qbo = MockQbo::new(at(0));
+    let mut qbo = MockQbo::new(at(2));
     for index in 0..35 {
         qbo.seed(
             &realm(),
@@ -686,14 +689,15 @@ fn an_interrupted_full_sweep_resumes_from_its_checkpoint() {
     );
 
     // The checkpoint is gone, and the cursor is the sweep's start, so the
-    // next poll covers anything changed while it was paused.
+    // next poll covers anything changed while it was paused. The sweep is
+    // recorded as done when it finished.
     assert!(store
         .load_sweep_checkpoint(&realm(), EntityType::Invoice)
         .unwrap()
         .is_none());
     let cursor = store.load_cursor(&realm(), EntityType::Invoice).unwrap();
-    assert_eq!(cursor.last_full_sweep, Some(at(2)));
     assert_eq!(cursor.last_cdc_cursor, Some(at(2)));
+    assert_eq!(cursor.last_full_sweep, Some(at(3)));
 }
 
 #[test]
@@ -782,11 +786,25 @@ fn a_type_cdc_does_not_cover_is_swept_again_only_after_the_interval() {
 
     let calls = driver.client_mut().query_calls;
     let soon = driver
-        .sync_entity_type(&store, &realm(), EntityType::TaxCode, at(2) + Duration::minutes(59))
+        .sync_entity_type(
+            &store,
+            &realm(),
+            EntityType::TaxCode,
+            at(2) + Duration::minutes(59),
+        )
         .unwrap();
-    assert_eq!(soon.path, SyncPath::SweepNotDue { last_full_sweep: at(2) });
+    assert_eq!(
+        soon.path,
+        SyncPath::SweepNotDue {
+            last_full_sweep: at(2)
+        }
+    );
     assert_eq!(soon.requests, 0);
-    assert_eq!(driver.client_mut().query_calls, calls, "no request while not due");
+    assert_eq!(
+        driver.client_mut().query_calls,
+        calls,
+        "no request while not due"
+    );
 
     let due = driver
         .sync_entity_type(&store, &realm(), EntityType::TaxCode, at(3))
@@ -796,7 +814,7 @@ fn a_type_cdc_does_not_cover_is_swept_again_only_after_the_interval() {
 
 #[test]
 fn an_interrupted_tax_code_sweep_resumes_from_its_checkpoint() {
-    let mut qbo = MockQbo::new(at(0));
+    let mut qbo = MockQbo::new(at(2));
     for index in 0..35 {
         qbo.seed(&realm(), tax_code(&format!("{index:03}"), at(1)));
     }
@@ -815,7 +833,10 @@ fn an_interrupted_tax_code_sweep_resumes_from_its_checkpoint() {
     );
 
     let outcome = driver.sync_entity_type(&store, &realm(), EntityType::TaxCode, at(2));
-    assert!(matches!(outcome, Err(SyncError::RateBudgetExhausted { .. })));
+    assert!(matches!(
+        outcome,
+        Err(SyncError::RateBudgetExhausted { .. })
+    ));
     let checkpoint = store
         .load_sweep_checkpoint(&realm(), EntityType::TaxCode)
         .unwrap()
@@ -835,7 +856,9 @@ fn an_interrupted_tax_code_sweep_resumes_from_its_checkpoint() {
         .is_none());
 
     // The cursor carries the sweep's original start, so whatever changed
-    // during the pause is inside the next sweep's reach.
+    // during the pause is inside the next sweep's reach. The interval to the
+    // next sweep runs from when this one finished.
     let cursor = store.load_cursor(&realm(), EntityType::TaxCode).unwrap();
-    assert_eq!(cursor.last_full_sweep, Some(at(2)));
+    assert_eq!(cursor.last_cdc_cursor, Some(at(2)));
+    assert_eq!(cursor.last_full_sweep, Some(at(3)));
 }

@@ -13,7 +13,10 @@ use chrono::{DateTime, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::client::{EntityPayload, IndexEntry, QboClient, QboError, ReportName, ReportParams, UpdatedRange};
+use crate::client::{
+    EntityPayload, IndexEntry, QboClient, QboError, ReadPage, ReportName, ReportParams,
+    UpdatedRange,
+};
 use crate::domain::{EntityType, RealmId};
 use crate::store::{Store, StoreError};
 
@@ -57,7 +60,10 @@ impl AuditLog {
     pub fn append(&self, entry: &AuditEntry) -> std::io::Result<()> {
         let mut line = serde_json::to_vec(entry).map_err(std::io::Error::other)?;
         line.push(b'\n');
-        let mut file = OpenOptions::new().create(true).append(true).open(&self.path)?;
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)?;
         file.write_all(&line)?;
         file.sync_all()
     }
@@ -118,7 +124,11 @@ impl<C: QboClient> AuditedClient<C> {
         result: &Result<EntityPayload, QboError>,
     ) -> Result<(), QboError> {
         let (outcome, response, resulting_id) = match result {
-            Ok(payload) => ("applied".to_string(), Some(payload.raw_json.clone()), Some(payload.qbo_id.clone())),
+            Ok(payload) => (
+                "applied".to_string(),
+                Some(payload.raw_json.clone()),
+                Some(payload.qbo_id.clone()),
+            ),
             Err(error) => (format!("failed: {error}"), None, qbo_id.map(str::to_string)),
         };
         let entry = AuditEntry {
@@ -133,31 +143,32 @@ impl<C: QboClient> AuditedClient<C> {
             outcome,
             response,
         };
-        self.log
-            .append(&entry)
-            .map_err(|e| QboError::Network(format!("audit log unwritable, write not confirmed: {e}")))
+        self.log.append(&entry).map_err(|e| {
+            QboError::Network(format!("audit log unwritable, write not confirmed: {e}"))
+        })
     }
 }
 
 impl<C: QboClient> QboClient for AuditedClient<C> {
-    fn query(
+    fn query_page(
         &mut self,
         realm: &RealmId,
         entity_type: EntityType,
         updated: Option<UpdatedRange>,
         start_position: usize,
         max_results: usize,
-    ) -> Result<Vec<EntityPayload>, QboError> {
-        self.inner.query(realm, entity_type, updated, start_position, max_results)
+    ) -> Result<ReadPage, QboError> {
+        self.inner
+            .query_page(realm, entity_type, updated, start_position, max_results)
     }
 
-    fn cdc(
+    fn cdc_page(
         &mut self,
         realm: &RealmId,
         entity_types: &[EntityType],
         changed_since: DateTime<Utc>,
-    ) -> Result<Vec<EntityPayload>, QboError> {
-        self.inner.cdc(realm, entity_types, changed_since)
+    ) -> Result<ReadPage, QboError> {
+        self.inner.cdc_page(realm, entity_types, changed_since)
     }
 
     fn create(
@@ -168,7 +179,16 @@ impl<C: QboClient> QboClient for AuditedClient<C> {
         request_id: Uuid,
     ) -> Result<EntityPayload, QboError> {
         let result = self.inner.create(realm, entity_type, payload, request_id);
-        self.record(realm, entity_type, "create", request_id, None, None, payload, &result)?;
+        self.record(
+            realm,
+            entity_type,
+            "create",
+            request_id,
+            None,
+            None,
+            payload,
+            &result,
+        )?;
         result
     }
 
@@ -181,8 +201,24 @@ impl<C: QboClient> QboClient for AuditedClient<C> {
         base_sync_token: &str,
         request_id: Uuid,
     ) -> Result<EntityPayload, QboError> {
-        let result = self.inner.update(realm, entity_type, qbo_id, payload, base_sync_token, request_id);
-        self.record(realm, entity_type, "update", request_id, Some(qbo_id), Some(base_sync_token), payload, &result)?;
+        let result = self.inner.update(
+            realm,
+            entity_type,
+            qbo_id,
+            payload,
+            base_sync_token,
+            request_id,
+        );
+        self.record(
+            realm,
+            entity_type,
+            "update",
+            request_id,
+            Some(qbo_id),
+            Some(base_sync_token),
+            payload,
+            &result,
+        )?;
         result
     }
 
@@ -202,7 +238,8 @@ impl<C: QboClient> QboClient for AuditedClient<C> {
         start_position: usize,
         max_results: usize,
     ) -> Result<Vec<IndexEntry>, QboError> {
-        self.inner.index(realm, entity_type, start_position, max_results)
+        self.inner
+            .index(realm, entity_type, start_position, max_results)
     }
 
     fn fetch(
@@ -232,7 +269,10 @@ const SNAPSHOT_PREFIX: &str = "snapshot-";
 const SNAPSHOT_SUFFIX: &str = ".db";
 
 fn snapshot_name(date: NaiveDate) -> String {
-    format!("{SNAPSHOT_PREFIX}{}{SNAPSHOT_SUFFIX}", date.format("%Y-%m-%d"))
+    format!(
+        "{SNAPSHOT_PREFIX}{}{SNAPSHOT_SUFFIX}",
+        date.format("%Y-%m-%d")
+    )
 }
 
 /// The date of a file this module wrote, or `None` for anything else. Only a
@@ -240,7 +280,9 @@ fn snapshot_name(date: NaiveDate) -> String {
 /// someone else put in the directory is never touched.
 fn snapshot_date(path: &Path) -> Option<NaiveDate> {
     let name = path.file_name()?.to_str()?;
-    let date = name.strip_prefix(SNAPSHOT_PREFIX)?.strip_suffix(SNAPSHOT_SUFFIX)?;
+    let date = name
+        .strip_prefix(SNAPSHOT_PREFIX)?
+        .strip_suffix(SNAPSHOT_SUFFIX)?;
     NaiveDate::parse_from_str(date, "%Y-%m-%d").ok()
 }
 
@@ -287,7 +329,11 @@ pub fn snapshot_and_rotate(
             removed.push(path);
         }
     }
-    Ok(SnapshotReport { written, kept, removed })
+    Ok(SnapshotReport {
+        written,
+        kept,
+        removed,
+    })
 }
 
 #[cfg(test)]
@@ -313,13 +359,27 @@ mod tests {
         let mut client = AuditedClient::with_clock(MockQbo::new(at(0)), log, Box::new(|| at(0)));
         let request_id = Uuid::now_v7();
         let created = client
-            .create(&realm(), EntityType::Invoice, &serde_json::json!({ "DocNumber": "T-1" }), request_id)
+            .create(
+                &realm(),
+                EntityType::Invoice,
+                &serde_json::json!({ "DocNumber": "T-1" }),
+                request_id,
+            )
             .unwrap();
         client
-            .update(&realm(), EntityType::Invoice, &created.qbo_id, &serde_json::json!({ "TotalAmt": 5 }), "0", Uuid::now_v7())
+            .update(
+                &realm(),
+                EntityType::Invoice,
+                &created.qbo_id,
+                &serde_json::json!({ "TotalAmt": 5 }),
+                "0",
+                Uuid::now_v7(),
+            )
             .unwrap();
 
-        let entries = AuditLog::new(dir.path().join("audit-test.jsonl")).read_all().unwrap();
+        let entries = AuditLog::new(dir.path().join("audit-test.jsonl"))
+            .read_all()
+            .unwrap();
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].operation, "create");
         assert_eq!(entries[0].request_id, request_id);
@@ -333,9 +393,19 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut qbo = MockQbo::new(at(0));
         qbo.fail_next(QboError::Validation("customer required".into()));
-        let mut client = AuditedClient::new(qbo, AuditLog::new(dir.path().join("audit-test.jsonl")));
-        assert!(client.create(&realm(), EntityType::Invoice, &serde_json::json!({}), Uuid::now_v7()).is_err());
-        let entries = AuditLog::new(dir.path().join("audit-test.jsonl")).read_all().unwrap();
+        let mut client =
+            AuditedClient::new(qbo, AuditLog::new(dir.path().join("audit-test.jsonl")));
+        assert!(client
+            .create(
+                &realm(),
+                EntityType::Invoice,
+                &serde_json::json!({}),
+                Uuid::now_v7()
+            )
+            .is_err());
+        let entries = AuditLog::new(dir.path().join("audit-test.jsonl"))
+            .read_all()
+            .unwrap();
         assert!(entries[0].outcome.starts_with("failed: validation"));
         assert!(entries[0].response.is_none());
     }
@@ -343,9 +413,17 @@ mod tests {
     #[test]
     fn reads_are_not_audited() {
         let dir = tempfile::tempdir().unwrap();
-        let mut client = AuditedClient::new(MockQbo::new(at(0)), AuditLog::new(dir.path().join("audit-test.jsonl")));
-        client.query(&realm(), EntityType::Invoice, None, 0, 10).unwrap();
-        assert!(AuditLog::new(dir.path().join("audit-test.jsonl")).read_all().unwrap().is_empty());
+        let mut client = AuditedClient::new(
+            MockQbo::new(at(0)),
+            AuditLog::new(dir.path().join("audit-test.jsonl")),
+        );
+        client
+            .query(&realm(), EntityType::Invoice, None, 0, 10)
+            .unwrap();
+        assert!(AuditLog::new(dir.path().join("audit-test.jsonl"))
+            .read_all()
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
@@ -356,14 +434,28 @@ mod tests {
         fs::create_dir(&path).unwrap();
         let mut client = AuditedClient::new(MockQbo::new(at(0)), AuditLog::new(path));
         let error = client
-            .create(&realm(), EntityType::Invoice, &serde_json::json!({}), Uuid::now_v7())
+            .create(
+                &realm(),
+                EntityType::Invoice,
+                &serde_json::json!({}),
+                Uuid::now_v7(),
+            )
             .unwrap_err();
-        assert!(error.is_transient(), "the worker must retry, replaying the RequestId");
+        assert!(
+            error.is_transient(),
+            "the worker must retry, replaying the RequestId"
+        );
     }
 
     fn book() -> Store {
         let store = Store::open_in_memory().unwrap();
-        let size = DemoSize { customers: 5, vendors: 2, items: 5, invoices: 20, purchase_orders: 3 };
+        let size = DemoSize {
+            customers: 5,
+            vendors: 2,
+            items: 5,
+            invoices: 20,
+            purchase_orders: 3,
+        };
         demo::seed(&store, size, 1, at(0)).unwrap();
         store
     }
@@ -387,7 +479,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = book();
         snapshot_and_rotate(&store, dir.path(), 7, at(0)).unwrap();
-        assert!(snapshot_and_rotate(&store, dir.path(), 7, at(0)).unwrap().written.is_none());
+        assert!(snapshot_and_rotate(&store, dir.path(), 7, at(0))
+            .unwrap()
+            .written
+            .is_none());
     }
 
     #[test]
@@ -406,7 +501,13 @@ mod tests {
         names.sort();
         assert_eq!(
             names,
-            ["notes.txt", "snapshot-2026-10-03.db", "snapshot-2026-10-04.db", "snapshot-2026-10-05.db", "snapshot-final.db"]
+            [
+                "notes.txt",
+                "snapshot-2026-10-03.db",
+                "snapshot-2026-10-04.db",
+                "snapshot-2026-10-05.db",
+                "snapshot-final.db"
+            ]
         );
     }
 }
