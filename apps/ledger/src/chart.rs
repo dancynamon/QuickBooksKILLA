@@ -5,6 +5,7 @@
 //! new company starts with. A QBO account with no counterpart is created in
 //! the x990 to x999 slot of its band with `needs_mapping` set, never dropped.
 
+use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
 
 pub const CHECKING: &str = "1100";
@@ -241,13 +242,45 @@ pub const AQUAMENTOR_CLASSES: &[(&str, &str)] = &[
 
 pub const WATERLINE_CLASSES: &[(&str, &str)] = &[("cnc", "CNC cutting"), ("uv", "UV printing")];
 
+/// D24/D29: the day the new books open. Opening balances are as of the day
+/// before, D28's fallback class covers only lines dated before it, and the
+/// cutover book's nightly runs `--from` it.
+///
+/// Not the cutover date. Cutover (1 April 2027, rolling a quarter on a no-go)
+/// is when QBO stops being the entry point, and D24 keeps FY2027 whole in the
+/// new books whichever quarter that lands on — so this date stays put when
+/// cutover moves. Only a decision to open the books in a different year
+/// changes it, and then here alone.
+pub const BOOKS_OPEN: NaiveDate = match NaiveDate::from_ymd_opt(2027, 1, 1) {
+    Some(date) => date,
+    None => panic!("1 January 2027 is a date"),
+};
+
 /// D28: the class an imported line takes when QBO history carries none and
-/// the document predates the new books. Never offered for a new entry.
+/// the document predates the new books. Never offered for a new entry. The
+/// label's year is [`BOOKS_OPEN`]'s, which a test holds it to.
 pub const IMPORT_FALLBACK_CLASS: (&str, &str) = ("unclassified", "Unclassified (pre-2027 import)");
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_books_open_on_the_first_day_of_2027() {
+        assert_eq!(BOOKS_OPEN.to_string(), "2027-01-01");
+    }
+
+    #[test]
+    fn the_fallback_class_label_names_the_year_the_books_open() {
+        use chrono::Datelike;
+        assert!(
+            IMPORT_FALLBACK_CLASS
+                .1
+                .contains(&format!("pre-{}", BOOKS_OPEN.year())),
+            "{}",
+            IMPORT_FALLBACK_CLASS.1
+        );
+    }
 
     #[test]
     fn seed_numbers_are_unique_and_banded() {

@@ -4071,6 +4071,12 @@ fn read_snapshots_dir(dir: &std::path::Path) -> Result<Vec<(i32, Vec<QboTbRow>)>
 mod tests {
     use super::*;
 
+    #[test]
+    fn usage_names_the_date_the_books_open() {
+        // USAGE is a literal, so it carries its own copy of the date.
+        assert!(USAGE.contains(&format!("--from {} (D29)", ledger::chart::BOOKS_OPEN)));
+    }
+
     fn args(raw: &[&str]) -> Vec<String> {
         raw.iter().map(|s| s.to_string()).collect()
     }
@@ -4498,6 +4504,7 @@ mod tests {
 
     #[test]
     fn nightly_parses_a_complete_invocation_with_as_of() {
+        let books_open = ledger::chart::BOOKS_OPEN.to_string();
         assert_eq!(
             parse(&args(&[
                 "nightly",
@@ -4514,7 +4521,7 @@ mod tests {
                 "--out",
                 "out",
                 "--from",
-                "2027-01-01",
+                &books_open,
                 "--as-of",
                 "2026-09-10",
             ])),
@@ -4525,7 +4532,7 @@ mod tests {
                 realm: RealmId::parse("1234567890123456").unwrap(),
                 qbo_csv: PathBuf::from("tb.csv"),
                 out: PathBuf::from("out"),
-                from: Some(NaiveDate::from_ymd_opt(2027, 1, 1).unwrap()),
+                from: Some(ledger::chart::BOOKS_OPEN),
                 as_of: Some(NaiveDate::from_ymd_opt(2026, 9, 10).unwrap()),
                 plist: false,
             })

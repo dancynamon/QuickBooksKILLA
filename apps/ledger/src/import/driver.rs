@@ -64,14 +64,14 @@ pub struct ImportOptions {
 impl ImportOptions {
     /// What `ledger import`, the nightly run and the boundary walk use: the
     /// given window, plus D28's fallback class for anything dated before the
-    /// new books open on 1 January 2027 (D24).
+    /// new books open ([`chart::BOOKS_OPEN`], D24).
     pub fn with_d28_fallback(from: Option<NaiveDate>, to: Option<NaiveDate>) -> Self {
         ImportOptions {
             from,
             to,
             class_fallback: Some(ClassFallback {
                 class: ClassId(chart::IMPORT_FALLBACK_CLASS.0.to_string()),
-                before: NaiveDate::from_ymd_opt(2027, 1, 1).expect("1 January 2027 is a date"),
+                before: chart::BOOKS_OPEN,
             }),
             item_classes: BTreeMap::new(),
         }

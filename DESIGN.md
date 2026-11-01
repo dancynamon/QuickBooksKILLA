@@ -865,5 +865,6 @@ Measured through the HTTP dev server, so the Tauri IPC path will differ.
 | 2 | OAuth client id/secret and a sandbox company, on the machine that will run the first live sync | M0 completion |
 | 3 | ~~Confirm QBO's tax rounding mode (§1)~~ Closed: half up, from the replica (`DECISIONS.md` D46) | — |
 | 4 | Confirm the query endpoint accepts a `MetaData.LastUpdatedTime` range and honours `ORDERBY` on it (§4.3) — CDC truncation recovery depends on it | M1 |
+| 5 | §4.3 says cursors are Intuit's timestamps, never the local clock, but `SyncDriver` still writes the caller's `now`, and the daemon passes the Mac's wall clock. A Mac clock ahead of Intuit's silently skips changes made in the gap. Take the server time from the CDC/query response and cursor on that. Carried over from the stale `claude/happy-lehmann-b4dffd` branch | Relying on the daemon alone after cutover |
 
 Closed: WaterLine CNC sizing — not being measured, see §0.

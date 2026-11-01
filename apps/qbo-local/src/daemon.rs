@@ -102,6 +102,10 @@ pub struct Daemon<C: QboClient, K: Clock> {
     /// Consecutive ticks that ended in a transient failure. Reset to zero by
     /// any tick that completes the sync, even one that mirrored nothing.
     consecutive_failures: u32,
+    /// Whether the wait [`Daemon::next_delay`] last chose is the idle cadence
+    /// after a clean tick, which regaining focus may cut short. A backoff or a
+    /// spent daily budget may not: focus does not make QBO stop throttling.
+    idle_wait: bool,
 }
 
 impl<C: QboClient, K: Clock> Daemon<C, K> {
@@ -119,6 +123,7 @@ impl<C: QboClient, K: Clock> Daemon<C, K> {
             focus: Arc::new(AtomicBool::new(false)),
             last_snapshot_day: None,
             consecutive_failures: 0,
+            idle_wait: false,
         }
     }
 
@@ -156,10 +161,15 @@ impl<C: QboClient, K: Clock> Daemon<C, K> {
     /// Loop [`Daemon::tick`] until `stop` is set, sleeping on `self.clock`
     /// between ticks and handing each [`Tick`] to `on_tick` before sleeping.
     ///
-    /// `stop` is checked both before a tick starts and after the sleep that
-    /// follows it — never in between — so a tick already in flight when `stop`
-    /// is set is always allowed to finish and report itself through
+    /// `stop` is checked before a tick starts and throughout the wait that
+    /// follows it — never during the tick — so a tick already in flight when
+    /// `stop` is set is always allowed to finish and report itself through
     /// `on_tick` before the loop exits.
+    ///
+    /// The wait is slept in slices of at most the focused cadence, so a stop
+    /// request, or focus coming back during an idle wait, takes effect within
+    /// one focused interval rather than after the rest of a five-minute idle
+    /// wait or a six-hour daily-budget wait.
     pub fn run(
         &mut self,
         store: &Store,
@@ -175,11 +185,28 @@ impl<C: QboClient, K: Clock> Daemon<C, K> {
             let tick = self.tick(store, realm);
             let delay = tick.next_delay;
             on_tick(&tick);
-            self.clock.sleep(delay);
+            self.wait(delay, stop);
+        }
+    }
 
-            if stop.load(Ordering::Relaxed) {
-                break;
+    /// Sleep `delay` in slices, returning early on `stop`, or on focus when
+    /// the wait is an idle one.
+    fn wait(&self, delay: Duration, stop: &AtomicBool) {
+        let slice = self.options.cadence.focused;
+        let mut remaining = delay;
+        while !remaining.is_zero() {
+            if stop.load(Ordering::Relaxed)
+                || (self.idle_wait && self.focus.load(Ordering::Relaxed))
+            {
+                return;
             }
+            let step = if slice.is_zero() {
+                remaining
+            } else {
+                remaining.min(slice)
+            };
+            self.clock.sleep(step);
+            remaining -= step;
         }
     }
 
@@ -196,6 +223,7 @@ impl<C: QboClient, K: Clock> Daemon<C, K> {
         report: &Result<SyncReport, SyncError>,
         now: DateTime<Utc>,
     ) -> Duration {
+        self.idle_wait = false;
         match report {
             Ok(report) => {
                 self.consecutive_failures = 0;
@@ -203,6 +231,7 @@ impl<C: QboClient, K: Clock> Daemon<C, K> {
                 if focused || report.changed() > 0 {
                     self.options.cadence.focused
                 } else {
+                    self.idle_wait = true;
                     self.options.cadence.idle
                 }
             }
