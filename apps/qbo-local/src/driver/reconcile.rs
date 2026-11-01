@@ -87,7 +87,9 @@ impl<C: QboClient> SyncDriver<C> {
         let mut remote: HashMap<String, EntityPayload> = HashMap::new();
         let mut start = 0usize;
         loop {
-            let page = self.fetch_page(realm, entity_type, None, start, now, &mut scratch)?;
+            let page = self
+                .fetch_page(realm, entity_type, None, start, now, &mut scratch)?
+                .entities;
             let returned = page.len();
             // The query endpoint omits deleted records; a double that returns
             // tombstones is treated the same way.
@@ -115,11 +117,15 @@ impl<C: QboClient> SyncDriver<C> {
             let payload = &remote[qbo_id];
             match local_by_id.get(qbo_id.as_str()) {
                 None => {
-                    discrepancies.push(Discrepancy::Missing { qbo_id: qbo_id.clone() });
+                    discrepancies.push(Discrepancy::Missing {
+                        qbo_id: qbo_id.clone(),
+                    });
                     heal.push(payload.clone());
                 }
                 Some(row) if row.is_deleted => {
-                    discrepancies.push(Discrepancy::Missing { qbo_id: qbo_id.clone() });
+                    discrepancies.push(Discrepancy::Missing {
+                        qbo_id: qbo_id.clone(),
+                    });
                     heal.push(payload.clone());
                 }
                 Some(row) if row.last_updated_utc < payload.last_updated_utc => {
@@ -151,12 +157,17 @@ impl<C: QboClient> SyncDriver<C> {
                 skipped_recent += 1;
                 continue;
             }
-            discrepancies.push(Discrepancy::Extra { qbo_id: row.qbo_id.clone() });
+            discrepancies.push(Discrepancy::Extra {
+                qbo_id: row.qbo_id.clone(),
+            });
             if let Some(entity) = store.get_entity(realm, entity_type, &row.qbo_id)? {
                 store.quarantine(
                     realm,
                     &entity,
-                    &format!("reconcile {}: live locally, absent from QBO", now.to_rfc3339()),
+                    &format!(
+                        "reconcile {}: live locally, absent from QBO",
+                        now.to_rfc3339()
+                    ),
                     now,
                 )?;
                 quarantined_extra += 1;
@@ -223,7 +234,9 @@ mod tests {
 
     fn setup() -> (Store, SyncDriver<MockQbo>) {
         let store = Store::open_in_memory().unwrap();
-        store.register_realm(&realm(), "Test Company", at(0)).unwrap();
+        store
+            .register_realm(&realm(), "Test Company", at(0))
+            .unwrap();
         let mut qbo = MockQbo::new(at(0));
         for id in ["1", "2", "3"] {
             qbo.seed(&realm(), customer(id, at(1)));
@@ -264,12 +277,19 @@ mod tests {
         assert_eq!(
             report.discrepancies,
             vec![
-                Discrepancy::Stale { qbo_id: "2".into(), local: at(1), remote: at(4) },
+                Discrepancy::Stale {
+                    qbo_id: "2".into(),
+                    local: at(1),
+                    remote: at(4)
+                },
                 Discrepancy::Missing { qbo_id: "4".into() },
             ]
         );
         assert_eq!(report.healed, 2);
-        let healed = store.get_entity(&realm(), EntityType::Customer, "2").unwrap().unwrap();
+        let healed = store
+            .get_entity(&realm(), EntityType::Customer, "2")
+            .unwrap()
+            .unwrap();
         assert_eq!(healed.raw_json["DisplayName"], "CUSTOMER 2 RENAMED");
 
         let again = driver
@@ -291,9 +311,15 @@ mod tests {
         let report = driver
             .reconcile_entity_type(&store, &realm(), EntityType::Customer, at(5))
             .unwrap();
-        assert_eq!(report.discrepancies, vec![Discrepancy::Extra { qbo_id: "3".into() }]);
+        assert_eq!(
+            report.discrepancies,
+            vec![Discrepancy::Extra { qbo_id: "3".into() }]
+        );
         assert_eq!(report.quarantined_extra, 1);
-        assert!(store.get_entity(&realm(), EntityType::Customer, "3").unwrap().is_some());
+        assert!(store
+            .get_entity(&realm(), EntityType::Customer, "3")
+            .unwrap()
+            .is_some());
         let quarantined = store.quarantined(&realm()).unwrap();
         assert_eq!(quarantined.len(), 1);
         assert!(quarantined[0].reason.contains("absent from QBO"));
@@ -310,8 +336,17 @@ mod tests {
         let report = driver
             .reconcile_entity_type(&store, &realm(), EntityType::Customer, at(3))
             .unwrap();
-        assert_eq!(report.discrepancies, vec![Discrepancy::Missing { qbo_id: "1".into() }]);
-        assert!(!store.get_entity(&realm(), EntityType::Customer, "1").unwrap().unwrap().is_deleted);
+        assert_eq!(
+            report.discrepancies,
+            vec![Discrepancy::Missing { qbo_id: "1".into() }]
+        );
+        assert!(
+            !store
+                .get_entity(&realm(), EntityType::Customer, "1")
+                .unwrap()
+                .unwrap()
+                .is_deleted
+        );
     }
 
     #[test]

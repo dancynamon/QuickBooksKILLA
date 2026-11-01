@@ -24,7 +24,8 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::client::{
-    EntityPayload, IndexEntry, MockQbo, MockQboSnapshot, QboClient, QboError, UpdatedRange,
+    EntityPayload, IndexEntry, MockQbo, MockQboSnapshot, QboClient, QboError, ReadPage,
+    UpdatedRange,
 };
 use crate::domain::{EntityType, RealmId};
 
@@ -194,25 +195,25 @@ fn write_atomically(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 }
 
 impl QboClient for JournalledMock {
-    fn query(
+    fn query_page(
         &mut self,
         realm: &RealmId,
         entity_type: EntityType,
         updated: Option<UpdatedRange>,
         start_position: usize,
         max_results: usize,
-    ) -> Result<Vec<EntityPayload>, QboError> {
+    ) -> Result<ReadPage, QboError> {
         self.inner
-            .query(realm, entity_type, updated, start_position, max_results)
+            .query_page(realm, entity_type, updated, start_position, max_results)
     }
 
-    fn cdc(
+    fn cdc_page(
         &mut self,
         realm: &RealmId,
         entity_types: &[EntityType],
         changed_since: DateTime<Utc>,
-    ) -> Result<Vec<EntityPayload>, QboError> {
-        self.inner.cdc(realm, entity_types, changed_since)
+    ) -> Result<ReadPage, QboError> {
+        self.inner.cdc_page(realm, entity_types, changed_since)
     }
 
     fn create(

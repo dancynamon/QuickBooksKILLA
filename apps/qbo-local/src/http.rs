@@ -78,8 +78,8 @@ use uuid::Uuid;
 use crate::auth::{AuthError, RotationLogEntry, TokenGenerations, TokenSet, TokenStore};
 use crate::budget::{CallBudget, SpendError};
 use crate::client::{
-    unique_name_field, EntityPayload, IndexEntry, QboClient, QboError, ReportName, ReportParams,
-    UpdatedRange,
+    unique_name_field, EntityPayload, IndexEntry, QboClient, QboError, ReadPage, ReportName,
+    ReportParams, UpdatedRange,
 };
 use crate::domain::{EntityType, RealmId};
 use crate::oauth::{self, OAuthConfig};
@@ -490,14 +490,14 @@ fn fault_detail(fault: &Value) -> String {
 // ---------------------------------------------------------------------------
 
 impl QboClient for HttpQboClient {
-    fn query(
+    fn query_page(
         &mut self,
         realm: &RealmId,
         entity_type: EntityType,
         updated: Option<UpdatedRange>,
         start_position: usize,
         max_results: usize,
-    ) -> Result<Vec<EntityPayload>, QboError> {
+    ) -> Result<ReadPage, QboError> {
         let query_string = build_select(entity_type, updated, start_position, max_results);
         let path = format!("/v3/company/{}/query", realm.as_str());
         let params = [
@@ -505,18 +505,21 @@ impl QboClient for HttpQboClient {
             self.minorversion_param(),
         ];
         let value = self.request_json(Method::Get, &path, &params, None)?;
-        query_response_items(&value, entity_type)
-            .iter()
-            .map(|item| to_entity_payload(entity_type, item))
-            .collect()
+        Ok(ReadPage {
+            entities: query_response_items(&value, entity_type)
+                .iter()
+                .map(|item| to_entity_payload(entity_type, item))
+                .collect::<Result<_, _>>()?,
+            server_time: response_time(&value),
+        })
     }
 
-    fn cdc(
+    fn cdc_page(
         &mut self,
         realm: &RealmId,
         entity_types: &[EntityType],
         changed_since: DateTime<Utc>,
-    ) -> Result<Vec<EntityPayload>, QboError> {
+    ) -> Result<ReadPage, QboError> {
         let entities = entity_types
             .iter()
             .map(|e| e.as_str())
@@ -529,7 +532,10 @@ impl QboClient for HttpQboClient {
             self.minorversion_param(),
         ];
         let value = self.request_json(Method::Get, &path, &params, None)?;
-        parse_cdc_response(&value)
+        Ok(ReadPage {
+            entities: parse_cdc_response(&value)?,
+            server_time: response_time(&value),
+        })
     }
 
     fn create(
@@ -817,6 +823,19 @@ fn parse_single_entity(value: &Value, entity_type: EntityType) -> Result<EntityP
     to_entity_payload(entity_type, object)
 }
 
+/// The response's top-level `time`: Intuit's clock when it answered, with
+/// its own offset (`"2026-10-31T09:14:03.218-07:00"`). This is what sync
+/// cursors are made of (`DESIGN.md` §4.3). Absent or unparseable, it is `None`
+/// rather than the local clock, and the driver falls back to the records'
+/// own timestamps.
+fn response_time(value: &Value) -> Option<DateTime<Utc>> {
+    value
+        .get("time")
+        .and_then(Value::as_str)
+        .and_then(|raw| DateTime::parse_from_rfc3339(raw).ok())
+        .map(|at| at.with_timezone(&Utc))
+}
+
 /// `CDCResponse[].QueryResponse[]` is an array of objects, each keyed by
 /// entity type name (plus paging metadata keys this walk skips) — unlike a
 /// plain query response, one CDC call can carry several entity types at once.
@@ -1053,6 +1072,21 @@ mod tests {
             query.contains("AND MetaData.LastUpdatedTime < '2026-01-02T00:00:00+00:00'"),
             "query was: {query}"
         );
+    }
+
+    #[test]
+    fn response_time_reads_intuits_clock_in_utc() {
+        let value = json!({ "QueryResponse": {}, "time": "2026-10-31T09:14:03.218-07:00" });
+        assert_eq!(
+            response_time(&value).unwrap().to_rfc3339(),
+            "2026-10-31T16:14:03.218+00:00"
+        );
+    }
+
+    #[test]
+    fn a_missing_or_garbled_time_is_none_not_the_local_clock() {
+        assert_eq!(response_time(&json!({ "QueryResponse": {} })), None);
+        assert_eq!(response_time(&json!({ "time": "yesterday" })), None);
     }
 
     #[test]

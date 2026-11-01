@@ -470,23 +470,23 @@ mod tests {
             value: Value,
         }
         impl QboClient for CannedReports {
-            fn query(
+            fn query_page(
                 &mut self,
                 _: &RealmId,
                 _: crate::domain::EntityType,
                 _: Option<crate::client::UpdatedRange>,
                 _: usize,
                 _: usize,
-            ) -> Result<Vec<crate::client::EntityPayload>, QboError> {
-                Ok(Vec::new())
+            ) -> Result<crate::client::ReadPage, QboError> {
+                Ok(crate::client::ReadPage::default())
             }
-            fn cdc(
+            fn cdc_page(
                 &mut self,
                 _: &RealmId,
                 _: &[crate::domain::EntityType],
                 _: chrono::DateTime<Utc>,
-            ) -> Result<Vec<crate::client::EntityPayload>, QboError> {
-                Ok(Vec::new())
+            ) -> Result<crate::client::ReadPage, QboError> {
+                Ok(crate::client::ReadPage::default())
             }
             fn create(
                 &mut self,

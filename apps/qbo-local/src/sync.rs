@@ -28,6 +28,37 @@ pub const DEFAULT_CDC_MAX_AGE_DAYS: i64 = 25;
 // time rather than trusting a future edit to keep it.
 const _: () = assert!(DEFAULT_CDC_MAX_AGE_DAYS < CDC_LOOKBACK_DAYS);
 
+/// How far before its cursor each poll reaches back.
+///
+/// A cursor is Intuit's clock at the moment it answered, but a record whose
+/// write was still committing then can surface later stamped a little
+/// earlier. Re-reading a few minutes costs a handful of records the store
+/// already holds, and those are recognised and skipped
+/// (`Store::apply_changes`), so the overlap is free where a gap would be
+/// silent loss.
+pub const DEFAULT_CDC_OVERLAP_MINUTES: i64 = 5;
+
+/// Where the cursor goes after a complete read covering `[changed_since, …)`.
+///
+/// Intuit's own clock when it answered, never the Mac's (`DESIGN.md` §4.3):
+/// every record changed before that moment was in the response, and every
+/// record changed after it carries a later timestamp for the next poll to
+/// find. A local clock running ahead would put the cursor past changes
+/// nobody fetched; one running behind, or a machine that slept, only makes
+/// the next poll re-read.
+///
+/// Without a server time (a replayed fixture), the newest record read is
+/// the best evidence there is. Never backwards: an empty read with no
+/// server time leaves the cursor where it was.
+pub fn cursor_after_read(
+    previous: DateTime<Utc>,
+    server_time: Option<DateTime<Utc>>,
+    seen: impl IntoIterator<Item = DateTime<Utc>>,
+) -> DateTime<Utc> {
+    let anchor = server_time.or_else(|| seen.into_iter().max());
+    anchor.map_or(previous, |anchor| anchor.max(previous))
+}
+
 /// Per realm, per entity type. Persisted in the same transaction that writes the
 /// entities it covers — a cursor advanced outside that transaction can skip
 /// changes after a crash.
@@ -49,6 +80,11 @@ pub enum SweepReason {
     /// CDC coverage for this entity type is unconfirmed (`DESIGN.md` §0), so the
     /// sweep path is the correctness baseline rather than a fallback.
     CoverageUnconfirmed,
+    /// Intuit's clock answered earlier than the stored cursor: the cursor
+    /// was written from a clock running ahead (the Mac's, before cursors were
+    /// made of server time), so changes between Intuit's now and the cursor
+    /// were never fetched and no poll can say which. Only a sweep can.
+    CursorAheadOfServer,
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -323,6 +359,32 @@ mod tests {
                 changed_since: at(3)
             }
         );
+    }
+
+    #[test]
+    fn the_cursor_follows_intuits_clock_not_the_records() {
+        // Intuit answered at 5; the newest record is from 2. Everything
+        // changed before 5 was in the response, so 5 is the proven point.
+        let seen = [at(1), at(2)];
+        assert_eq!(cursor_after_read(at(0), Some(at(5)), seen), at(5));
+    }
+
+    #[test]
+    fn an_empty_read_still_advances_on_intuits_clock() {
+        assert_eq!(cursor_after_read(at(0), Some(at(3)), []), at(3));
+    }
+
+    #[test]
+    fn without_a_server_time_the_newest_record_read_is_the_cursor() {
+        assert_eq!(cursor_after_read(at(0), None, [at(2), at(1)]), at(2));
+        // And an empty one proves nothing, so the cursor stays.
+        assert_eq!(cursor_after_read(at(4), None, []), at(4));
+    }
+
+    #[test]
+    fn the_cursor_never_moves_backwards() {
+        assert_eq!(cursor_after_read(at(4), Some(at(3)), []), at(4));
+        assert_eq!(cursor_after_read(at(4), None, [at(1)]), at(4));
     }
 
     proptest! {

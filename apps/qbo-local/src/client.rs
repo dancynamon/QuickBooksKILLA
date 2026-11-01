@@ -111,7 +111,7 @@ pub enum QboError {
 impl QboError {
     /// Whether retrying unchanged could plausibly succeed.
     pub fn is_transient(&self) -> bool {
-matches!(self, QboError::RateLimited | QboError::Network(_))
+        matches!(self, QboError::RateLimited | QboError::Network(_))
     }
 }
 
@@ -128,12 +128,50 @@ pub struct UpdatedRange {
     pub to: DateTime<Utc>,
 }
 
+/// One read's records, and Intuit's clock at the moment it answered.
+///
+/// Every query and CDC response carries a top-level `time`. That, not the
+/// Mac's clock, is what a sync cursor is made of (`DESIGN.md` §4.3): a Mac
+/// clock running ahead of Intuit's would otherwise write a cursor past
+/// changes nobody has fetched yet, and the next poll would skip them.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ReadPage {
+    pub entities: Vec<EntityPayload>,
+    /// Intuit's clock when it served this read. `None` only from a client
+    /// that cannot know it, such as a replayed fixture; the driver then
+    /// cursors on the records' own `MetaData.LastUpdatedTime` instead.
+    pub server_time: Option<DateTime<Utc>>,
+}
+
 pub trait QboClient {
     /// Paged read of records of a type, optionally bounded to an update window.
     ///
     /// Unbounded, this is the full-sweep and initial-pull path. Bounded, it is
     /// the backfill path CDC truncation falls back to (`DESIGN.md` §4.3).
     /// Results come back ordered by update time so that paging is stable.
+    ///
+    /// Required, rather than defaulted from [`QboClient::query`], so that a
+    /// wrapping client cannot forget to pass the server time through.
+    fn query_page(
+        &mut self,
+        realm: &RealmId,
+        entity_type: EntityType,
+        updated: Option<UpdatedRange>,
+        start_position: usize,
+        max_results: usize,
+    ) -> Result<ReadPage, QboError>;
+
+    /// Everything changed since a timestamp, deletes included, with the
+    /// server time the cursor advances to.
+    fn cdc_page(
+        &mut self,
+        realm: &RealmId,
+        entity_types: &[EntityType],
+        changed_since: DateTime<Utc>,
+    ) -> Result<ReadPage, QboError>;
+
+    /// [`QboClient::query_page`]'s records alone, for callers that keep no
+    /// cursor.
     fn query(
         &mut self,
         realm: &RealmId,
@@ -141,15 +179,21 @@ pub trait QboClient {
         updated: Option<UpdatedRange>,
         start_position: usize,
         max_results: usize,
-    ) -> Result<Vec<EntityPayload>, QboError>;
+    ) -> Result<Vec<EntityPayload>, QboError> {
+        Ok(self
+            .query_page(realm, entity_type, updated, start_position, max_results)?
+            .entities)
+    }
 
-    /// Everything changed since a timestamp, deletes included.
+    /// [`QboClient::cdc_page`]'s records alone.
     fn cdc(
         &mut self,
         realm: &RealmId,
         entity_types: &[EntityType],
         changed_since: DateTime<Utc>,
-    ) -> Result<Vec<EntityPayload>, QboError>;
+    ) -> Result<Vec<EntityPayload>, QboError> {
+        Ok(self.cdc_page(realm, entity_types, changed_since)?.entities)
+    }
 
     fn create(
         &mut self,
@@ -421,14 +465,14 @@ pub struct MockQboSnapshot {
 }
 
 impl QboClient for MockQbo {
-    fn query(
+    fn query_page(
         &mut self,
         realm: &RealmId,
         entity_type: EntityType,
         updated: Option<UpdatedRange>,
         start_position: usize,
         max_results: usize,
-    ) -> Result<Vec<EntityPayload>, QboError> {
+    ) -> Result<ReadPage, QboError> {
         self.query_calls += 1;
         if let Some(error) = self.take_failure() {
             return Err(error);
@@ -454,19 +498,22 @@ impl QboClient for MockQbo {
                 .cmp(&b.last_updated_utc)
                 .then(a.qbo_id.cmp(&b.qbo_id))
         });
-        Ok(matches
-            .into_iter()
-            .skip(start_position)
-            .take(max_results)
-            .collect())
+        Ok(ReadPage {
+            entities: matches
+                .into_iter()
+                .skip(start_position)
+                .take(max_results)
+                .collect(),
+            server_time: Some(self.clock),
+        })
     }
 
-    fn cdc(
+    fn cdc_page(
         &mut self,
         realm: &RealmId,
         entity_types: &[EntityType],
         changed_since: DateTime<Utc>,
-    ) -> Result<Vec<EntityPayload>, QboError> {
+    ) -> Result<ReadPage, QboError> {
         if let Some(error) = self.take_failure() {
             return Err(error);
         }
@@ -490,7 +537,10 @@ impl QboClient for MockQbo {
         // driver look correct while being untested against the failure that
         // matters.
         matches.truncate(self.cdc_cap);
-        Ok(matches)
+        Ok(ReadPage {
+            entities: matches,
+            server_time: Some(self.clock),
+        })
     }
 
     fn create(
@@ -573,7 +623,9 @@ impl QboClient for MockQbo {
         // A sparse update changes only the fields it sends, as QBO's does; a
         // full update replaces the record.
         if payload.get("sparse").and_then(|v| v.as_bool()) == Some(true) {
-            if let (Some(existing), Some(changes)) = (entity.raw_json.as_object_mut(), payload.as_object()) {
+            if let (Some(existing), Some(changes)) =
+                (entity.raw_json.as_object_mut(), payload.as_object())
+            {
                 for (key, value) in changes {
                     if key != "sparse" {
                         existing.insert(key.clone(), value.clone());
@@ -741,10 +793,22 @@ mod tests {
     fn a_sparse_update_keeps_the_fields_it_does_not_send() {
         let mut qbo = MockQbo::new(at(0));
         let created = qbo
-            .create(&realm(), EntityType::Invoice, &serde_json::json!({ "DocNumber": "T-1", "TotalAmt": 5 }), Uuid::now_v7())
+            .create(
+                &realm(),
+                EntityType::Invoice,
+                &serde_json::json!({ "DocNumber": "T-1", "TotalAmt": 5 }),
+                Uuid::now_v7(),
+            )
             .unwrap();
         let updated = qbo
-            .update(&realm(), EntityType::Invoice, &created.qbo_id, &serde_json::json!({ "sparse": true, "PrivateNote": "x" }), "0", Uuid::now_v7())
+            .update(
+                &realm(),
+                EntityType::Invoice,
+                &created.qbo_id,
+                &serde_json::json!({ "sparse": true, "PrivateNote": "x" }),
+                "0",
+                Uuid::now_v7(),
+            )
             .unwrap();
         assert_eq!(updated.raw_json["DocNumber"], "T-1");
         assert_eq!(updated.raw_json["PrivateNote"], "x");

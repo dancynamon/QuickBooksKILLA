@@ -14,7 +14,7 @@ mod support;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use chrono::{DateTime, Duration, NaiveDate, Utc};
+use chrono::{DateTime, Duration, NaiveDate, TimeZone, Utc};
 use serde_json::{json, Value};
 use uuid::Uuid;
 
@@ -262,6 +262,39 @@ fn cdc_maps_a_deleted_status_to_is_deleted() {
         .collect();
     assert_eq!(by_id.get("10"), Some(&false));
     assert_eq!(by_id.get("20"), Some(&true));
+}
+
+#[test]
+fn cdc_and_query_report_intuits_clock_from_the_response() {
+    // The cursor is made of this, not of the Mac's clock (DESIGN.md §4.3).
+    let server = support::start(|request: &FakeRequest| {
+        let time = "2026-10-31T09:14:03.218-07:00";
+        if request.path.ends_with("/cdc") {
+            FakeResponse::json(200, json!({ "CDCResponse": [], "time": time }))
+        } else {
+            FakeResponse::json(200, json!({ "QueryResponse": {}, "time": time }))
+        }
+    });
+
+    let directory = tempfile::tempdir().unwrap();
+    let mut client = fresh_client(&server, directory.path());
+
+    let intuit =
+        Utc.with_ymd_and_hms(2026, 10, 31, 16, 14, 3).unwrap() + Duration::milliseconds(218);
+    let changed = client
+        .cdc_page(
+            &realm(),
+            &[EntityType::Invoice],
+            intuit - Duration::hours(1),
+        )
+        .unwrap();
+    assert!(changed.entities.is_empty());
+    assert_eq!(changed.server_time, Some(intuit));
+
+    let page = client
+        .query_page(&realm(), EntityType::Invoice, None, 0, 10)
+        .unwrap();
+    assert_eq!(page.server_time, Some(intuit));
 }
 
 #[test]
