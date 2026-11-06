@@ -120,6 +120,7 @@ enum Command {
         realm: RealmId,
         port: Option<u16>,
         config: Option<PathBuf>,
+        redirect_uri: Option<String>,
     },
     ImportToken {
         realm: RealmId,
@@ -248,7 +249,7 @@ qbo-local — local SQLite replica of QuickBooks Online
 USAGE:
     qbo-local status [--db PATH] [--config PATH]
     qbo-local init --db PATH --realm ID --name \"Display Name\"
-    qbo-local auth --realm ID [--port N] [--config PATH]
+    qbo-local auth --realm ID [--port N | --redirect-uri URL] [--config PATH]
     qbo-local import-token --realm ID [--config PATH] [--force] < refresh-token
     qbo-local whoami --realm ID [--config PATH]
     qbo-local daemon --db PATH --realm ID [--focused-secs N] [--idle-secs N]
@@ -568,11 +569,13 @@ fn parse_auth(mut args: Args<'_>) -> Result<Command, UsageError> {
     let mut realm = None;
     let mut port = None;
     let mut config = None;
+    let mut redirect_uri = None;
     while let Some(flag) = args.next() {
         match flag.as_str() {
             "--realm" => realm = Some(parse_realm(&next_value(&mut args, "--realm")?)?),
             "--port" => port = Some(parse_u16(&next_value(&mut args, "--port")?, "--port")?),
             "--config" => config = Some(PathBuf::from(next_value(&mut args, "--config")?)),
+            "--redirect-uri" => redirect_uri = Some(next_value(&mut args, "--redirect-uri")?),
             other => return Err(UsageError::unknown_flag(other)),
         }
     }
@@ -580,6 +583,7 @@ fn parse_auth(mut args: Args<'_>) -> Result<Command, UsageError> {
         realm: realm.ok_or_else(|| UsageError::missing_flag("--realm"))?,
         port,
         config,
+        redirect_uri,
     })
 }
 
@@ -963,7 +967,8 @@ fn execute(command: Command) -> Result<(), CommandError> {
             realm,
             port,
             config,
-        } => run_auth(&realm, port, config.as_deref()),
+            redirect_uri,
+        } => run_auth(&realm, port, config.as_deref(), redirect_uri.as_deref()),
         Command::ImportToken {
             realm,
             config,
@@ -1080,11 +1085,14 @@ fn build_http_client(
     // On stderr, so it lands at the top of the daemon log: which app this
     // process spends, and how much of today's ceiling is already gone.
     eprintln!(
-        "qbo-local: Intuit app {} (from the {}); {}/{} calls used today (UTC)",
+        "qbo-local: Intuit app {} (from the {}); {}/{} calls used today, {}/{} this month (UTC; ledger {})",
         app.client_id,
         app.source,
         budget.used(Utc::now()).map_err(runtime)?,
-        budget.limit()
+        budget.limit(),
+        budget.used_this_month(Utc::now()).map_err(runtime)?,
+        budget.monthly_limit(),
+        budget.path().map_or_else(|| "in memory".to_string(), |p| p.display().to_string())
     );
     let redirect_uri = format!("http://localhost:{}/callback", config.intuit.redirect_port);
     let oauth_config = OAuthConfig::intuit(app.client_id, app.client_secret, redirect_uri);
@@ -1320,25 +1328,43 @@ fn run_init(db: &Path, realm: &RealmId, name: &str) -> Result<(), CommandError> 
 /// Run the OAuth loopback flow for one realm and save generation zero
 /// through the configured token store ([`open_token_store`]: the keychain on
 /// macOS, `FileTokenStore` elsewhere). `HANDOFF.md` §2.1, §2.2.
+///
+/// With `pasted_redirect`, the redirect goes to that URI instead of the
+/// loopback — the OAuth Playground's page, for an app that may not register
+/// `http://localhost` — and the person pastes the address the browser landed
+/// on. The code is exchanged here with the secret from the keychain, so the
+/// secret is never typed into a web page.
 fn run_auth(
     realm: &RealmId,
     port: Option<u16>,
     config_path: Option<&Path>,
+    pasted_redirect: Option<&str>,
 ) -> Result<(), CommandError> {
     let path = config_path.unwrap_or(Path::new(DEFAULT_CONFIG_PATH));
     let config = LocalConfig::load(path).map_err(runtime)?;
     let app = config.credentials().map_err(runtime)?;
     let port = port.unwrap_or(config.intuit.redirect_port);
-    let redirect_uri = format!("http://localhost:{port}/callback");
+    let redirect_uri = pasted_redirect.map_or_else(
+        || format!("http://localhost:{port}/callback"),
+        str::to_string,
+    );
     println!("Intuit app {} (from the {})", app.client_id, app.source);
     let oauth_config = OAuthConfig::intuit(app.client_id, app.client_secret, redirect_uri);
 
     let state = Uuid::now_v7().to_string();
     println!("Open this URL to authorize qbo-local for realm {realm}:\n");
     println!("  {}\n", oauth_config.authorize_url(&state));
-    println!("Waiting for the redirect on http://localhost:{port}/callback ...");
 
-    let auth_code = oauth::run_loopback(port, Duration::from_secs(300)).map_err(runtime)?;
+    let auth_code = if pasted_redirect.is_some() {
+        println!("After you click Connect, copy the full address the browser lands on,");
+        println!("paste it here and press Enter:");
+        let mut line = String::new();
+        std::io::stdin().read_line(&mut line).map_err(runtime)?;
+        oauth::parse_redirect(&line).map_err(runtime)?
+    } else {
+        println!("Waiting for the redirect on http://localhost:{port}/callback ...");
+        oauth::run_loopback(port, Duration::from_secs(300)).map_err(runtime)?
+    };
     if auth_code.state != state {
         return Err(CommandError::Runtime(
             "state mismatch on the OAuth callback (possible CSRF) — aborting without saving anything".to_string(),
@@ -2568,6 +2594,7 @@ mod tests {
                 realm: RealmId::parse("1234567890123456").unwrap(),
                 port: Some(9999),
                 config: Some(PathBuf::from("custom.toml")),
+                redirect_uri: None,
             })
         );
     }

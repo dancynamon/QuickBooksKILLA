@@ -1692,6 +1692,18 @@ backup loop walks `EntityType::ALL` against v3, which answers 400 for it.
   shipping on an item line. An order with either needs a look at conversion.
 - The desktop app has no sales-order screen yet; the parent session adds it.
 
+**Addendum, 6 Nov 2026 — first real feed.** Read from the QBO page in a
+signed-in browser: the grid holds all 153 orders client-side (paged 100 +
+53), and each order is the page's own `GetSalesOrder` commerce query
+replayed per id (line item id is `variantId`, the v3 Item id; `customerId`
+is the v3 Customer id, checked against the replica). None of it touches the
+v3 API or the CorePlus quota. One rule changed: QBO writes
+`quantityConsumedInInvoices: 0`, not `null`, on every line of an order whose
+invoice was made apart from it, so 44 Invoiced/Paid orders read as open. A
+status of Invoiced or Paid now wins unless some line carries a *non-zero*
+count. Open after the fix: the 12 Not invoiced orders plus SO 1143, whose
+only invoice was voided (left open for Dan to void or invoice).
+
 ## D43 — BunzBooks has its own Intuit app, a daily call ceiling, and resumable sweeps
 
 **Why.** On 23 Oct 2026 the Intuit app qbo-local shared with the QuickBooks
@@ -1749,6 +1761,31 @@ modules, and its `authorize` / `sync` / `reconcile` live commands that read
 `QBO_CLIENT_ID`, are replaced by this line's, so every live path builds its
 client through `LocalConfig::credentials` and the call budget. Its replica
 migrations follow this line's as 5–8, and its D14/D15 are D44/D45.
+
+### D43 addendum — a monthly ceiling, hard maximums, one ledger per Mac (6 Nov 2026)
+
+Dan, after the first sync on the new app: whatever this repo does, it must
+not max out the QBO API. Three gaps in point 2 closed:
+
+- *Monthly ceiling.* Intuit's quota is monthly, so the ledger now also
+  counts the UTC month and refuses at `[budget].monthly_calls` (default
+  450,000) regardless of the daily figure; a refused daemon sleeps until the
+  first of the next month. A ledger written before this seeds the month with
+  its day's count.
+- *Hard maximums.* A config may lower either ceiling but never set
+  `daily_calls` above 16,000 (31 days stay under 500,000) or
+  `monthly_calls` above 480,000; `LocalConfig::load` refuses it.
+- *One ledger.* The default ledger was `.local/call-budget.json` relative to
+  the working directory, so each checkout or worktree had its own 15,000. It
+  is now `~/.bunzbooks/intuit-call-budget.json`, shared by every qbo-local
+  on the Mac; a relative `[budget].ledger` is read from the config file's
+  directory.
+
+Audit at the same time: every QuickBooks data request goes through
+`HttpQboClient::attempt`, which spends from the budget first, and the only
+place a live client is built (`main.rs`, `live_client`) attaches the
+config's budget. The other Intuit traffic is the OAuth token endpoint
+(sign-in and refresh), which is not CorePlus-metered.
 
 ## D44 — M2 write path: what was decided while building it
 
