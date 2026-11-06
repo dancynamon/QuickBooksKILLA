@@ -1692,6 +1692,18 @@ backup loop walks `EntityType::ALL` against v3, which answers 400 for it.
   shipping on an item line. An order with either needs a look at conversion.
 - The desktop app has no sales-order screen yet; the parent session adds it.
 
+**Addendum, 6 Nov 2026 — first real feed.** Read from the QBO page in a
+signed-in browser: the grid holds all 153 orders client-side (paged 100 +
+53), and each order is the page's own `GetSalesOrder` commerce query
+replayed per id (line item id is `variantId`, the v3 Item id; `customerId`
+is the v3 Customer id, checked against the replica). None of it touches the
+v3 API or the CorePlus quota. One rule changed: QBO writes
+`quantityConsumedInInvoices: 0`, not `null`, on every line of an order whose
+invoice was made apart from it, so 44 Invoiced/Paid orders read as open. A
+status of Invoiced or Paid now wins unless some line carries a *non-zero*
+count. Open after the fix: the 12 Not invoiced orders plus SO 1143, whose
+only invoice was voided (left open for Dan to void or invoice).
+
 ## D43 — BunzBooks has its own Intuit app, a daily call ceiling, and resumable sweeps
 
 **Why.** On 23 Oct 2026 the Intuit app qbo-local shared with the QuickBooks

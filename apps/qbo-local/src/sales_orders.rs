@@ -287,10 +287,14 @@ impl SalesOrder {
             .ok_or_else(|| fail(format!("issuedAt {:?} is not a date", order.issued_at)))?;
 
         let all_invoiced = fully_invoiced_status(order.payment_status.as_deref());
-        let any_consumption = order
-            .lines
-            .iter()
-            .any(|line| decimal(line.quantity_consumed_in_invoices.as_ref()).is_some());
+        // QBO writes `0`, not `null`, on the lines of an order whose invoice
+        // was made apart from it (status set to Invoiced/Paid, no line ever
+        // converted). Only a non-zero count is line detail worth trusting
+        // over the status.
+        let any_consumption = order.lines.iter().any(|line| {
+            decimal(line.quantity_consumed_in_invoices.as_ref())
+                .is_some_and(|consumed| !consumed.is_zero())
+        });
 
         let mut lines = Vec::with_capacity(order.lines.len());
         for (index, line) in order.lines.iter().enumerate() {
@@ -307,8 +311,8 @@ impl SalesOrder {
             // says invoiced but whose lines say nothing (an older export) is
             // taken at its status: every line consumed.
             let qty_invoiced = match decimal(line.quantity_consumed_in_invoices.as_ref()) {
+                _ if all_invoiced && !any_consumption => qty.unwrap_or(Decimal::ZERO),
                 Some(consumed) => consumed,
-                None if all_invoiced && !any_consumption => qty.unwrap_or(Decimal::ZERO),
                 None => Decimal::ZERO,
             };
             let (qty_open, open_amount) = match qty {
@@ -536,6 +540,39 @@ mod tests {
         ))
         .unwrap();
         assert!(!so.is_open);
+    }
+
+    #[test]
+    fn an_invoiced_status_with_all_zero_line_counts_counts_as_consumed() {
+        // QBO's shape for an order invoiced apart from it (SO 1001, Nov 2026).
+        let so = SalesOrder::from_feed(&order(
+            json!([
+                { "itemId": "10", "quantity": 15, "rate": "52", "amount": "780",
+                  "quantityConsumedInInvoices": 0 },
+                { "itemId": "11", "quantity": 1, "rate": "76.82", "amount": "76.82",
+                  "quantityConsumedInInvoices": 0 }
+            ]),
+            "PAID",
+        ))
+        .unwrap();
+        assert!(!so.is_open);
+        assert_eq!(so.open_amount, Money::ZERO);
+    }
+
+    #[test]
+    fn a_partly_converted_invoiced_order_keeps_its_unconverted_line_open() {
+        let so = SalesOrder::from_feed(&order(
+            json!([
+                { "itemId": "10", "quantity": 2, "rate": "100", "amount": "200",
+                  "quantityConsumedInInvoices": 2, "invoiceIds": ["900"] },
+                { "itemId": "11", "quantity": 1, "rate": "50", "amount": "50",
+                  "quantityConsumedInInvoices": 0 }
+            ]),
+            "INVOICED",
+        ))
+        .unwrap();
+        assert!(so.is_open);
+        assert_eq!(so.open_amount, Money::from_minor(5_000));
     }
 
     #[test]
