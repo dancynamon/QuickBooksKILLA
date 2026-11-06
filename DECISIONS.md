@@ -1750,6 +1750,31 @@ modules, and its `authorize` / `sync` / `reconcile` live commands that read
 client through `LocalConfig::credentials` and the call budget. Its replica
 migrations follow this line's as 5–8, and its D14/D15 are D44/D45.
 
+### D43 addendum — a monthly ceiling, hard maximums, one ledger per Mac (6 Nov 2026)
+
+Dan, after the first sync on the new app: whatever this repo does, it must
+not max out the QBO API. Three gaps in point 2 closed:
+
+- *Monthly ceiling.* Intuit's quota is monthly, so the ledger now also
+  counts the UTC month and refuses at `[budget].monthly_calls` (default
+  450,000) regardless of the daily figure; a refused daemon sleeps until the
+  first of the next month. A ledger written before this seeds the month with
+  its day's count.
+- *Hard maximums.* A config may lower either ceiling but never set
+  `daily_calls` above 16,000 (31 days stay under 500,000) or
+  `monthly_calls` above 480,000; `LocalConfig::load` refuses it.
+- *One ledger.* The default ledger was `.local/call-budget.json` relative to
+  the working directory, so each checkout or worktree had its own 15,000. It
+  is now `~/.bunzbooks/intuit-call-budget.json`, shared by every qbo-local
+  on the Mac; a relative `[budget].ledger` is read from the config file's
+  directory.
+
+Audit at the same time: every QuickBooks data request goes through
+`HttpQboClient::attempt`, which spends from the budget first, and the only
+place a live client is built (`main.rs`, `live_client`) attaches the
+config's budget. The other Intuit traffic is the OAuth token endpoint
+(sign-in and refresh), which is not CorePlus-metered.
+
 ## D44 — M2 write path: what was decided while building it
 
 > D44 and D45 were written as D14 and D15 on the `ccr-3daf8637-ra3gev` line, which

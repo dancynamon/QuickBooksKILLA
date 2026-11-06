@@ -43,14 +43,17 @@ fn invalid(message: impl Into<String>) -> CostError {
 
 /// Parse a decimal typed by a person: commas allowed, nothing else.
 pub fn decimal(raw: &str, what: &str) -> Result<Decimal, CostError> {
-    Decimal::from_str(raw.trim().replace(',', "").as_str()).map_err(|_| invalid(format!("{what} {raw:?} is not a number")))
+    Decimal::from_str(raw.trim().replace(',', "").as_str())
+        .map_err(|_| invalid(format!("{what} {raw:?} is not a number")))
 }
 
 /// Cost rates ($/bf, $/unit) are kept to four places; that is the precision a
 /// vendor's price sheet uses and enough that rounding never shows in a total.
 /// Trailing zeros are dropped, so the same rate always prints the same way.
 pub fn rate(value: Decimal) -> Decimal {
-    value.round_dp_with_strategy(4, RoundingStrategy::MidpointAwayFromZero).normalize()
+    value
+        .round_dp_with_strategy(4, RoundingStrategy::MidpointAwayFromZero)
+        .normalize()
 }
 
 fn money(value: Decimal) -> Result<Money, CostError> {
@@ -62,7 +65,11 @@ fn to_decimal(m: Money) -> Decimal {
 }
 
 /// Board-feet in one piece: thickness × width × length in inches, over 144.
-pub fn board_feet(thickness_in: Decimal, width_in: Decimal, length_in: Decimal) -> Result<Decimal, CostError> {
+pub fn board_feet(
+    thickness_in: Decimal,
+    width_in: Decimal,
+    length_in: Decimal,
+) -> Result<Decimal, CostError> {
     if thickness_in <= Decimal::ZERO || width_in <= Decimal::ZERO || length_in <= Decimal::ZERO {
         return Err(invalid("every dimension must be more than zero"));
     }
@@ -123,24 +130,41 @@ pub fn landed_cost(lines: &[ReceiptLine], freight: Money) -> Result<Vec<LandedLi
     let mut bf = Vec::with_capacity(lines.len());
     for line in lines {
         if line.sheets <= Decimal::ZERO || line.bf_per_sheet <= Decimal::ZERO {
-            return Err(invalid(format!("{}: sheets and board-feet per sheet must be more than zero", line.material_id)));
+            return Err(invalid(format!(
+                "{}: sheets and board-feet per sheet must be more than zero",
+                line.material_id
+            )));
         }
         if line.price_per_sheet < Decimal::ZERO || line.surcharge_per_sheet < Decimal::ZERO {
-            return Err(invalid(format!("{}: prices cannot be negative", line.material_id)));
+            return Err(invalid(format!(
+                "{}: prices cannot be negative",
+                line.material_id
+            )));
         }
-        bf.push(line.sheets.checked_mul(line.bf_per_sheet).ok_or(CostError::Overflow)?);
+        bf.push(
+            line.sheets
+                .checked_mul(line.bf_per_sheet)
+                .ok_or(CostError::Overflow)?,
+        );
     }
     let total_bf: Decimal = bf.iter().sum();
 
     // Shares in cents: floor first, then distribute the remainder.
     let freight_cents = Decimal::from(freight.minor());
     let exact: Vec<Decimal> = bf.iter().map(|b| freight_cents * b / total_bf).collect();
-    let mut cents: Vec<i64> = exact.iter().map(|e| e.floor().try_into().unwrap_or(0)).collect();
+    let mut cents: Vec<i64> = exact
+        .iter()
+        .map(|e| e.floor().try_into().unwrap_or(0))
+        .collect();
     let mut leftover = freight.minor() - cents.iter().sum::<i64>();
     let mut order: Vec<usize> = (0..lines.len()).collect();
     // Largest fractional part first; ties to the earlier line, so the result
     // does not depend on sort stability.
-    order.sort_by(|&a, &b| (exact[b] - exact[b].floor()).cmp(&(exact[a] - exact[a].floor())).then(a.cmp(&b)));
+    order.sort_by(|&a, &b| {
+        (exact[b] - exact[b].floor())
+            .cmp(&(exact[a] - exact[a].floor()))
+            .then(a.cmp(&b))
+    });
     for &index in order.iter().cycle() {
         if leftover <= 0 {
             break;
@@ -155,9 +179,15 @@ pub fn landed_cost(lines: &[ReceiptLine], freight: Money) -> Result<Vec<LandedLi
         .zip(cents)
         .map(|((line, board_feet), share)| {
             let per_sheet = line.price_per_sheet + line.surcharge_per_sheet;
-            let goods = money(per_sheet.checked_mul(line.sheets).ok_or(CostError::Overflow)?)?;
+            let goods = money(
+                per_sheet
+                    .checked_mul(line.sheets)
+                    .ok_or(CostError::Overflow)?,
+            )?;
             let freight = Money::from_minor(share);
-            let landed = goods.checked_add(freight).map_err(|_| CostError::Overflow)?;
+            let landed = goods
+                .checked_add(freight)
+                .map_err(|_| CostError::Overflow)?;
             Ok(LandedLine {
                 material_id: line.material_id.clone(),
                 board_feet,
@@ -181,13 +211,26 @@ pub enum Component {
     /// Cut from sheet stock. `net_bf` is what ends up in the part; `yield_pct`
     /// is how much of the bought sheet becomes part, after nesting and kerf.
     #[serde(rename_all = "camelCase")]
-    Material { material_id: String, net_bf: Decimal, yield_pct: Decimal },
+    Material {
+        material_id: String,
+        net_bf: Decimal,
+        yield_pct: Decimal,
+    },
     /// Bought in finished: hardware, webbing, a printed decal.
     #[serde(rename_all = "camelCase")]
-    Part { name: String, item_id: Option<String>, qty: Decimal, unit_cost: Decimal },
+    Part {
+        name: String,
+        item_id: Option<String>,
+        qty: Decimal,
+        unit_cost: Decimal,
+    },
     /// Machine or bench time.
     #[serde(rename_all = "camelCase")]
-    Labour { name: String, minutes: Decimal, rate_per_hour: Decimal },
+    Labour {
+        name: String,
+        minutes: Decimal,
+        rate_per_hour: Decimal,
+    },
 }
 
 /// What one component costs per finished unit.
@@ -231,7 +274,9 @@ impl MaterialPrices for std::collections::HashMap<String, Decimal> {
 
 fn check_yield(yield_pct: Decimal) -> Result<Decimal, CostError> {
     if yield_pct <= Decimal::ZERO || yield_pct > Decimal::from(100) {
-        return Err(invalid(format!("yield {yield_pct}% must be more than 0 and at most 100")));
+        return Err(invalid(format!(
+            "yield {yield_pct}% must be more than 0 and at most 100"
+        )));
     }
     Ok(yield_pct / Decimal::from(100))
 }
@@ -250,17 +295,27 @@ pub fn unit_cost_with(
     }
     let price_factor = Decimal::ONE + price_move_pct / Decimal::from(100);
     let mut lines = Vec::new();
-    let (mut material, mut parts, mut labour, mut waste) = (Decimal::ZERO, Decimal::ZERO, Decimal::ZERO, Decimal::ZERO);
+    let (mut material, mut parts, mut labour, mut waste) =
+        (Decimal::ZERO, Decimal::ZERO, Decimal::ZERO, Decimal::ZERO);
     for component in components {
         match component {
-            Component::Material { material_id, net_bf, yield_pct } => {
+            Component::Material {
+                material_id,
+                net_bf,
+                yield_pct,
+            } => {
                 if *net_bf <= Decimal::ZERO {
-                    return Err(invalid(format!("{}: net board-feet must be more than zero", prices.name(material_id))));
+                    return Err(invalid(format!(
+                        "{}: net board-feet must be more than zero",
+                        prices.name(material_id)
+                    )));
                 }
-                let per_bf = prices
-                    .per_bf(material_id)
-                    .ok_or_else(|| invalid(format!("{} has no landed cost yet; record a receipt for it", prices.name(material_id))))?
-                    * price_factor;
+                let per_bf = prices.per_bf(material_id).ok_or_else(|| {
+                    invalid(format!(
+                        "{} has no landed cost yet; record a receipt for it",
+                        prices.name(material_id)
+                    ))
+                })? * price_factor;
                 let y = check_yield(*yield_pct + yield_move_pts)?;
                 let gross = *net_bf / y;
                 let cost = gross * per_bf;
@@ -274,21 +329,44 @@ pub fn unit_cost_with(
                     cost: rate(cost),
                 });
             }
-            Component::Part { name, qty, unit_cost, .. } => {
+            Component::Part {
+                name,
+                qty,
+                unit_cost,
+                ..
+            } => {
                 if *qty <= Decimal::ZERO || *unit_cost < Decimal::ZERO {
-                    return Err(invalid(format!("{name}: quantity must be more than zero and cost not negative")));
+                    return Err(invalid(format!(
+                        "{name}: quantity must be more than zero and cost not negative"
+                    )));
                 }
                 let cost = *qty * *unit_cost;
                 parts += cost;
-                lines.push(CostLine { label: name.clone(), gross_bf: None, waste_bf: None, cost: rate(cost) });
+                lines.push(CostLine {
+                    label: name.clone(),
+                    gross_bf: None,
+                    waste_bf: None,
+                    cost: rate(cost),
+                });
             }
-            Component::Labour { name, minutes, rate_per_hour } => {
+            Component::Labour {
+                name,
+                minutes,
+                rate_per_hour,
+            } => {
                 if *minutes < Decimal::ZERO || *rate_per_hour < Decimal::ZERO {
-                    return Err(invalid(format!("{name}: minutes and rate cannot be negative")));
+                    return Err(invalid(format!(
+                        "{name}: minutes and rate cannot be negative"
+                    )));
                 }
                 let cost = *minutes / Decimal::from(60) * *rate_per_hour;
                 labour += cost;
-                lines.push(CostLine { label: name.clone(), gross_bf: None, waste_bf: None, cost: rate(cost) });
+                lines.push(CostLine {
+                    label: name.clone(),
+                    gross_bf: None,
+                    waste_bf: None,
+                    cost: rate(cost),
+                });
             }
         }
     }
@@ -302,14 +380,20 @@ pub fn unit_cost_with(
     })
 }
 
-pub fn unit_cost(components: &[Component], prices: &dyn MaterialPrices) -> Result<UnitCost, CostError> {
+pub fn unit_cost(
+    components: &[Component],
+    prices: &dyn MaterialPrices,
+) -> Result<UnitCost, CostError> {
     unit_cost_with(components, prices, Decimal::ZERO, Decimal::ZERO)
 }
 
 /// Gross margin as a percentage of price, one place. `None` without a price.
 pub fn margin_pct(price: Option<Decimal>, cost: Decimal) -> Option<Decimal> {
     let price = price.filter(|p| *p > Decimal::ZERO)?;
-    Some(((price - cost) / price * Decimal::from(100)).round_dp_with_strategy(1, RoundingStrategy::MidpointAwayFromZero))
+    Some(
+        ((price - cost) / price * Decimal::from(100))
+            .round_dp_with_strategy(1, RoundingStrategy::MidpointAwayFromZero),
+    )
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -390,11 +474,23 @@ pub const OVERRUN_FLAG_PCT: i64 = 5;
 
 /// Board-feet of each material a run took off the shelf: what was reported,
 /// or the sheet's gross board-feet where nothing was.
-pub fn material_use(components: &[Component], quantity: Decimal, actual: &[ActualMaterial]) -> Result<Vec<(String, Decimal)>, CostError> {
+pub fn material_use(
+    components: &[Component],
+    quantity: Decimal,
+    actual: &[ActualMaterial],
+) -> Result<Vec<(String, Decimal)>, CostError> {
     let mut out: Vec<(String, Decimal)> = Vec::new();
     for component in components {
-        if let Component::Material { material_id, net_bf, yield_pct } = component {
-            let reported: Vec<_> = actual.iter().filter(|a| &a.material_id == material_id).collect();
+        if let Component::Material {
+            material_id,
+            net_bf,
+            yield_pct,
+        } = component
+        {
+            let reported: Vec<_> = actual
+                .iter()
+                .filter(|a| &a.material_id == material_id)
+                .collect();
             let used = if reported.is_empty() {
                 *net_bf / check_yield(*yield_pct)? * quantity
             } else {
@@ -427,10 +523,22 @@ pub fn build_variance(
     let mut variance_total = Decimal::ZERO;
     let mut flagged = false;
     for component in components {
-        if let Component::Material { material_id, net_bf, yield_pct } = component {
+        if let Component::Material {
+            material_id,
+            net_bf,
+            yield_pct,
+        } = component
+        {
             let standard_bf = *net_bf / check_yield(*yield_pct)? * quantity;
-            let reported: Vec<_> = actual.iter().filter(|a| &a.material_id == material_id).collect();
-            let actual_bf = if reported.is_empty() { standard_bf } else { reported.iter().map(|a| a.board_feet).sum() };
+            let reported: Vec<_> = actual
+                .iter()
+                .filter(|a| &a.material_id == material_id)
+                .collect();
+            let actual_bf = if reported.is_empty() {
+                standard_bf
+            } else {
+                reported.iter().map(|a| a.board_feet).sum()
+            };
             let per_bf = prices.per_bf(material_id).unwrap_or(Decimal::ZERO);
             let variance_bf = actual_bf - standard_bf;
             let cost = variance_bf * per_bf;
@@ -452,7 +560,9 @@ pub fn build_variance(
     Ok(BuildVariance {
         quantity,
         standard_cost,
-        actual_cost: standard_cost.checked_add(variance).map_err(|_| CostError::Overflow)?,
+        actual_cost: standard_cost
+            .checked_add(variance)
+            .map_err(|_| CostError::Overflow)?,
         variance,
         lines,
         flagged,
@@ -467,17 +577,32 @@ pub fn build_variance(
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum StockEvent {
     /// A delivery: board-feet in, at its landed cost.
-    Received { date: String, reference: String, board_feet: Decimal, landed: Money },
+    Received {
+        date: String,
+        reference: String,
+        board_feet: Decimal,
+        landed: Money,
+    },
     /// A production run used this much.
-    Consumed { date: String, reference: String, board_feet: Decimal },
+    Consumed {
+        date: String,
+        reference: String,
+        board_feet: Decimal,
+    },
     /// A physical count: the shelf holds exactly this much.
-    Counted { date: String, reference: String, board_feet: Decimal },
+    Counted {
+        date: String,
+        reference: String,
+        board_feet: Decimal,
+    },
 }
 
 impl StockEvent {
     fn date(&self) -> &str {
         match self {
-            StockEvent::Received { date, .. } | StockEvent::Consumed { date, .. } | StockEvent::Counted { date, .. } => date,
+            StockEvent::Received { date, .. }
+            | StockEvent::Consumed { date, .. }
+            | StockEvent::Counted { date, .. } => date,
         }
     }
 
@@ -547,7 +672,12 @@ pub fn stock_from(
     for event in events {
         let before = value;
         let (kind, reference, change) = match &event {
-            StockEvent::Received { reference, board_feet, landed, .. } => {
+            StockEvent::Received {
+                reference,
+                board_feet,
+                landed,
+                ..
+            } => {
                 if *board_feet <= Decimal::ZERO {
                     return Err(invalid("a delivery brings in more than zero board-feet"));
                 }
@@ -560,10 +690,18 @@ pub fn stock_from(
                     value += landed;
                 }
                 on_hand += *board_feet;
-                average = Some(if on_hand > Decimal::ZERO { value / on_hand } else { landed / *board_feet });
+                average = Some(if on_hand > Decimal::ZERO {
+                    value / on_hand
+                } else {
+                    landed / *board_feet
+                });
                 ("received", reference.clone(), *board_feet)
             }
-            StockEvent::Consumed { reference, board_feet, .. } => {
+            StockEvent::Consumed {
+                reference,
+                board_feet,
+                ..
+            } => {
                 let avg = average.unwrap_or(Decimal::ZERO);
                 on_hand -= *board_feet;
                 value -= *board_feet * avg;
@@ -572,7 +710,11 @@ pub fn stock_from(
                 }
                 ("used", reference.clone(), -*board_feet)
             }
-            StockEvent::Counted { reference, board_feet, .. } => {
+            StockEvent::Counted {
+                reference,
+                board_feet,
+                ..
+            } => {
                 if *board_feet < Decimal::ZERO {
                     return Err(invalid("a count cannot be negative"));
                 }
@@ -618,7 +760,13 @@ mod tests {
     use super::*;
 
     fn line(id: &str, sheets: Decimal, bf: Decimal, price: Decimal) -> ReceiptLine {
-        ReceiptLine { material_id: id.into(), sheets, bf_per_sheet: bf, price_per_sheet: price, surcharge_per_sheet: Decimal::ZERO }
+        ReceiptLine {
+            material_id: id.into(),
+            sheets,
+            bf_per_sheet: bf,
+            price_per_sheet: price,
+            surcharge_per_sheet: Decimal::ZERO,
+        }
     }
 
     #[test]
@@ -631,9 +779,16 @@ mod tests {
     #[test]
     fn freight_follows_board_feet_not_dollars_or_lines() {
         // 40 thick sheets and 40 thin ones, the thin ones dearer per sheet.
-        let lines = [line("thick", dec!(40), dec!(64), dec!(90)), line("thin", dec!(40), dec!(16), dec!(120))];
+        let lines = [
+            line("thick", dec!(40), dec!(64), dec!(90)),
+            line("thin", dec!(40), dec!(16), dec!(120)),
+        ];
         let landed = landed_cost(&lines, Money::from_minor(40_000)).unwrap();
-        assert_eq!(landed[0].freight, Money::from_minor(32_000), "four fifths of the board-feet, four fifths of the freight");
+        assert_eq!(
+            landed[0].freight,
+            Money::from_minor(32_000),
+            "four fifths of the board-feet, four fifths of the freight"
+        );
         assert_eq!(landed[1].freight, Money::from_minor(8_000));
         // 40 × 90 + 320 = 3,920 over 2,560 bf.
         assert_eq!(landed[0].landed_per_bf, dec!(1.5313));
@@ -650,7 +805,11 @@ mod tests {
         let landed = landed_cost(&lines, Money::from_minor(100)).unwrap();
         let shares: Vec<i64> = landed.iter().map(|l| l.freight.minor()).collect();
         assert_eq!(shares.iter().sum::<i64>(), 100);
-        assert_eq!(shares, vec![34, 33, 33], "the leftover cent goes to the earliest of equal remainders");
+        assert_eq!(
+            shares,
+            vec![34, 33, 33],
+            "the leftover cent goes to the earliest of equal remainders"
+        );
     }
 
     #[test]
@@ -668,9 +827,22 @@ mod tests {
 
     fn tube() -> Vec<Component> {
         vec![
-            Component::Material { material_id: "xlpe-2".into(), net_bf: dec!(2.1), yield_pct: dec!(78) },
-            Component::Part { name: "Webbing strap".into(), item_id: None, qty: dec!(1), unit_cost: dec!(1.85) },
-            Component::Labour { name: "CNC and finish".into(), minutes: dec!(6), rate_per_hour: dec!(30) },
+            Component::Material {
+                material_id: "xlpe-2".into(),
+                net_bf: dec!(2.1),
+                yield_pct: dec!(78),
+            },
+            Component::Part {
+                name: "Webbing strap".into(),
+                item_id: None,
+                qty: dec!(1),
+                unit_cost: dec!(1.85),
+            },
+            Component::Labour {
+                name: "CNC and finish".into(),
+                minutes: dec!(6),
+                rate_per_hour: dec!(30),
+            },
         ]
     }
 
@@ -693,12 +865,30 @@ mod tests {
 
     #[test]
     fn five_points_of_yield_against_five_percent_off_foam() {
-        let grid = sensitivity(&tube(), &prices(), Some(dec!(24.95)), &[dec!(-5), dec!(0)], &[dec!(0), dec!(5)]).unwrap();
-        let at = |p: Decimal, y: Decimal| grid.iter().find(|c| c.price_move_pct == p && c.yield_move_pts == y).unwrap().unit_cost;
+        let grid = sensitivity(
+            &tube(),
+            &prices(),
+            Some(dec!(24.95)),
+            &[dec!(-5), dec!(0)],
+            &[dec!(0), dec!(5)],
+        )
+        .unwrap();
+        let at = |p: Decimal, y: Decimal| {
+            grid.iter()
+                .find(|c| c.price_move_pct == p && c.yield_move_pts == y)
+                .unwrap()
+                .unit_cost
+        };
         let discount = at(dec!(-5), dec!(0));
         let better_nesting = at(dec!(0), dec!(5));
-        assert!(better_nesting < discount, "on this part, nesting beats the discount: {better_nesting} vs {discount}");
-        assert_eq!(margin_pct(Some(dec!(24.95)), dec!(8.8885)), Some(dec!(64.4)));
+        assert!(
+            better_nesting < discount,
+            "on this part, nesting beats the discount: {better_nesting} vs {discount}"
+        );
+        assert_eq!(
+            margin_pct(Some(dec!(24.95)), dec!(8.8885)),
+            Some(dec!(64.4))
+        );
     }
 
     #[test]
@@ -708,14 +898,23 @@ mod tests {
     }
 
     fn received(date: &str, bf: Decimal, landed_cents: i64) -> StockEvent {
-        StockEvent::Received { date: date.into(), reference: "PO".into(), board_feet: bf, landed: Money::from_minor(landed_cents) }
+        StockEvent::Received {
+            date: date.into(),
+            reference: "PO".into(),
+            board_feet: bf,
+            landed: Money::from_minor(landed_cents),
+        }
     }
 
     #[test]
     fn deliveries_blend_into_a_moving_average() {
         let state = stock(vec![
             received("2026-09-01", dec!(640), 96_000), // 1.50
-            StockEvent::Consumed { date: "2026-09-10".into(), reference: "run".into(), board_feet: dec!(320) },
+            StockEvent::Consumed {
+                date: "2026-09-10".into(),
+                reference: "run".into(),
+                board_feet: dec!(320),
+            },
             received("2026-10-01", dec!(640), 128_000), // 2.00
         ])
         .unwrap();
@@ -723,14 +922,22 @@ mod tests {
         assert_eq!(state.on_hand_bf, dec!(960));
         assert_eq!(state.value, Money::from_minor(176_000));
         assert_eq!(state.average_per_bf, Some(dec!(1.8333)));
-        assert_eq!(state.moves[1].value_change, Money::from_minor(-48_000), "used at the average then, 1.50");
+        assert_eq!(
+            state.moves[1].value_change,
+            Money::from_minor(-48_000),
+            "used at the average then, 1.50"
+        );
         assert!(!state.went_negative);
     }
 
     #[test]
     fn events_replay_in_date_order_whatever_order_they_arrive() {
         let a = stock(vec![
-            StockEvent::Consumed { date: "2026-09-10".into(), reference: "run".into(), board_feet: dec!(100) },
+            StockEvent::Consumed {
+                date: "2026-09-10".into(),
+                reference: "run".into(),
+                board_feet: dec!(100),
+            },
             received("2026-09-01", dec!(640), 96_000),
         ])
         .unwrap();
@@ -742,7 +949,11 @@ mod tests {
     fn a_count_sets_the_shelf_and_prices_the_shrinkage() {
         let state = stock(vec![
             received("2026-09-01", dec!(640), 96_000),
-            StockEvent::Counted { date: "2026-09-30".into(), reference: "month end".into(), board_feet: dec!(600) },
+            StockEvent::Counted {
+                date: "2026-09-30".into(),
+                reference: "month end".into(),
+                board_feet: dec!(600),
+            },
         ])
         .unwrap();
         assert_eq!(state.on_hand_bf, dec!(600));
@@ -755,7 +966,11 @@ mod tests {
     fn cutting_past_zero_is_flagged_and_the_next_delivery_fills_the_gap_at_its_price() {
         let state = stock(vec![
             received("2026-09-01", dec!(100), 15_000),
-            StockEvent::Consumed { date: "2026-09-02".into(), reference: "run".into(), board_feet: dec!(150) },
+            StockEvent::Consumed {
+                date: "2026-09-02".into(),
+                reference: "run".into(),
+                board_feet: dec!(150),
+            },
             received("2026-09-03", dec!(200), 40_000), // 2.00
         ])
         .unwrap();
@@ -785,7 +1000,10 @@ mod tests {
     #[test]
     fn a_build_prices_its_overrun_and_flags_it() {
         // 100 tubes should use 269.2308 bf; the run used 290.
-        let actual = [ActualMaterial { material_id: "xlpe-2".into(), board_feet: dec!(290) }];
+        let actual = [ActualMaterial {
+            material_id: "xlpe-2".into(),
+            board_feet: dec!(290),
+        }];
         let run = build_variance(&tube(), &prices(), dec!(100), &actual).unwrap();
         assert_eq!(run.lines[0].standard_bf, dec!(269.2308));
         assert_eq!(run.lines[0].variance_bf, dec!(20.7692));

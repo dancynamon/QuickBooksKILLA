@@ -8,6 +8,11 @@
 //! figure, persisted so a restart does not reset it, and once it is spent
 //! the client refuses locally until the next UTC day.
 //!
+//! Intuit's quota is monthly, so the ledger counts the calendar month (UTC)
+//! too and refuses at [`DEFAULT_MONTHLY_CALLS`] whatever the daily figure
+//! says; and a config may lower either ceiling but never raise one past
+//! [`MAX_DAILY_CALLS`] / [`MAX_MONTHLY_CALLS`] ([`crate::config`]).
+//!
 //! The ledger is re-read before each call, so two processes sharing one file
 //! (a daemon and a hand-run sweep) see each other's spending. The read and
 //! the write are not locked, so two calls landing in the same instant can
@@ -16,7 +21,7 @@
 
 use std::path::{Path, PathBuf};
 
-use chrono::{DateTime, Duration, NaiveDate, Utc};
+use chrono::{DateTime, Datelike, Duration, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::auth::atomic_write;
@@ -24,6 +29,18 @@ use crate::auth::atomic_write;
 /// The ceiling a live config gets unless it says otherwise. At thirty days a
 /// month it keeps one app under the builder tier's 500,000 CorePlus calls.
 pub const DEFAULT_DAILY_CALLS: u32 = 15_000;
+
+/// The month's ceiling unless a config lowers it: 50,000 under the builder
+/// tier's 500,000, so the QuickBooks MCPs' own app is never the one at risk
+/// and a bad month still leaves headroom.
+pub const DEFAULT_MONTHLY_CALLS: u32 = 450_000;
+
+/// No config may set a higher daily ceiling: 31 days of it stay under
+/// 500,000.
+pub const MAX_DAILY_CALLS: u32 = 16_000;
+
+/// No config may set a higher monthly ceiling.
+pub const MAX_MONTHLY_CALLS: u32 = 480_000;
 
 /// Warn once a day when spending crosses this share of the ceiling.
 const WARN_AT_PERCENT: u32 = 80;
@@ -33,6 +50,24 @@ struct Ledger {
     /// The UTC day `calls` belongs to.
     day: NaiveDate,
     calls: u32,
+    /// The UTC month `month_calls` belongs to, `YYYY-MM`. Absent in a ledger
+    /// written before the monthly count existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    month: Option<String>,
+    #[serde(default)]
+    month_calls: u32,
+}
+
+fn month_key(day: NaiveDate) -> String {
+    format!("{:04}-{:02}", day.year(), day.month())
+}
+
+/// Which ceiling refused.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum BudgetPeriod {
+    #[default]
+    Day,
+    Month,
 }
 
 /// The day's ceiling has been reached.
@@ -41,12 +76,27 @@ pub struct BudgetExhausted {
     pub day: NaiveDate,
     pub used: u32,
     pub limit: u32,
+    /// The day's ceiling or the month's; `used` and `limit` are that
+    /// period's.
+    pub period: BudgetPeriod,
 }
 
 impl BudgetExhausted {
-    /// Midnight UTC after [`Self::day`], when calls may resume.
+    /// When calls may resume: midnight UTC after [`Self::day`], or the first
+    /// of the next UTC month when the month's ceiling refused.
     pub fn resets_at(&self) -> DateTime<Utc> {
-        (self.day + Duration::days(1))
+        let resume = match self.period {
+            BudgetPeriod::Day => self.day + Duration::days(1),
+            BudgetPeriod::Month => {
+                let (year, month) = if self.day.month() == 12 {
+                    (self.day.year() + 1, 1)
+                } else {
+                    (self.day.year(), self.day.month() + 1)
+                };
+                NaiveDate::from_ymd_opt(year, month, 1).expect("the first exists")
+            }
+        };
+        resume
             .and_hms_opt(0, 0, 0)
             .expect("midnight exists")
             .and_utc()
@@ -57,7 +107,11 @@ impl std::fmt::Display for BudgetExhausted {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "daily Intuit API call budget spent: {}/{} calls on {} (UTC); no calls until {}",
+            "{} Intuit API call budget spent: {}/{} calls ({} UTC); no calls until {}",
+            match self.period {
+                BudgetPeriod::Day => "daily",
+                BudgetPeriod::Month => "monthly",
+            },
             self.used,
             self.limit,
             self.day,
@@ -70,6 +124,7 @@ pub struct CallBudget {
     /// `None` counts in memory only — tests and the fake server.
     path: Option<PathBuf>,
     limit: u32,
+    monthly_limit: u32,
     in_memory: Option<Ledger>,
     warned: Option<NaiveDate>,
     announced: Option<NaiveDate>,
@@ -81,6 +136,7 @@ impl CallBudget {
         CallBudget {
             path: Some(path.into()),
             limit,
+            monthly_limit: DEFAULT_MONTHLY_CALLS,
             in_memory: None,
             warned: None,
             announced: None,
@@ -92,6 +148,7 @@ impl CallBudget {
         CallBudget {
             path: None,
             limit,
+            monthly_limit: DEFAULT_MONTHLY_CALLS,
             in_memory: None,
             warned: None,
             announced: None,
@@ -102,7 +159,22 @@ impl CallBudget {
     /// tests against the fake server need not set one; every live path sets
     /// a real one from the config.
     pub fn unlimited() -> Self {
-        Self::in_memory(u32::MAX)
+        Self::in_memory(u32::MAX).with_monthly_limit(u32::MAX)
+    }
+
+    /// Replace the month's ceiling ([`DEFAULT_MONTHLY_CALLS`] otherwise).
+    pub fn with_monthly_limit(mut self, monthly_limit: u32) -> Self {
+        self.monthly_limit = monthly_limit;
+        self
+    }
+
+    pub fn monthly_limit(&self) -> u32 {
+        self.monthly_limit
+    }
+
+    /// Calls already spent in `now`'s UTC month.
+    pub fn used_this_month(&self, now: DateTime<Utc>) -> Result<u32, std::io::Error> {
+        Ok(self.load(now.date_naive())?.month_calls)
     }
 
     pub fn limit(&self) -> u32 {
@@ -127,11 +199,19 @@ impl CallBudget {
     pub fn spend(&mut self, now: DateTime<Utc>) -> Result<u32, SpendError> {
         let today = now.date_naive();
         let mut ledger = self.load(today).map_err(SpendError::Ledger)?;
-        if ledger.calls >= self.limit {
+        let refused = if ledger.calls >= self.limit {
+            Some((BudgetPeriod::Day, ledger.calls, self.limit))
+        } else if ledger.month_calls >= self.monthly_limit {
+            Some((BudgetPeriod::Month, ledger.month_calls, self.monthly_limit))
+        } else {
+            None
+        };
+        if let Some((period, used, limit)) = refused {
             let exhausted = BudgetExhausted {
                 day: today,
-                used: ledger.calls,
-                limit: self.limit,
+                used,
+                limit,
+                period,
             };
             if self.announced != Some(today) {
                 eprintln!("{} qbo-local: STOP — {exhausted}", now.to_rfc3339());
@@ -140,6 +220,7 @@ impl CallBudget {
             return Err(SpendError::Exhausted(exhausted));
         }
         ledger.calls += 1;
+        ledger.month_calls += 1;
         self.store(&ledger).map_err(SpendError::Ledger)?;
 
         let warn_at = u64::from(self.limit) * u64::from(WARN_AT_PERCENT) / 100;
@@ -167,12 +248,28 @@ impl CallBudget {
                 Err(error) => return Err(error),
             },
         };
-        Ok(stored
-            .filter(|ledger| ledger.day == today)
-            .unwrap_or(Ledger {
-                day: today,
-                calls: 0,
-            }))
+        let month = month_key(today);
+        let (calls, month_calls) = match stored {
+            None => (0, 0),
+            Some(ledger) => {
+                let calls = if ledger.day == today { ledger.calls } else { 0 };
+                let month_calls = match &ledger.month {
+                    Some(stored_month) if *stored_month == month => ledger.month_calls,
+                    Some(_) => 0,
+                    // Written before the monthly count: its day's calls are
+                    // the only part of the month it knows.
+                    None if month_key(ledger.day) == month => ledger.calls,
+                    None => 0,
+                };
+                (calls, month_calls)
+            }
+        };
+        Ok(Ledger {
+            day: today,
+            calls,
+            month: Some(month),
+            month_calls,
+        })
     }
 
     fn store(&mut self, ledger: &Ledger) -> Result<(), std::io::Error> {
@@ -217,6 +314,37 @@ mod tests {
             }
             other => panic!("expected exhaustion, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn the_months_ceiling_refuses_across_days_until_the_next_month() {
+        let mut budget = CallBudget::in_memory(10).with_monthly_limit(3);
+        budget.spend(at(29, 9)).unwrap();
+        budget.spend(at(30, 9)).unwrap();
+        budget.spend(at(31, 9)).unwrap();
+        match budget.spend(at(31, 10)) {
+            Err(SpendError::Exhausted(exhausted)) => {
+                assert_eq!(exhausted.period, BudgetPeriod::Month);
+                assert_eq!(exhausted.used, 3);
+                assert_eq!(
+                    exhausted.resets_at(),
+                    Utc.with_ymd_and_hms(2026, 11, 1, 0, 0, 0).unwrap()
+                );
+            }
+            other => panic!("expected the month's ceiling, got {other:?}"),
+        }
+        let november = Utc.with_ymd_and_hms(2026, 11, 1, 0, 0, 0).unwrap();
+        assert_eq!(budget.spend(november).unwrap(), 1);
+    }
+
+    #[test]
+    fn a_ledger_from_before_the_monthly_count_seeds_the_month() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("call-budget.json");
+        std::fs::write(&path, br#"{"day":"2026-10-23","calls":28}"#).unwrap();
+        let budget = CallBudget::persistent(&path, 100);
+        assert_eq!(budget.used_this_month(at(24, 9)).unwrap(), 28);
+        assert_eq!(budget.used(at(24, 9)).unwrap(), 0);
     }
 
     #[test]

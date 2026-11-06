@@ -20,8 +20,8 @@ use serde_json::Value;
 use thiserror::Error;
 
 use crate::domain::{ContactType, DocumentType, RealmId};
-use crate::store::search::{Hit, MatchReason};
 use crate::store::reports::AgingSide;
+use crate::store::search::{Hit, MatchReason};
 use crate::store::{DocumentRow, LineRow, Store, StoreError};
 
 #[derive(Debug, Error)]
@@ -164,7 +164,10 @@ pub struct DocumentDetailDto {
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum HitDto {
     #[serde(rename_all = "camelCase")]
-    Document { reason: String, document: Box<DocumentDto> },
+    Document {
+        reason: String,
+        document: Box<DocumentDto>,
+    },
     #[serde(rename_all = "camelCase")]
     Contact {
         reason: String,
@@ -379,7 +382,12 @@ pub fn dispatch(store: &Store, command: &str, args: Value) -> Result<Value, ApiE
 }
 
 /// [`dispatch`] at a given time, so write commands are testable with a fixed clock.
-pub fn dispatch_at(store: &Store, command: &str, args: Value, now: chrono::DateTime<chrono::Utc>) -> Result<Value, ApiError> {
+pub fn dispatch_at(
+    store: &Store,
+    command: &str,
+    args: Value,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<Value, ApiError> {
     if let Some(result) = write_commands::dispatch(store, command, args.clone(), now) {
         return result;
     }
@@ -411,7 +419,10 @@ pub fn dispatch_at(store: &Store, command: &str, args: Value, now: chrono::DateT
                 .filter_map(|t| t.last_cdc_cursor.clone())
                 .max();
             to_json(StatusDto {
-                environment: store.realm_environment(&realm(&args.realm)?)?.as_str().to_string(),
+                environment: store
+                    .realm_environment(&realm(&args.realm)?)?
+                    .as_str()
+                    .to_string(),
                 entity_types: status
                     .entity_types
                     .into_iter()
@@ -471,7 +482,8 @@ pub fn dispatch_at(store: &Store, command: &str, args: Value, now: chrono::DateT
             // Queued creates first: they are the newest, and a person who just
             // saved one expects to see it at the top.
             let mut out = write_commands::pending_documents(store, &realm, args.doc_type)?;
-            let rows = store.list_documents(&realm, args.doc_type, args.limit.clamp(1, MAX_ROWS))?;
+            let rows =
+                store.list_documents(&realm, args.doc_type, args.limit.clamp(1, MAX_ROWS))?;
             out.extend(rows.into_iter().map(DocumentDto::from));
             to_json(out)
         }
@@ -491,13 +503,28 @@ pub fn dispatch_at(store: &Store, command: &str, args: Value, now: chrono::DateT
             if args.qbo_id.starts_with(crate::worker::LOCAL_ID_PREFIX) {
                 // Not in QBO yet: shown from its queued payload, honestly marked.
                 let record = store
-                    .outbox_records(&realm, &[crate::outbox::OutboxState::Pending, crate::outbox::OutboxState::InFlight,
-                        crate::outbox::OutboxState::Conflicted, crate::outbox::OutboxState::Rejected])?
+                    .outbox_records(
+                        &realm,
+                        &[
+                            crate::outbox::OutboxState::Pending,
+                            crate::outbox::OutboxState::InFlight,
+                            crate::outbox::OutboxState::Conflicted,
+                            crate::outbox::OutboxState::Rejected,
+                        ],
+                    )?
                     .into_iter()
                     .find(|r| r.local_entity_id == args.qbo_id)
                     .ok_or(ApiError::NotFound)?;
-                let (document, lines) = write_commands::pending_document(store, &realm, &record)?.ok_or(ApiError::NotFound)?;
-                return to_json(DocumentDetailDto { related: vec![], links: vec![], unresolved: vec![], document, lines, open_writes });
+                let (document, lines) = write_commands::pending_document(store, &realm, &record)?
+                    .ok_or(ApiError::NotFound)?;
+                return to_json(DocumentDetailDto {
+                    related: vec![],
+                    links: vec![],
+                    unresolved: vec![],
+                    document,
+                    lines,
+                    open_writes,
+                });
             }
             let document = store
                 .get_document(&realm, &args.qbo_id)?
@@ -507,7 +534,11 @@ pub fn dispatch_at(store: &Store, command: &str, args: Value, now: chrono::DateT
             to_json(DocumentDetailDto {
                 document: document.into(),
                 lines: lines.into_iter().map(LineDto::from).collect(),
-                related: lineage.documents.into_iter().map(DocumentDto::from).collect(),
+                related: lineage
+                    .documents
+                    .into_iter()
+                    .map(DocumentDto::from)
+                    .collect(),
                 links: lineage
                     .edges
                     .into_iter()
@@ -546,7 +577,11 @@ pub fn dispatch_at(store: &Store, command: &str, args: Value, now: chrono::DateT
             let side = match args.side.as_str() {
                 "receivable" => AgingSide::Receivable,
                 "payable" => AgingSide::Payable,
-                other => return Err(ApiError::BadArguments(format!("side must be receivable or payable, not {other:?}"))),
+                other => {
+                    return Err(ApiError::BadArguments(format!(
+                        "side must be receivable or payable, not {other:?}"
+                    )))
+                }
             };
             let as_of = match args.as_of {
                 Some(raw) => date_arg(&raw)?,
@@ -573,15 +608,21 @@ pub fn dispatch_at(store: &Store, command: &str, args: Value, now: chrono::DateT
         }
         "salesByCustomer" => {
             let args: RangeArgs = parse(args)?;
-            let rows = store.sales_by_customer(&realm(&args.realm)?, &date_arg(&args.from)?, &date_arg(&args.to)?)?;
+            let rows = store.sales_by_customer(
+                &realm(&args.realm)?,
+                &date_arg(&args.from)?,
+                &date_arg(&args.to)?,
+            )?;
             to_json(
                 rows.into_iter()
-                    .map(|r| serde_json::json!({
-                        "contactId": r.contact_id,
-                        "contactName": r.contact_name,
-                        "netSalesMinor": r.net_sales.minor(),
-                        "documents": r.documents,
-                    }))
+                    .map(|r| {
+                        serde_json::json!({
+                            "contactId": r.contact_id,
+                            "contactName": r.contact_name,
+                            "netSalesMinor": r.net_sales.minor(),
+                            "documents": r.documents,
+                        })
+                    })
                     .collect::<Vec<_>>(),
             )
         }
@@ -618,8 +659,20 @@ mod tests {
 
     fn book() -> Store {
         let store = Store::open_in_memory().unwrap();
-        let size = DemoSize { customers: 15, vendors: 4, items: 20, invoices: 80, purchase_orders: 20 };
-        demo::seed(&store, size, 3, Utc.with_ymd_and_hms(2026, 10, 1, 0, 0, 0).unwrap()).unwrap();
+        let size = DemoSize {
+            customers: 15,
+            vendors: 4,
+            items: 20,
+            invoices: 80,
+            purchase_orders: 20,
+        };
+        demo::seed(
+            &store,
+            size,
+            3,
+            Utc.with_ymd_and_hms(2026, 10, 1, 0, 0, 0).unwrap(),
+        )
+        .unwrap();
         store
     }
 
@@ -632,17 +685,33 @@ mod tests {
 
     #[test]
     fn a_register_lists_invoices_with_exact_money() {
-        let value = dispatch(&book(), "documents", json!({ "realm": DEMO_REALM, "docType": "Invoice" })).unwrap();
+        let value = dispatch(
+            &book(),
+            "documents",
+            json!({ "realm": DEMO_REALM, "docType": "Invoice" }),
+        )
+        .unwrap();
         let rows = value.as_array().unwrap();
         assert_eq!(rows.len(), 80);
-        assert!(rows[0]["totalMinor"].is_i64(), "money crosses the wire as integers");
-        assert!(rows[0]["contactName"].is_string(), "the customer is joined, not looked up per row");
+        assert!(
+            rows[0]["totalMinor"].is_i64(),
+            "money crosses the wire as integers"
+        );
+        assert!(
+            rows[0]["contactName"].is_string(),
+            "the customer is joined, not looked up per row"
+        );
     }
 
     #[test]
     fn a_document_carries_its_lines_and_chain() {
         let store = book();
-        let invoices = dispatch(&store, "documents", json!({ "realm": DEMO_REALM, "docType": "Invoice" })).unwrap();
+        let invoices = dispatch(
+            &store,
+            "documents",
+            json!({ "realm": DEMO_REALM, "docType": "Invoice" }),
+        )
+        .unwrap();
         // A paid invoice links to its payment, so its chain has at least two documents.
         let paid = invoices
             .as_array()
@@ -650,14 +719,24 @@ mod tests {
             .iter()
             .find(|row| row["balanceMinor"] == 0)
             .expect("the demo book has paid invoices");
-        let detail = dispatch(&store, "document", json!({ "realm": DEMO_REALM, "qboId": paid["qboId"] })).unwrap();
+        let detail = dispatch(
+            &store,
+            "document",
+            json!({ "realm": DEMO_REALM, "qboId": paid["qboId"] }),
+        )
+        .unwrap();
         assert!(!detail["lines"].as_array().unwrap().is_empty());
         assert!(detail["related"].as_array().unwrap().len() >= 2);
     }
 
     #[test]
     fn search_labels_why_a_number_matched() {
-        let value = dispatch(&book(), "search", json!({ "realm": DEMO_REALM, "query": "9005" })).unwrap();
+        let value = dispatch(
+            &book(),
+            "search",
+            json!({ "realm": DEMO_REALM, "query": "9005" }),
+        )
+        .unwrap();
         assert_eq!(value["hits"][0]["kind"], "document");
         assert_eq!(value["hits"][0]["reason"], "number");
         assert!(value["elapsedMicros"].is_u64());
@@ -668,7 +747,11 @@ mod tests {
         let value = dispatch(&book(), "status", json!({ "realm": DEMO_REALM })).unwrap();
         assert_eq!(value["writeEnabled"], false);
         assert_eq!(value["outboxPending"], 0);
-        assert!(value["entityTypes"].as_array().unwrap().iter().any(|t| t["entityType"] == "Invoice"));
+        assert!(value["entityTypes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|t| t["entityType"] == "Invoice"));
     }
 
     #[test]
@@ -679,23 +762,46 @@ mod tests {
 
     #[test]
     fn aging_buckets_sum_to_the_total() {
-        let value = dispatch(&book(), "aging", json!({ "realm": DEMO_REALM, "side": "receivable", "asOf": "2026-10-01" })).unwrap();
+        let value = dispatch(
+            &book(),
+            "aging",
+            json!({ "realm": DEMO_REALM, "side": "receivable", "asOf": "2026-10-01" }),
+        )
+        .unwrap();
         assert_eq!(value["asOf"], "2026-10-01");
         let rows = value["rows"].as_array().unwrap();
         assert!(!rows.is_empty(), "the demo book has open invoices");
         for row in rows {
-            let parts: i64 = ["currentMinor", "days1to30Minor", "days31to60Minor", "days61to90Minor", "over90Minor"]
-                .iter()
-                .map(|k| row[*k].as_i64().unwrap())
-                .sum();
+            let parts: i64 = [
+                "currentMinor",
+                "days1to30Minor",
+                "days31to60Minor",
+                "days61to90Minor",
+                "over90Minor",
+            ]
+            .iter()
+            .map(|k| row[*k].as_i64().unwrap())
+            .sum();
             assert_eq!(parts, row["totalMinor"].as_i64().unwrap());
         }
         assert_eq!(
-            dispatch(&book(), "aging", json!({ "realm": DEMO_REALM, "side": "sideways" })).unwrap_err().status(),
+            dispatch(
+                &book(),
+                "aging",
+                json!({ "realm": DEMO_REALM, "side": "sideways" })
+            )
+            .unwrap_err()
+            .status(),
             400
         );
         assert_eq!(
-            dispatch(&book(), "aging", json!({ "realm": DEMO_REALM, "side": "payable", "asOf": "10/01/2026" })).unwrap_err().status(),
+            dispatch(
+                &book(),
+                "aging",
+                json!({ "realm": DEMO_REALM, "side": "payable", "asOf": "10/01/2026" })
+            )
+            .unwrap_err()
+            .status(),
             400
         );
     }
@@ -704,19 +810,42 @@ mod tests {
     fn items_and_their_documents_are_listed() {
         let store = book();
         let items = dispatch(&store, "items", json!({ "realm": DEMO_REALM })).unwrap();
-        let used = items.as_array().unwrap().iter().find(|i| i["usedOn"].as_i64().unwrap() > 0).unwrap();
-        let docs = dispatch(&store, "itemDocuments", json!({ "realm": DEMO_REALM, "itemId": used["qboId"] })).unwrap();
-        assert_eq!(docs.as_array().unwrap().len() as i64, used["usedOn"].as_i64().unwrap());
+        let used = items
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|i| i["usedOn"].as_i64().unwrap() > 0)
+            .unwrap();
+        let docs = dispatch(
+            &store,
+            "itemDocuments",
+            json!({ "realm": DEMO_REALM, "itemId": used["qboId"] }),
+        )
+        .unwrap();
+        assert_eq!(
+            docs.as_array().unwrap().len() as i64,
+            used["usedOn"].as_i64().unwrap()
+        );
     }
 
     #[test]
     fn errors_are_typed_for_the_transport() {
         let store = book();
-        let missing = dispatch(&store, "document", json!({ "realm": DEMO_REALM, "qboId": "nope" })).unwrap_err();
+        let missing = dispatch(
+            &store,
+            "document",
+            json!({ "realm": DEMO_REALM, "qboId": "nope" }),
+        )
+        .unwrap_err();
         assert_eq!(missing.status(), 404);
         let bad = dispatch(&store, "documents", json!({ "realm": "x" })).unwrap_err();
         assert_eq!(bad.status(), 400);
-        assert_eq!(dispatch(&store, "deleteEverything", Value::Null).unwrap_err().status(), 404);
+        assert_eq!(
+            dispatch(&store, "deleteEverything", Value::Null)
+                .unwrap_err()
+                .status(),
+            404
+        );
     }
 
     #[test]

@@ -1085,11 +1085,14 @@ fn build_http_client(
     // On stderr, so it lands at the top of the daemon log: which app this
     // process spends, and how much of today's ceiling is already gone.
     eprintln!(
-        "qbo-local: Intuit app {} (from the {}); {}/{} calls used today (UTC)",
+        "qbo-local: Intuit app {} (from the {}); {}/{} calls used today, {}/{} this month (UTC; ledger {})",
         app.client_id,
         app.source,
         budget.used(Utc::now()).map_err(runtime)?,
-        budget.limit()
+        budget.limit(),
+        budget.used_this_month(Utc::now()).map_err(runtime)?,
+        budget.monthly_limit(),
+        budget.path().map_or_else(|| "in memory".to_string(), |p| p.display().to_string())
     );
     let redirect_uri = format!("http://localhost:{}/callback", config.intuit.redirect_port);
     let oauth_config = OAuthConfig::intuit(app.client_id, app.client_secret, redirect_uri);
@@ -1341,8 +1344,10 @@ fn run_auth(
     let config = LocalConfig::load(path).map_err(runtime)?;
     let app = config.credentials().map_err(runtime)?;
     let port = port.unwrap_or(config.intuit.redirect_port);
-    let redirect_uri = pasted_redirect
-        .map_or_else(|| format!("http://localhost:{port}/callback"), str::to_string);
+    let redirect_uri = pasted_redirect.map_or_else(
+        || format!("http://localhost:{port}/callback"),
+        str::to_string,
+    );
     println!("Intuit app {} (from the {})", app.client_id, app.source);
     let oauth_config = OAuthConfig::intuit(app.client_id, app.client_secret, redirect_uri);
 
