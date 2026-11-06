@@ -63,51 +63,17 @@ impl Rng {
 }
 
 const PLACES: &[&str] = &[
-    "Harbor",
-    "Lakeside",
-    "Pinecrest",
-    "Riverbend",
-    "Cedar Point",
-    "Maple Grove",
-    "Bayview",
-    "Northfield",
-    "Stonebridge",
-    "Willow Creek",
-    "Eastgate",
-    "Sandy Hook",
-    "Clearwater",
-    "Fox Hollow",
-    "Oak Ridge",
-    "Silver Lake",
-    "Brookside",
-    "Highland",
-    "Seaside",
-    "Elm Park",
+    "Harbor", "Lakeside", "Pinecrest", "Riverbend", "Cedar Point", "Maple Grove", "Bayview",
+    "Northfield", "Stonebridge", "Willow Creek", "Eastgate", "Sandy Hook", "Clearwater",
+    "Fox Hollow", "Oak Ridge", "Silver Lake", "Brookside", "Highland", "Seaside", "Elm Park",
 ];
 const KINDS: &[&str] = &[
-    "Swim Club",
-    "Aquatic Center",
-    "YMCA",
-    "Parks & Rec",
-    "Country Club",
-    "Swim School",
-    "High School Athletics",
-    "Community Pool",
-    "Waterpark",
-    "Beach Patrol",
-    "Rec Center",
+    "Swim Club", "Aquatic Center", "YMCA", "Parks & Rec", "Country Club", "Swim School",
+    "High School Athletics", "Community Pool", "Waterpark", "Beach Patrol", "Rec Center",
 ];
 const SUPPLIERS: &[&str] = &[
-    "Foam Supply",
-    "Plastics",
-    "Fasteners",
-    "Corrugated",
-    "Webbing Co",
-    "Hardware",
-    "Industrial",
-    "Freight Lines",
-    "Coatings",
-    "Polymers",
+    "Foam Supply", "Plastics", "Fasteners", "Corrugated", "Webbing Co", "Hardware",
+    "Industrial", "Freight Lines", "Coatings", "Polymers",
 ];
 const PRODUCTS: &[(&str, &str, i64)] = &[
     ("Rescue tube", "RT", 4925),
@@ -172,12 +138,7 @@ pub fn generate(size: DemoSize, seed: u64, now: DateTime<Utc>) -> Vec<MirroredEn
     };
 
     for (class_id, name) in CLASSES {
-        out.push(entity(
-            EntityType::Class,
-            class_id,
-            now,
-            json!({ "Id": class_id, "Name": name, "FullyQualifiedName": name, "Active": true }),
-        ));
+        out.push(entity(EntityType::Class, class_id, now, json!({ "Id": class_id, "Name": name, "FullyQualifiedName": name, "Active": true })));
     }
 
     for (account_id, name, account_type) in ACCOUNTS {
@@ -206,15 +167,10 @@ pub fn generate(size: DemoSize, seed: u64, now: DateTime<Utc>) -> Vec<MirroredEn
     for n in 0..size.vendors {
         let vendor_id = id();
         let name = format!("{} {}", rng.pick(PLACES), rng.pick(SUPPLIERS));
-        out.push(entity(
-            EntityType::Vendor,
-            &vendor_id,
-            now,
-            json!({
-                "Id": vendor_id, "SyncToken": "0", "DisplayName": format!("{name} #{}", n + 1),
-                "CompanyName": name, "Balance": 0, "Active": true
-            }),
-        ));
+        out.push(entity(EntityType::Vendor, &vendor_id, now, json!({
+            "Id": vendor_id, "SyncToken": "0", "DisplayName": format!("{name} #{}", n + 1),
+            "CompanyName": name, "Balance": 0, "Active": true
+        })));
         vendors.push(vendor_id);
     }
 
@@ -249,8 +205,7 @@ pub fn generate(size: DemoSize, seed: u64, now: DateTime<Utc>) -> Vec<MirroredEn
                 "ClassRef": { "value": class }
             });
             if detail == "SalesItemLineDetail" {
-                line_detail["TaxCodeRef"] =
-                    json!({ "value": if rng.chance(30) { "TAX" } else { "NON" } });
+                line_detail["TaxCodeRef"] = json!({ "value": if rng.chance(30) { "TAX" } else { "NON" } });
             }
             out.push(json!({
                 "LineNum": line_no, "Description": description, "Amount": money(amount),
@@ -269,25 +224,18 @@ pub fn generate(size: DemoSize, seed: u64, now: DateTime<Utc>) -> Vec<MirroredEn
         let class = CLASSES[rng.below(CLASSES.len())].0;
         let (line_values, total) = lines(&mut rng, "SalesItemLineDetail");
         let updated = now - Duration::days((now.date_naive() - txn_date).num_days().max(0));
-        let customer_po = rng
-            .chance(40)
-            .then(|| format!("PO-{}", 40_000 + rng.below(60_000)));
+        let customer_po = rng.chance(40).then(|| format!("PO-{}", 40_000 + rng.below(60_000)));
 
         let mut linked = Vec::new();
         if rng.chance(35) {
             estimate_number += 1;
             let estimate_id = id();
-            out.push(entity(
-                EntityType::Estimate,
-                &estimate_id,
-                updated,
-                json!({
-                    "Id": estimate_id, "SyncToken": "0", "DocNumber": estimate_number.to_string(),
-                    "TxnDate": (txn_date - Duration::days(7)).to_string(),
-                    "CustomerRef": { "value": customer }, "ClassRef": { "value": class },
-                    "TotalAmt": money(total), "TxnStatus": "Closed", "Line": line_values.clone()
-                }),
-            ));
+            out.push(entity(EntityType::Estimate, &estimate_id, updated, json!({
+                "Id": estimate_id, "SyncToken": "0", "DocNumber": estimate_number.to_string(),
+                "TxnDate": (txn_date - Duration::days(7)).to_string(),
+                "CustomerRef": { "value": customer }, "ClassRef": { "value": class },
+                "TotalAmt": money(total), "TxnStatus": "Closed", "Line": line_values.clone()
+            })));
             linked.push(json!({ "TxnId": estimate_id, "TxnType": "Estimate" }));
         }
 
@@ -314,11 +262,7 @@ pub fn generate(size: DemoSize, seed: u64, now: DateTime<Utc>) -> Vec<MirroredEn
             let payment_id = id();
             let paid_on = txn_date + Duration::days(10 + rng.below(30) as i64);
             // The last fortnight's cheques are still waiting to be banked.
-            let deposited_to = if (now.date_naive() - paid_on).num_days() > 14 {
-                "90"
-            } else {
-                "92"
-            };
+            let deposited_to = if (now.date_naive() - paid_on).num_days() > 14 { "90" } else { "92" };
             out.push(entity(EntityType::Payment, &payment_id, updated, json!({
                 "Id": payment_id, "SyncToken": "0",
                 "TxnDate": paid_on.to_string(),
@@ -337,36 +281,26 @@ pub fn generate(size: DemoSize, seed: u64, now: DateTime<Utc>) -> Vec<MirroredEn
         let age = (now.date_naive() - txn_date).num_days();
         let received = age > 14 && rng.chance(85);
         let po_id = id();
-        out.push(entity(
-            EntityType::PurchaseOrder,
-            &po_id,
-            now,
-            json!({
-                "Id": po_id, "SyncToken": "0", "DocNumber": (5_000 + n).to_string(),
-                "TxnDate": txn_date.to_string(), "VendorRef": { "value": vendor },
-                "TotalAmt": money(total), "POStatus": if received { "Closed" } else { "Open" },
-                "Line": line_values.clone()
-            }),
-        ));
+        out.push(entity(EntityType::PurchaseOrder, &po_id, now, json!({
+            "Id": po_id, "SyncToken": "0", "DocNumber": (5_000 + n).to_string(),
+            "TxnDate": txn_date.to_string(), "VendorRef": { "value": vendor },
+            "TotalAmt": money(total), "POStatus": if received { "Closed" } else { "Open" },
+            "Line": line_values.clone()
+        })));
         if !received {
             continue;
         }
         let bill_id = id();
         let bill_paid = age > 40;
-        out.push(entity(
-            EntityType::Bill,
-            &bill_id,
-            now,
-            json!({
-                "Id": bill_id, "SyncToken": "0", "DocNumber": format!("V{}-{}", n % 97, 10_000 + n),
-                "TxnDate": (txn_date + Duration::days(9)).to_string(),
-                "DueDate": (txn_date + Duration::days(39)).to_string(),
-                "VendorRef": { "value": vendor }, "TotalAmt": money(total),
-                "Balance": money(if bill_paid { 0 } else { total }),
-                "LinkedTxn": [ { "TxnId": po_id, "TxnType": "PurchaseOrder" } ],
-                "Line": line_values
-            }),
-        ));
+        out.push(entity(EntityType::Bill, &bill_id, now, json!({
+            "Id": bill_id, "SyncToken": "0", "DocNumber": format!("V{}-{}", n % 97, 10_000 + n),
+            "TxnDate": (txn_date + Duration::days(9)).to_string(),
+            "DueDate": (txn_date + Duration::days(39)).to_string(),
+            "VendorRef": { "value": vendor }, "TotalAmt": money(total),
+            "Balance": money(if bill_paid { 0 } else { total }),
+            "LinkedTxn": [ { "TxnId": po_id, "TxnType": "PurchaseOrder" } ],
+            "Line": line_values
+        })));
         if bill_paid {
             let payment_id = id();
             out.push(entity(EntityType::BillPayment, &payment_id, now, json!({
@@ -382,12 +316,7 @@ pub fn generate(size: DemoSize, seed: u64, now: DateTime<Utc>) -> Vec<MirroredEn
 }
 
 /// Register the demo realm and write the book into `store`, 500 per commit.
-pub fn seed(
-    store: &Store,
-    size: DemoSize,
-    seed: u64,
-    now: DateTime<Utc>,
-) -> Result<usize, StoreError> {
+pub fn seed(store: &Store, size: DemoSize, seed: u64, now: DateTime<Utc>) -> Result<usize, StoreError> {
     let realm = RealmId::parse(DEMO_REALM).expect("constant is a valid realm id");
     store.register_realm(&realm, "Demo Company (synthetic)", now)?;
     // Synthetic, so it is treated as a sandbox: writes can be switched on for
@@ -415,11 +344,7 @@ const FOAM_NET_BF: &[(&str, &str)] = &[
 
 /// Materials by colour, three receipts with freight, a build sheet for every
 /// product, and a few runs — one of them over its sheet.
-fn seed_manufacturing(
-    store: &Store,
-    realm: &RealmId,
-    now: DateTime<Utc>,
-) -> Result<(), StoreError> {
+fn seed_manufacturing(store: &Store, realm: &RealmId, now: DateTime<Utc>) -> Result<(), StoreError> {
     use std::str::FromStr;
 
     use ledger_core::Money;
@@ -430,25 +355,17 @@ fn seed_manufacturing(
 
     let d = |raw: &str| Decimal::from_str(raw).expect("constant decimal");
     for color in COLORS {
-        store.save_material(
-            realm,
-            &Material {
-                material_id: format!("xlpe-2-{color}"),
-                name: format!("XLPE 2 in {color}"),
-                thickness_in: d("2"),
-                width_in: d("48"),
-                length_in: d("96"),
-                color: Some(color.to_string()),
-            },
-            now,
-        )?;
+        store.save_material(realm, &Material {
+            material_id: format!("xlpe-2-{color}"),
+            name: format!("XLPE 2 in {color}"),
+            thickness_in: d("2"),
+            width_in: d("48"),
+            length_in: d("96"),
+            color: Some(color.to_string()),
+        }, now)?;
     }
     // Three deliveries: prices creep up, freight varies, colours mix.
-    let deliveries = [
-        ("2026-06-10", "86.40", "412.00"),
-        ("2026-08-14", "89.60", "455.50"),
-        ("2026-10-02", "92.80", "398.25"),
-    ];
+    let deliveries = [("2026-06-10", "86.40", "412.00"), ("2026-08-14", "89.60", "455.50"), ("2026-10-02", "92.80", "398.25")];
     for (n, (on, price, freight)) in deliveries.iter().enumerate() {
         let lines: Vec<ReceiptLine> = COLORS
             .iter()
@@ -461,87 +378,41 @@ fn seed_manufacturing(
                 surcharge_per_sheet: d("2.75"),
             })
             .collect();
-        let freight =
-            Money::from_minor((d(freight) * Decimal::from(100)).try_into().expect("cents"));
+        let freight = Money::from_minor((d(freight) * Decimal::from(100)).try_into().expect("cents"));
         let landed = mfg::landed_cost(&lines, freight).expect("valid constant receipt");
-        store.record_receipt(
-            realm,
-            &format!("demo-rcpt-{n}"),
-            on,
-            None,
-            Some(&format!("PO-{}", 4400 + n)),
-            freight,
-            &lines,
-            &landed,
-            now,
-        )?;
+        store.record_receipt(realm, &format!("demo-rcpt-{n}"), on, None, Some(&format!("PO-{}", 4400 + n)), freight, &lines, &landed, now)?;
     }
 
     let prices = store.material_prices(realm)?;
     let mut runs = 0;
     for item in store.items(realm)? {
         let product = FOAM_NET_BF.iter().find(|(p, _)| item.name.starts_with(p));
-        let color = COLORS
-            .iter()
-            .find(|c| item.name.contains(*c))
-            .copied()
-            .unwrap_or("blue");
+        let color = COLORS.iter().find(|c| item.name.contains(*c)).copied().unwrap_or("blue");
         let mut components = Vec::new();
         if let Some((_, net)) = product {
-            components.push(Component::Material {
-                material_id: format!("xlpe-2-{color}"),
-                net_bf: d(net),
-                yield_pct: d("78"),
-            });
-            components.push(Component::Labour {
-                name: "CNC cut".into(),
-                minutes: d("4"),
-                rate_per_hour: d("45"),
-            });
+            components.push(Component::Material { material_id: format!("xlpe-2-{color}"), net_bf: d(net), yield_pct: d("78") });
+            components.push(Component::Labour { name: "CNC cut".into(), minutes: d("4"), rate_per_hour: d("45") });
         } else {
-            components.push(Component::Part {
-                name: "Bought-in components".into(),
-                item_id: None,
-                qty: d("1"),
-                unit_cost: d("12.50"),
-            });
+            components.push(Component::Part { name: "Bought-in components".into(), item_id: None, qty: d("1"), unit_cost: d("12.50") });
         }
-        components.push(Component::Labour {
-            name: "Finish and pack".into(),
-            minutes: d("6"),
-            rate_per_hour: d("28"),
-        });
+        components.push(Component::Labour { name: "Finish and pack".into(), minutes: d("6"), rate_per_hour: d("28") });
         store.save_build_sheet(realm, &item.qbo_id, &components, now)?;
 
         if product.is_some() && runs < 6 {
             // Every third run uses 9% more foam than the sheet allows.
             let quantity = Decimal::from(50 + runs * 25);
-            let standard =
-                mfg::build_variance(&components, &prices, quantity, &[]).expect("valid sheet");
+            let standard = mfg::build_variance(&components, &prices, quantity, &[]).expect("valid sheet");
             let actual: Vec<ActualMaterial> = standard
                 .lines
                 .iter()
                 .map(|l| ActualMaterial {
                     material_id: l.material_id.clone(),
-                    board_feet: mfg::rate(
-                        l.standard_bf * if runs % 3 == 2 { d("1.09") } else { d("0.99") },
-                    ),
+                    board_feet: mfg::rate(l.standard_bf * if runs % 3 == 2 { d("1.09") } else { d("0.99") }),
                 })
                 .collect();
-            let variance =
-                mfg::build_variance(&components, &prices, quantity, &actual).expect("valid run");
+            let variance = mfg::build_variance(&components, &prices, quantity, &actual).expect("valid run");
             let on = format!("2026-10-{:02}", 3 + runs * 2);
-            store.record_build(
-                realm,
-                &format!("demo-build-{runs}"),
-                &item.qbo_id,
-                &on,
-                &components,
-                &actual,
-                &variance,
-                None,
-                now,
-            )?;
+            store.record_build(realm, &format!("demo-build-{runs}"), &item.qbo_id, &on, &components, &actual, &variance, None, now)?;
             runs += 1;
         }
     }
@@ -561,13 +432,7 @@ mod tests {
     }
 
     fn small() -> DemoSize {
-        DemoSize {
-            customers: 20,
-            vendors: 5,
-            items: 30,
-            invoices: 150,
-            purchase_orders: 40,
-        }
+        DemoSize { customers: 20, vendors: 5, items: 30, invoices: 150, purchase_orders: 40 }
     }
 
     #[test]
@@ -582,24 +447,9 @@ mod tests {
         let written = seed(&store, small(), 7, now()).unwrap();
         let realm = RealmId::parse(DEMO_REALM).unwrap();
         assert!(written > 150);
-        assert!(
-            store.quarantined(&realm).unwrap().is_empty(),
-            "{:?}",
-            store.quarantined(&realm)
-        );
-        assert_eq!(
-            store
-                .list_documents(&realm, DocumentType::Invoice, 1_000)
-                .unwrap()
-                .len(),
-            150
-        );
-        assert!(
-            store
-                .count_projected(&realm, ProjectedTable::DocumentLinks)
-                .unwrap()
-                > 0
-        );
+        assert!(store.quarantined(&realm).unwrap().is_empty(), "{:?}", store.quarantined(&realm));
+        assert_eq!(store.list_documents(&realm, DocumentType::Invoice, 1_000).unwrap().len(), 150);
+        assert!(store.count_projected(&realm, ProjectedTable::DocumentLinks).unwrap() > 0);
         assert_eq!(store.orphaned_line_count(&realm).unwrap(), 0);
 
         // Every product is costed, and the seeded runs include an overrun.
@@ -607,11 +457,7 @@ mod tests {
         for (_, components, _) in store.build_sheets(&realm).unwrap() {
             crate::mfg::unit_cost(&components, &prices).unwrap();
         }
-        assert!(store
-            .builds(&realm, None)
-            .unwrap()
-            .iter()
-            .any(|b| b.flagged));
+        assert!(store.builds(&realm, None).unwrap().iter().any(|b| b.flagged));
     }
 
     #[test]

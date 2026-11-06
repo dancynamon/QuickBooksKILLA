@@ -88,10 +88,7 @@ fn date(raw: &str, what: &str) -> Result<String, ComposeError> {
 /// Exact decimal text as a JSON number. QBO reads the digits; no float is
 /// involved in producing them.
 fn number(value: Decimal) -> Value {
-    Value::Number(
-        serde_json::Number::from_str(&value.normalize().to_string())
-            .expect("a Decimal prints as a JSON number"),
-    )
+    Value::Number(serde_json::Number::from_str(&value.normalize().to_string()).expect("a Decimal prints as a JSON number"))
 }
 
 fn money(value: Money) -> Value {
@@ -109,10 +106,7 @@ pub fn line_amount(qty: &str, rate: &str) -> Result<Money, ComposeError> {
 /// The subtotal the editor shows: the sum of rounded line amounts, which is
 /// what QBO will hold before tax.
 pub fn subtotal(lines: &[DraftLine]) -> Result<Money, ComposeError> {
-    let amounts = lines
-        .iter()
-        .map(|l| line_amount(&l.qty, &l.rate))
-        .collect::<Result<Vec<_>, _>>()?;
+    let amounts = lines.iter().map(|l| line_amount(&l.qty, &l.rate)).collect::<Result<Vec<_>, _>>()?;
     Money::checked_sum(amounts).map_err(|e| invalid(e.to_string()))
 }
 
@@ -123,24 +117,13 @@ pub fn subtotal(lines: &[DraftLine]) -> Result<Money, ComposeError> {
 /// and no known field is refused rather than silently dropping the PO.
 /// For an update the body is sparse: QBO changes only the fields sent, so a
 /// field this editor does not know about is left as it was.
-pub fn to_payload(
-    draft: &DocumentDraft,
-    po_definition_id: Option<&str>,
-    update: bool,
-) -> Result<Value, ComposeError> {
+pub fn to_payload(draft: &DocumentDraft, po_definition_id: Option<&str>, update: bool) -> Result<Value, ComposeError> {
     if !EDITABLE.contains(&draft.doc_type) {
-        return Err(invalid(format!(
-            "{} is not editable here yet",
-            draft.doc_type.as_str()
-        )));
+        return Err(invalid(format!("{} is not editable here yet", draft.doc_type.as_str())));
     }
     let purchase = is_purchase(draft.doc_type);
     if draft.contact_id.trim().is_empty() {
-        return Err(invalid(if purchase {
-            "choose a vendor"
-        } else {
-            "choose a customer"
-        }));
+        return Err(invalid(if purchase { "choose a vendor" } else { "choose a customer" }));
     }
     if draft.lines.is_empty() {
         return Err(invalid("add at least one line"));
@@ -149,10 +132,7 @@ pub fn to_payload(
     let mut lines = Vec::new();
     for (index, line) in draft.lines.iter().enumerate() {
         if line.item_id.is_none() && line.description.as_deref().unwrap_or("").trim().is_empty() {
-            return Err(invalid(format!(
-                "line {} needs a product or a description",
-                index + 1
-            )));
+            return Err(invalid(format!("line {} needs a product or a description", index + 1)));
         }
         let amount = line_amount(&line.qty, &line.rate)?;
         let mut detail = Map::new();
@@ -165,21 +145,11 @@ pub fn to_payload(
             detail.insert("ClassRef".into(), json!({ "value": class }));
         }
         if !purchase {
-            detail.insert(
-                "TaxCodeRef".into(),
-                json!({ "value": if line.taxable { "TAX" } else { "NON" } }),
-            );
+            detail.insert("TaxCodeRef".into(), json!({ "value": if line.taxable { "TAX" } else { "NON" } }));
         }
-        let detail_type = if purchase {
-            "ItemBasedExpenseLineDetail"
-        } else {
-            "SalesItemLineDetail"
-        };
+        let detail_type = if purchase { "ItemBasedExpenseLineDetail" } else { "SalesItemLineDetail" };
         if purchase && line.item_id.is_none() {
-            return Err(invalid(format!(
-                "line {}: a purchase line needs a product, which carries its expense account",
-                index + 1
-            )));
+            return Err(invalid(format!("line {}: a purchase line needs a product, which carries its expense account", index + 1)));
         }
         let mut out = Map::new();
         out.insert("LineNum".into(), json!(index + 1));
@@ -221,15 +191,8 @@ pub fn to_payload(
             body.insert("CustomerMemo".into(), json!({ "value": memo }));
         }
     }
-    if purchase
-        && draft
-            .po_number
-            .as_deref()
-            .is_some_and(|p| !p.trim().is_empty())
-    {
-        return Err(invalid(
-            "a customer PO belongs on the sales document, not the purchase",
-        ));
+    if purchase && draft.po_number.as_deref().is_some_and(|p| !p.trim().is_empty()) {
+        return Err(invalid("a customer PO belongs on the sales document, not the purchase"));
     }
     if let Some(po) = draft.po_number.as_deref().filter(|p| !p.trim().is_empty()) {
         let definition = po_definition_id
@@ -327,9 +290,7 @@ fn show(value: Money) -> String {
 pub fn cents(raw: &str, what: &str) -> Result<Money, ComposeError> {
     let value = decimal(raw, what)?;
     if value.normalize().scale() > 2 {
-        return Err(invalid(format!(
-            "{what} {raw:?} has more than two decimal places"
-        )));
+        return Err(invalid(format!("{what} {raw:?} has more than two decimal places")));
     }
     let minor = (value * Decimal::from(100)).trunc();
     i64::try_from(minor.mantissa())
@@ -360,44 +321,24 @@ pub fn apply_oldest_first(open: &[OpenInvoice], amount: Money) -> Vec<(String, M
 /// Check a draft against the customer's open invoices and decide where the
 /// money goes. Nothing is applied past an invoice's balance, to an invoice
 /// that is not this customer's open one, or beyond the amount received.
-pub fn plan_payment(
-    draft: &PaymentDraft,
-    open: &[OpenInvoice],
-) -> Result<PaymentPlan, ComposeError> {
+pub fn plan_payment(draft: &PaymentDraft, open: &[OpenInvoice]) -> Result<PaymentPlan, ComposeError> {
     if draft.customer_id.trim().is_empty() {
         return Err(invalid("choose a customer"));
     }
-    plan(
-        &draft.txn_date,
-        &draft.amount,
-        draft.applications.as_deref(),
-        open,
-        "invoice",
-        "received",
-    )
+    plan(&draft.txn_date, &draft.amount, draft.applications.as_deref(), open, "invoice", "received")
 }
 
 /// The same rules on the vendor side, plus one: the whole amount must go on
 /// bills. Money sent to a vendor against nothing is a prepayment, which is
 /// entered in QuickBooks.
-pub fn plan_bill_payment(
-    draft: &BillPaymentDraft,
-    open: &[OpenInvoice],
-) -> Result<PaymentPlan, ComposeError> {
+pub fn plan_bill_payment(draft: &BillPaymentDraft, open: &[OpenInvoice]) -> Result<PaymentPlan, ComposeError> {
     if draft.vendor_id.trim().is_empty() {
         return Err(invalid("choose a vendor"));
     }
     if draft.account_id.trim().is_empty() {
         return Err(invalid("choose the account it is paid from"));
     }
-    let plan = plan(
-        &draft.txn_date,
-        &draft.amount,
-        draft.applications.as_deref(),
-        open,
-        "bill",
-        "paid",
-    )?;
+    let plan = plan(&draft.txn_date, &draft.amount, draft.applications.as_deref(), open, "bill", "paid")?;
     if plan.unapplied.minor() != 0 {
         return Err(invalid(format!(
             "{} is not on any bill; a payment to a vendor must go on bills in full",
@@ -435,9 +376,7 @@ fn plan(
                 let open_doc = open
                     .iter()
                     .find(|i| i.qbo_id == application.invoice_id)
-                    .ok_or_else(|| {
-                        invalid(format!("{noun} {} is not open", application.invoice_id))
-                    })?;
+                    .ok_or_else(|| invalid(format!("{noun} {} is not open", application.invoice_id)))?;
                 let name = open_doc.doc_number.as_deref().unwrap_or(&open_doc.qbo_id);
                 if out.iter().any(|(id, _)| id == &open_doc.qbo_id) {
                     return Err(invalid(format!("{noun} {name} is listed twice")));
@@ -456,17 +395,9 @@ fn plan(
     };
     let applied_total: i64 = applied.iter().map(|(_, m)| m.minor()).sum();
     if applied_total > total.minor() {
-        return Err(invalid(format!(
-            "{} is applied but only {} was {verb}",
-            show(Money::from_minor(applied_total)),
-            show(total)
-        )));
+        return Err(invalid(format!("{} is applied but only {} was {verb}", show(Money::from_minor(applied_total)), show(total))));
     }
-    Ok(PaymentPlan {
-        total,
-        applied,
-        unapplied: Money::from_minor(total.minor() - applied_total),
-    })
+    Ok(PaymentPlan { total, applied, unapplied: Money::from_minor(total.minor() - applied_total) })
 }
 
 /// The QBO body for a planned payment. No deposit account is named, so
@@ -477,19 +408,10 @@ pub fn payment_payload(draft: &PaymentDraft, plan: &PaymentPlan) -> Result<Value
     body.insert("CustomerRef".into(), json!({ "value": draft.customer_id }));
     body.insert("TxnDate".into(), json!(date(&draft.txn_date, "date")?));
     body.insert("TotalAmt".into(), money(plan.total));
-    if let Some(reference) = draft
-        .reference
-        .as_deref()
-        .map(str::trim)
-        .filter(|r| !r.is_empty())
-    {
+    if let Some(reference) = draft.reference.as_deref().map(str::trim).filter(|r| !r.is_empty()) {
         body.insert("PaymentRefNum".into(), json!(reference));
     }
-    if let Some(note) = draft
-        .private_note
-        .as_deref()
-        .filter(|n| !n.trim().is_empty())
-    {
+    if let Some(note) = draft.private_note.as_deref().filter(|n| !n.trim().is_empty()) {
         body.insert("PrivateNote".into(), json!(note));
     }
     let lines: Vec<Value> = plan
@@ -502,11 +424,7 @@ pub fn payment_payload(draft: &PaymentDraft, plan: &PaymentPlan) -> Result<Value
 }
 
 /// The QBO body for a planned bill payment.
-pub fn bill_payment_payload(
-    draft: &BillPaymentDraft,
-    plan: &PaymentPlan,
-    pay_from: PayFrom,
-) -> Result<Value, ComposeError> {
+pub fn bill_payment_payload(draft: &BillPaymentDraft, plan: &PaymentPlan, pay_from: PayFrom) -> Result<Value, ComposeError> {
     let mut body = Map::new();
     body.insert("VendorRef".into(), json!({ "value": draft.vendor_id }));
     body.insert("TxnDate".into(), json!(date(&draft.txn_date, "date")?));
@@ -514,32 +432,17 @@ pub fn bill_payment_payload(
     match pay_from {
         PayFrom::Check => {
             body.insert("PayType".into(), json!("Check"));
-            body.insert(
-                "CheckPayment".into(),
-                json!({ "BankAccountRef": { "value": draft.account_id } }),
-            );
+            body.insert("CheckPayment".into(), json!({ "BankAccountRef": { "value": draft.account_id } }));
         }
         PayFrom::CreditCard => {
             body.insert("PayType".into(), json!("CreditCard"));
-            body.insert(
-                "CreditCardPayment".into(),
-                json!({ "CCAccountRef": { "value": draft.account_id } }),
-            );
+            body.insert("CreditCardPayment".into(), json!({ "CCAccountRef": { "value": draft.account_id } }));
         }
     }
-    if let Some(reference) = draft
-        .reference
-        .as_deref()
-        .map(str::trim)
-        .filter(|r| !r.is_empty())
-    {
+    if let Some(reference) = draft.reference.as_deref().map(str::trim).filter(|r| !r.is_empty()) {
         body.insert("DocNumber".into(), json!(reference));
     }
-    if let Some(note) = draft
-        .private_note
-        .as_deref()
-        .filter(|n| !n.trim().is_empty())
-    {
+    if let Some(note) = draft.private_note.as_deref().filter(|n| !n.trim().is_empty()) {
         body.insert("PrivateNote".into(), json!(note));
     }
     let lines: Vec<Value> = plan
@@ -577,18 +480,11 @@ pub struct ExpenseLine {
 }
 
 /// The QBO `Purchase` body for an expense, and its total.
-pub fn expense_payload(
-    draft: &ExpenseDraft,
-    pay_from: PayFrom,
-) -> Result<(Value, Money), ComposeError> {
+pub fn expense_payload(draft: &ExpenseDraft, pay_from: PayFrom) -> Result<(Value, Money), ComposeError> {
     if draft.lines.is_empty() {
         return Err(invalid("add at least one line"));
     }
-    let reference = draft
-        .reference
-        .as_deref()
-        .map(str::trim)
-        .filter(|r| !r.is_empty());
+    let reference = draft.reference.as_deref().map(str::trim).filter(|r| !r.is_empty());
     let payment_type = match (pay_from, reference) {
         (PayFrom::CreditCard, _) => "CreditCard",
         (PayFrom::Check, Some(_)) => "Check",
@@ -598,17 +494,11 @@ pub fn expense_payload(
     let mut amounts = Vec::new();
     for (index, line) in draft.lines.iter().enumerate() {
         if line.account_id.trim().is_empty() {
-            return Err(invalid(format!(
-                "line {} needs an expense account",
-                index + 1
-            )));
+            return Err(invalid(format!("line {} needs an expense account", index + 1)));
         }
         let amount = cents(&line.amount, &format!("line {} amount", index + 1))?;
         if amount.minor() <= 0 {
-            return Err(invalid(format!(
-                "line {} needs an amount above zero",
-                index + 1
-            )));
+            return Err(invalid(format!("line {} needs an amount above zero", index + 1)));
         }
         amounts.push(amount);
         let mut detail = Map::new();
@@ -624,10 +514,7 @@ pub fn expense_payload(
         if let Some(description) = line.description.as_deref().filter(|d| !d.trim().is_empty()) {
             out.insert("Description".into(), json!(description));
         }
-        out.insert(
-            "AccountBasedExpenseLineDetail".into(),
-            Value::Object(detail),
-        );
+        out.insert("AccountBasedExpenseLineDetail".into(), Value::Object(detail));
         lines.push(Value::Object(out));
     }
     let total = Money::checked_sum(amounts).map_err(|e| invalid(e.to_string()))?;
@@ -636,19 +523,12 @@ pub fn expense_payload(
     body.insert("AccountRef".into(), json!({ "value": draft.account_id }));
     body.insert("TxnDate".into(), json!(date(&draft.txn_date, "date")?));
     if let Some(payee) = draft.payee_id.as_deref().filter(|p| !p.trim().is_empty()) {
-        body.insert(
-            "EntityRef".into(),
-            json!({ "value": payee, "type": "Vendor" }),
-        );
+        body.insert("EntityRef".into(), json!({ "value": payee, "type": "Vendor" }));
     }
     if let Some(reference) = reference {
         body.insert("DocNumber".into(), json!(reference));
     }
-    if let Some(note) = draft
-        .private_note
-        .as_deref()
-        .filter(|n| !n.trim().is_empty())
-    {
+    if let Some(note) = draft.private_note.as_deref().filter(|n| !n.trim().is_empty()) {
         body.insert("PrivateNote".into(), json!(note));
     }
     body.insert("Line".into(), Value::Array(lines));
@@ -684,20 +564,12 @@ pub fn deposit_payload(draft: &DepositDraft, items: &[DepositItem]) -> Result<Va
         return Err(invalid("tick at least one payment"));
     }
     let mut body = Map::new();
-    body.insert(
-        "DepositToAccountRef".into(),
-        json!({ "value": draft.account_id }),
-    );
+    body.insert("DepositToAccountRef".into(), json!({ "value": draft.account_id }));
     body.insert("TxnDate".into(), json!(date(&draft.txn_date, "date")?));
-    if let Some(note) = draft
-        .private_note
-        .as_deref()
-        .filter(|n| !n.trim().is_empty())
-    {
+    if let Some(note) = draft.private_note.as_deref().filter(|n| !n.trim().is_empty()) {
         body.insert("PrivateNote".into(), json!(note));
     }
-    let total =
-        Money::checked_sum(items.iter().map(|i| i.amount)).map_err(|e| invalid(e.to_string()))?;
+    let total = Money::checked_sum(items.iter().map(|i| i.amount)).map_err(|e| invalid(e.to_string()))?;
     body.insert("TotalAmt".into(), money(total));
     let lines: Vec<Value> = items
         .iter()
@@ -709,11 +581,7 @@ pub fn deposit_payload(draft: &DepositDraft, items: &[DepositItem]) -> Result<Va
 
 /// A new customer. `DisplayName` is the unique name QBO enforces and the one
 /// the drain's duplicate guard queries by (§6.5).
-pub fn customer_payload(
-    display_name: &str,
-    company_name: Option<&str>,
-    email: Option<&str>,
-) -> Result<Value, ComposeError> {
+pub fn customer_payload(display_name: &str, company_name: Option<&str>, email: Option<&str>) -> Result<Value, ComposeError> {
     let name = display_name.trim();
     if name.is_empty() {
         return Err(invalid("a customer needs a name"));
@@ -768,14 +636,8 @@ mod tests {
     #[test]
     fn line_amounts_round_half_away_from_zero() {
         assert_eq!(line_amount("3", "0.335").unwrap(), Money::from_minor(101)); // 1.005 -> 1.01
-        assert_eq!(
-            line_amount("20", "49.25").unwrap(),
-            Money::from_minor(98_500)
-        );
-        assert_eq!(
-            line_amount("1,000", "0.1").unwrap(),
-            Money::from_minor(10_000)
-        );
+        assert_eq!(line_amount("20", "49.25").unwrap(), Money::from_minor(98_500));
+        assert_eq!(line_amount("1,000", "0.1").unwrap(), Money::from_minor(10_000));
         assert!(line_amount("two", "1").is_err());
     }
 
@@ -791,33 +653,18 @@ mod tests {
         let body = to_payload(&draft(vec![line("20", "49.25")]), None, false).unwrap();
         assert_eq!(body["CustomerRef"]["value"], "31");
         assert_eq!(body["Line"][0]["Amount"].to_string(), "985");
-        assert_eq!(
-            body["Line"][0]["SalesItemLineDetail"]["UnitPrice"].to_string(),
-            "49.25"
-        );
-        assert_eq!(
-            body["Line"][0]["SalesItemLineDetail"]["ClassRef"]["value"], "1",
-            "header class flows to lines"
-        );
-        assert_eq!(
-            body["Line"][0]["SalesItemLineDetail"]["TaxCodeRef"]["value"],
-            "NON"
-        );
+        assert_eq!(body["Line"][0]["SalesItemLineDetail"]["UnitPrice"].to_string(), "49.25");
+        assert_eq!(body["Line"][0]["SalesItemLineDetail"]["ClassRef"]["value"], "1", "header class flows to lines");
+        assert_eq!(body["Line"][0]["SalesItemLineDetail"]["TaxCodeRef"]["value"], "NON");
         assert!(body.get("sparse").is_none());
-        assert_eq!(
-            to_payload(&draft(vec![line("1", "1")]), None, true).unwrap()["sparse"],
-            true
-        );
+        assert_eq!(to_payload(&draft(vec![line("1", "1")]), None, true).unwrap()["sparse"], true);
     }
 
     #[test]
     fn a_po_number_needs_the_books_custom_field() {
         let mut d = draft(vec![line("1", "1")]);
         d.po_number = Some("BH-99214".into());
-        assert!(
-            to_payload(&d, None, false).is_err(),
-            "never drop a PO silently"
-        );
+        assert!(to_payload(&d, None, false).is_err(), "never drop a PO silently");
         let body = to_payload(&d, Some("3"), false).unwrap();
         assert_eq!(body["CustomField"][0]["DefinitionId"], "3");
         assert_eq!(body["CustomField"][0]["StringValue"], "BH-99214");
@@ -825,17 +672,11 @@ mod tests {
 
     #[test]
     fn incomplete_drafts_are_refused_with_a_reason() {
-        assert!(to_payload(&draft(vec![]), None, false)
-            .unwrap_err()
-            .to_string()
-            .contains("at least one line"));
+        assert!(to_payload(&draft(vec![]), None, false).unwrap_err().to_string().contains("at least one line"));
         let mut blank = line("1", "1");
         blank.item_id = None;
         blank.description = None;
-        assert!(to_payload(&draft(vec![blank]), None, false)
-            .unwrap_err()
-            .to_string()
-            .contains("line 1"));
+        assert!(to_payload(&draft(vec![blank]), None, false).unwrap_err().to_string().contains("line 1"));
         let mut deposit = draft(vec![line("1", "1")]);
         deposit.doc_type = DocumentType::Deposit;
         assert!(to_payload(&deposit, None, false).is_err());
@@ -854,39 +695,25 @@ mod tests {
         assert!(body.get("CustomerRef").is_none());
         assert_eq!(body["Line"][0]["DetailType"], "ItemBasedExpenseLineDetail");
         assert_eq!(body["Line"][0]["Amount"].to_string(), "737.5");
-        assert!(body["Line"][0]["ItemBasedExpenseLineDetail"]
-            .get("TaxCodeRef")
-            .is_none());
+        assert!(body["Line"][0]["ItemBasedExpenseLineDetail"].get("TaxCodeRef").is_none());
         assert_eq!(body["Memo"], "Deliver to dock 2");
 
         let mut no_item = line("1", "5");
         no_item.item_id = None;
         po.lines = vec![no_item];
-        assert!(to_payload(&po, None, false)
-            .unwrap_err()
-            .to_string()
-            .contains("needs a product"));
+        assert!(to_payload(&po, None, false).unwrap_err().to_string().contains("needs a product"));
     }
 
     #[test]
     fn customers_are_checked_before_queueing() {
-        assert_eq!(
-            customer_payload(" Harbor Swim ", None, Some("ap@x.invalid")).unwrap()["DisplayName"],
-            "Harbor Swim"
-        );
+        assert_eq!(customer_payload(" Harbor Swim ", None, Some("ap@x.invalid")).unwrap()["DisplayName"], "Harbor Swim");
         assert!(customer_payload("", None, None).is_err());
         assert!(customer_payload("A:B", None, None).is_err());
         assert!(customer_payload("A", None, Some("nope")).is_err());
     }
 
     fn open(id: &str, balance: i64) -> OpenInvoice {
-        OpenInvoice {
-            qbo_id: id.into(),
-            doc_number: Some(format!("10{id}")),
-            txn_date: "2026-09-01".into(),
-            due_date: None,
-            balance: Money::from_minor(balance),
-        }
+        OpenInvoice { qbo_id: id.into(), doc_number: Some(format!("10{id}")), txn_date: "2026-09-01".into(), due_date: None, balance: Money::from_minor(balance) }
     }
 
     fn payment(amount: &str, applications: Option<Vec<(&str, &str)>>) -> PaymentDraft {
@@ -896,14 +723,8 @@ mod tests {
             amount: amount.into(),
             reference: Some(" 4417 ".into()),
             private_note: None,
-            applications: applications.map(|a| {
-                a.into_iter()
-                    .map(|(id, amt)| PaymentApplication {
-                        invoice_id: id.into(),
-                        amount: amt.into(),
-                    })
-                    .collect()
-            }),
+            applications: applications
+                .map(|a| a.into_iter().map(|(id, amt)| PaymentApplication { invoice_id: id.into(), amount: amt.into() }).collect()),
         }
     }
 
@@ -911,61 +732,34 @@ mod tests {
     fn a_cheque_pays_the_oldest_invoices_first_and_leaves_the_rest_as_credit() {
         let invoices = [open("1", 50_000), open("2", 30_000), open("3", 20_000)];
         let plan = plan_payment(&payment("650.00", None), &invoices).unwrap();
-        assert_eq!(
-            plan.applied,
-            vec![
-                ("1".into(), Money::from_minor(50_000)),
-                ("2".into(), Money::from_minor(15_000))
-            ]
-        );
+        assert_eq!(plan.applied, vec![("1".into(), Money::from_minor(50_000)), ("2".into(), Money::from_minor(15_000))]);
         assert_eq!(plan.unapplied, Money::from_minor(0));
 
         let over = plan_payment(&payment("1,100", None), &invoices).unwrap();
         assert_eq!(over.applied.len(), 3);
-        assert_eq!(
-            over.unapplied,
-            Money::from_minor(10_000),
-            "an overpayment stays on the customer"
-        );
+        assert_eq!(over.unapplied, Money::from_minor(10_000), "an overpayment stays on the customer");
 
         let body = payment_payload(&payment("650.00", None), &plan).unwrap();
         assert_eq!(body["TotalAmt"], json!(650));
         assert_eq!(body["PaymentRefNum"], "4417");
         assert_eq!(body["Line"][1]["Amount"], json!(150));
-        assert_eq!(
-            body["Line"][1]["LinkedTxn"][0],
-            json!({ "TxnId": "2", "TxnType": "Invoice" })
-        );
-        assert!(
-            body.get("DepositToAccountRef").is_none(),
-            "QuickBooks defaults it to Undeposited Funds"
-        );
+        assert_eq!(body["Line"][1]["LinkedTxn"][0], json!({ "TxnId": "2", "TxnType": "Invoice" }));
+        assert!(body.get("DepositToAccountRef").is_none(), "QuickBooks defaults it to Undeposited Funds");
     }
 
     #[test]
     fn a_chosen_spread_is_held_to_each_balance_and_to_the_amount_received() {
         let invoices = [open("1", 50_000), open("2", 30_000)];
-        let plan = plan_payment(
-            &payment("300", Some(vec![("2", "300.00"), ("1", "0")])),
-            &invoices,
-        )
-        .unwrap();
+        let plan = plan_payment(&payment("300", Some(vec![("2", "300.00"), ("1", "0")])), &invoices).unwrap();
         assert_eq!(plan.applied, vec![("2".into(), Money::from_minor(30_000))]);
 
-        let refuse = |amount: &str, apps: Vec<(&str, &str)>| {
-            plan_payment(&payment(amount, Some(apps)), &invoices)
-                .unwrap_err()
-                .to_string()
-        };
+        let refuse = |amount: &str, apps: Vec<(&str, &str)>| plan_payment(&payment(amount, Some(apps)), &invoices).unwrap_err().to_string();
         assert!(refuse("400", vec![("2", "300.01")]).contains("has 300.00 open"));
         assert!(refuse("100", vec![("1", "60"), ("2", "60")]).contains("only 100.00 was received"));
         assert!(refuse("100", vec![("9", "10")]).contains("is not open"));
         assert!(refuse("100", vec![("1", "10"), ("1", "10")]).contains("twice"));
         assert!(refuse("100", vec![("1", "10.005")]).contains("two decimal places"));
-        assert!(plan_payment(&payment("0", None), &invoices)
-            .unwrap_err()
-            .to_string()
-            .contains("above zero"));
+        assert!(plan_payment(&payment("0", None), &invoices).unwrap_err().to_string().contains("above zero"));
     }
 
     #[test]
@@ -981,13 +775,7 @@ mod tests {
             applications: None,
         };
         let plan = plan_bill_payment(&draft, &bills).unwrap();
-        assert_eq!(
-            plan.applied,
-            vec![
-                ("7".into(), Money::from_minor(40_000)),
-                ("8".into(), Money::from_minor(5_000))
-            ]
-        );
+        assert_eq!(plan.applied, vec![("7".into(), Money::from_minor(40_000)), ("8".into(), Money::from_minor(5_000))]);
         let body = bill_payment_payload(&draft, &plan, PayFrom::Check).unwrap();
         assert_eq!(body["PayType"], "Check");
         assert_eq!(body["CheckPayment"]["BankAccountRef"]["value"], "90");
@@ -996,14 +784,8 @@ mod tests {
         let card = bill_payment_payload(&draft, &plan, PayFrom::CreditCard).unwrap();
         assert_eq!(card["CreditCardPayment"]["CCAccountRef"]["value"], "90");
 
-        let over = BillPaymentDraft {
-            amount: "600".into(),
-            ..draft.clone()
-        };
-        assert!(plan_bill_payment(&over, &bills)
-            .unwrap_err()
-            .to_string()
-            .contains("100.00 is not on any bill"));
+        let over = BillPaymentDraft { amount: "600".into(), ..draft.clone() };
+        assert!(plan_bill_payment(&over, &bills).unwrap_err().to_string().contains("100.00 is not on any bill"));
         assert_eq!(PayFrom::for_account_type("Bank"), Some(PayFrom::Check));
         assert_eq!(PayFrom::for_account_type("Accounts Payable"), None);
     }
@@ -1017,53 +799,22 @@ mod tests {
             reference: None,
             private_note: None,
             lines: vec![
-                ExpenseLine {
-                    account_id: "95".into(),
-                    description: Some("LTL to Garwood".into()),
-                    amount: "412.50".into(),
-                    class_id: Some("2".into()),
-                },
-                ExpenseLine {
-                    account_id: "96".into(),
-                    description: None,
-                    amount: "38".into(),
-                    class_id: None,
-                },
+                ExpenseLine { account_id: "95".into(), description: Some("LTL to Garwood".into()), amount: "412.50".into(), class_id: Some("2".into()) },
+                ExpenseLine { account_id: "96".into(), description: None, amount: "38".into(), class_id: None },
             ],
         };
         let (body, total) = expense_payload(&draft, PayFrom::Check).unwrap();
         assert_eq!(total, Money::from_minor(45_050));
         assert_eq!(body["PaymentType"], "Cash");
-        assert_eq!(
-            body["EntityRef"],
-            json!({ "value": "61", "type": "Vendor" })
-        );
-        assert_eq!(
-            body["Line"][0]["AccountBasedExpenseLineDetail"]["AccountRef"]["value"],
-            "95"
-        );
-        assert_eq!(
-            body["Line"][0]["AccountBasedExpenseLineDetail"]["ClassRef"]["value"],
-            "2"
-        );
-        let cheque = ExpenseDraft {
-            reference: Some("1208".into()),
-            ..draft.clone()
-        };
-        assert_eq!(
-            expense_payload(&cheque, PayFrom::Check).unwrap().0["PaymentType"],
-            "Check"
-        );
-        assert_eq!(
-            expense_payload(&draft, PayFrom::CreditCard).unwrap().0["PaymentType"],
-            "CreditCard"
-        );
+        assert_eq!(body["EntityRef"], json!({ "value": "61", "type": "Vendor" }));
+        assert_eq!(body["Line"][0]["AccountBasedExpenseLineDetail"]["AccountRef"]["value"], "95");
+        assert_eq!(body["Line"][0]["AccountBasedExpenseLineDetail"]["ClassRef"]["value"], "2");
+        let cheque = ExpenseDraft { reference: Some("1208".into()), ..draft.clone() };
+        assert_eq!(expense_payload(&cheque, PayFrom::Check).unwrap().0["PaymentType"], "Check");
+        assert_eq!(expense_payload(&draft, PayFrom::CreditCard).unwrap().0["PaymentType"], "CreditCard");
 
         let mut bad = draft.clone();
         bad.lines[1].account_id = String::new();
-        assert!(expense_payload(&bad, PayFrom::Check)
-            .unwrap_err()
-            .to_string()
-            .contains("line 2 needs an expense account"));
+        assert!(expense_payload(&bad, PayFrom::Check).unwrap_err().to_string().contains("line 2 needs an expense account"));
     }
 }

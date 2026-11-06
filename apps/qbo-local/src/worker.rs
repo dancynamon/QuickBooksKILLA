@@ -108,10 +108,7 @@ impl Drainer {
     /// Start from mappings an earlier process recorded, so a dependant queued
     /// before a restart still resolves its parent's real id.
     pub fn with_mappings(mappings: impl IntoIterator<Item = ((String, String), String)>) -> Self {
-        Drainer {
-            id_map: mappings.into_iter().collect(),
-            ..Drainer::default()
-        }
+        Drainer { id_map: mappings.into_iter().collect(), ..Drainer::default() }
     }
 
     /// Every `(realm, local id) -> QBO id` known, for persisting.
@@ -252,8 +249,7 @@ impl Drainer {
             }
             if let Err(error) = persist(&records[index]) {
                 // Undo in memory too, so the caller's view matches the store.
-                let _ = records[index]
-                    .mark_failed(DrainFailure::Transient(format!("not sent: {error}")), now);
+                let _ = records[index].mark_failed(DrainFailure::Transient(format!("not sent: {error}")), now);
                 report.blocked += 1;
                 blocked_entities.insert(entity_key);
                 continue;
