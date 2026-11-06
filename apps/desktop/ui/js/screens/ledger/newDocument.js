@@ -174,8 +174,13 @@ async function renderForm(main, kind, draft, saved) {
         : viewHead(
           `New ${spec.noun ?? spec.label.toLowerCase()}`,
           spec.posts ? "Saves and posts to the own book" : "Saves to the own book; posts nothing",
-          `<div class="seg" role="group" aria-label="Document type">
-            ${Object.entries(ENTRY_KINDS).map(([k, s]) => `<button data-kind="${k}" aria-pressed="${k === kind}">${esc(s.label)}</button>`).join("")}
+          `<div class="kind-picker">
+            ${[["customer", "Sales"], ["vendor", "Purchases"]].map(([side, title]) => `
+              <div class="chips" role="group" aria-label="${title} documents">
+                <span class="chips-lbl lbl">${title}</span>
+                ${Object.entries(ENTRY_KINDS).filter(([, s]) => s.contact === side)
+                  .map(([k, s]) => `<button class="chip" data-kind="${k}" aria-pressed="${k === kind}">${esc(s.label)}</button>`).join("")}
+              </div>`).join("")}
           </div>`,
         )) + `
       <div class="pad">
