@@ -193,7 +193,7 @@ async function renderForm(main, kind, draft, saved) {
                 <input class="form-input" type="date" name="txnDate" value="${esc(draft.txnDate)}" required>
               </label>
               ${spec.lines ? `<label class="form-field"><span class="lbl">${spec.numbered ? "Number" : "Vendor's number"}</span>
-                <input class="form-input mono" name="number" value="${esc(draft.number)}" placeholder="${spec.numbered ? "next in sequence" : "from the bill"}" ${saved && spec.numbered ? "readonly title=\"A saved document keeps its number\"" : ""}>
+                <input class="form-input mono" name="number" value="${esc(draft.number)}" placeholder="${spec.numbered ? "next in sequence" : `from the ${esc(spec.noun ?? spec.label.toLowerCase())}`}" ${saved && spec.numbered ? "readonly title=\"A saved document keeps its number\"" : ""}>
               </label>` : ""}
               ${spec.bank ? `<label class="form-field"><span class="lbl">${esc(spec.bank.label)}</span>
                 <select class="form-select" name="bank">

@@ -196,6 +196,20 @@ function deriveEntryLines(document, items) {
       lines.push({ account: "1200", credit: (lineTotalCents + taxCents) / 100, entity });
       return lines;
     }
+    case "RefundReceipt": {
+      // `post_refund_receipt`: the credit memo's legs, but the money leaves
+      // `pay_from` (else checking) rather than coming off 1200.
+      const lines = document.lines.map((l) => ({ account: "4950", class: lineClass(l), debit: Number(l.amount) }));
+      if (taxCents !== 0) lines.push({ account: "2200", debit: taxCents / 100 });
+      lines.push({ account: document.pay_from ?? "1100", credit: (lineTotalCents + taxCents) / 100, entity });
+      return lines;
+    }
+    case "VendorCredit": {
+      // `post_vendor_credit`: Dr 2000 for the whole credit, Cr each line's
+      // asset (tracked item) or expense account — a bill run backwards.
+      const lines = debitExpenseLines().map(({ debit, ...rest }) => ({ ...rest, credit: debit }));
+      return [{ account: "2000", debit: lineTotalCents / 100, entity }, ...lines];
+    }
     case "Payment": {
       // A payment entered through `create_document` carries applications and
       // no lines, and lands in 1150 undeposited funds unless it names a
