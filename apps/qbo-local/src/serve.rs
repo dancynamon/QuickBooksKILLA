@@ -21,16 +21,22 @@ use crate::store::Store;
 
 const MAX_BODY: usize = 1 << 20;
 
-struct Request {
-    method: String,
-    path: String,
-    body: Vec<u8>,
-    content_type: Option<String>,
-    origin: Option<String>,
-    host: Option<String>,
+pub(crate) struct Request {
+    pub(crate) method: String,
+    pub(crate) path: String,
+    pub(crate) body: Vec<u8>,
+    pub(crate) content_type: Option<String>,
+    pub(crate) origin: Option<String>,
+    pub(crate) host: Option<String>,
 }
 
 fn read_request(stream: &mut TcpStream) -> std::io::Result<Option<Request>> {
+    read_request_up_to(stream, MAX_BODY)
+}
+
+/// Read one request whose body may be up to `max_body` bytes. A longer
+/// declared body is an error, not a silently truncated read.
+pub(crate) fn read_request_up_to(stream: &mut TcpStream, max_body: usize) -> std::io::Result<Option<Request>> {
     let mut reader = BufReader::new(stream);
     let mut line = String::new();
     if reader.read_line(&mut line)? == 0 {
@@ -61,19 +67,26 @@ fn read_request(stream: &mut TcpStream) -> std::io::Result<Option<Request>> {
             }
         }
     }
-    let mut body = vec![0; length.min(MAX_BODY)];
+    if length > max_body {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("request body of {length} bytes is over the {max_body}-byte limit"),
+        ));
+    }
+    let mut body = vec![0; length];
     reader.read_exact(&mut body)?;
     let path = target.split('?').next().unwrap_or("/").to_string();
     Ok(Some(Request { method: method.to_string(), path, body, content_type, origin, host }))
 }
 
-fn respond(stream: &mut TcpStream, status: u16, content_type: &str, body: &[u8]) -> std::io::Result<()> {
+pub(crate) fn respond(stream: &mut TcpStream, status: u16, content_type: &str, body: &[u8]) -> std::io::Result<()> {
     let reason = match status {
         200 => "OK",
         400 => "Bad Request",
         403 => "Forbidden",
         404 => "Not Found",
         405 => "Method Not Allowed",
+        413 => "Payload Too Large",
         415 => "Unsupported Media Type",
         _ => "Internal Server Error",
     };

@@ -1704,6 +1704,24 @@ status of Invoiced or Paid now wins unless some line carries a *non-zero*
 count. Open after the fix: the 12 Not invoiced orders plus SO 1143, whose
 only invoice was voided (left open for Dan to void or invoice).
 
+### D42 addendum — the feed's producer (7 Nov 2026)
+
+`qbo-local capture-sales-orders` replaces the hand-run browser session that
+produced the first real feed. The split is deliberate: the console script
+(`apps/qbo-local/assets/sales-order-capture.js`) only lists the grid and
+replays the page's own `GetSalesOrder` request, and sends the raw commerce
+answers back untouched (`qbo-sales-order-capture/1`). Every mapping —
+`variantId` is the v3 item id, `unitPrice`/`total` are rate/amount,
+`internalNote` is the memo, only `SALE_INVOICE` link targets are invoices,
+deleted lines are dropped — lives in Rust with tests. A capture is a
+complete feed only when every order the grid listed was read; anything
+less is written to a `.partial.json` and never replaces the last good
+feed. The page's `intuit-company-id` header must match `--realm`, so a tab
+signed in to WaterLine cannot overwrite Aquamentor's feed. Delivery goes
+through a relay window on 127.0.0.1 because QBO's CSP refuses a direct
+fetch to localhost; the receiver only accepts a POST from that relay's own
+origin, and the relay only accepts a message from `https://qbo.intuit.com`.
+
 ## D43 — BunzBooks has its own Intuit app, a daily call ceiling, and resumable sweeps
 
 **Why.** On 23 Oct 2026 the Intuit app qbo-local shared with the QuickBooks

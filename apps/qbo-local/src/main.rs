@@ -35,6 +35,7 @@ use qbo_local::oauth::{self, OAuthConfig};
 use qbo_local::ratelimit::RealmLimits;
 use qbo_local::reconcile::{ReconcileOptions, ReconcileReport, Reconciler};
 use qbo_local::reports;
+use qbo_local::sales_order_capture;
 use qbo_local::sales_orders;
 use qbo_local::slice::{self, SliceOptions};
 use qbo_local::store::backup::SnapshotPolicy;
@@ -196,6 +197,15 @@ enum Command {
         realm: RealmId,
         all: bool,
     },
+    CaptureSalesOrders {
+        realm: RealmId,
+        out: PathBuf,
+        port: u16,
+        capture: Option<PathBuf>,
+    },
+    PrintCaptureScript {
+        port: u16,
+    },
     /// `demo`, `serve`, `writes`: offline commands that never reach Intuit,
     /// handed their raw arguments.
     Offline { name: String, args: Vec<String> },
@@ -266,6 +276,8 @@ USAGE:
                       (--live [--config PATH] | --replay DIR) [--record DIR]
     qbo-local sync-sales-orders --db PATH --realm ID --feed URL|PATH
     qbo-local sales-orders --db PATH --realm ID [--all]
+    qbo-local capture-sales-orders --realm ID --out PATH [--port 8765]
+                      [--capture FILE | --print-script]
     qbo-local demo --db PATH [--invoices N]
     qbo-local serve --db PATH [--port 8780] [--ui DIR] [--demo-writes]
     qbo-local writes --db PATH --realm ID [--enable [--confirm] | --disable]
@@ -320,6 +332,13 @@ SUBCOMMANDS:
     sales-orders
                 List the mirrored sales orders still open (--all: every one),
                 with what is left to invoice. Opens the replica read-only.
+    capture-sales-orders
+                Produce the sales-order feed from a signed-in QBO tab. Waits on
+                127.0.0.1 for the console script (--print-script prints it;
+                paste it on QBO's Sales Orders list), then writes a complete
+                feed to --out, or a .partial.json beside it if any order was
+                missed. Web-app reads only: no developer API calls. --capture
+                FILE converts a saved capture instead of waiting.
     demo        Write a synthetic book to a new --db file (no Intuit).
     serve       Serve the UI and its API on 127.0.0.1 over --db; with
                 --demo-writes, the synthetic book's writes land in a
@@ -365,6 +384,9 @@ FLAGS:
     --to-year YYYY          Last year to snapshot, inclusive (snapshots only).
     --feed URL|PATH         Where the sales-order feed is (sync-sales-orders).
     --all                   Every sales order, not only open ones (sales-orders).
+    --out PATH              Where the captured feed goes (capture-sales-orders).
+    --capture FILE          A saved qbo-sales-order-capture/1 file to convert.
+    --print-script          Print the console script and exit.
 
 Without --live or --mock, daemon, sweep and record exit 2: choose one.
 Without --live or --replay DIR, report and snapshots exit 2: choose one.
@@ -449,6 +471,7 @@ fn parse(args: &[String]) -> Result<Command, UsageError> {
         "snapshots" => parse_snapshots(args),
         "sync-sales-orders" => parse_sync_sales_orders(args),
         "sales-orders" => parse_sales_orders(args),
+        "capture-sales-orders" => parse_capture_sales_orders(args),
         "demo" | "serve" | "writes" => Ok(Command::Offline {
             name: subcommand.clone(),
             args: args.cloned().collect(),
@@ -774,6 +797,33 @@ fn parse_sync_sales_orders(mut args: Args<'_>) -> Result<Command, UsageError> {
     })
 }
 
+fn parse_capture_sales_orders(mut args: Args<'_>) -> Result<Command, UsageError> {
+    let mut realm = None;
+    let mut out = None;
+    let mut port = sales_order_capture::DEFAULT_PORT;
+    let mut capture = None;
+    let mut print_script = false;
+    while let Some(flag) = args.next() {
+        match flag.as_str() {
+            "--realm" => realm = Some(parse_realm(&next_value(&mut args, "--realm")?)?),
+            "--out" => out = Some(PathBuf::from(next_value(&mut args, "--out")?)),
+            "--port" => port = parse_u16(&next_value(&mut args, "--port")?, "--port")?,
+            "--capture" => capture = Some(PathBuf::from(next_value(&mut args, "--capture")?)),
+            "--print-script" => print_script = true,
+            other => return Err(UsageError::unknown_flag(other)),
+        }
+    }
+    if print_script {
+        return Ok(Command::PrintCaptureScript { port });
+    }
+    Ok(Command::CaptureSalesOrders {
+        realm: realm.ok_or_else(|| UsageError::missing_flag("--realm"))?,
+        out: out.ok_or_else(|| UsageError::missing_flag("--out"))?,
+        port,
+        capture,
+    })
+}
+
 fn parse_sales_orders(mut args: Args<'_>) -> Result<Command, UsageError> {
     let mut db = None;
     let mut realm = None;
@@ -1019,6 +1069,13 @@ fn execute(command: Command) -> Result<(), CommandError> {
         Command::Replay { db, realm, dir } => run_replay(&db, &realm, &dir),
         Command::SyncSalesOrders { db, realm, feed } => run_sync_sales_orders(&db, &realm, &feed),
         Command::SalesOrders { db, realm, all } => run_sales_orders(&db, &realm, all),
+        Command::CaptureSalesOrders { realm, out, port, capture } => {
+            run_capture_sales_orders(&realm, &out, port, capture.as_deref())
+        }
+        Command::PrintCaptureScript { port } => {
+            print!("{}", sales_order_capture::page_script(port));
+            Ok(())
+        }
         Command::Slice {
             db,
             realm,
@@ -1640,6 +1697,46 @@ fn run_sync_sales_orders(db: &Path, realm: &RealmId, feed: &str) -> Result<(), C
     println!("  unchanged : {}", summary.unchanged);
     println!("  deleted   : {}", summary.deleted);
     println!("  open now  : {}", summary.open);
+    Ok(())
+}
+
+fn run_capture_sales_orders(
+    realm: &RealmId,
+    out: &Path,
+    port: u16,
+    capture: Option<&Path>,
+) -> Result<(), CommandError> {
+    let received = match capture {
+        Some(path) => {
+            let raw = std::fs::read_to_string(path)
+                .map_err(|err| runtime(format!("{}: {err}", path.display())))?;
+            sales_order_capture::assemble_and_write(&raw, realm, out).map_err(runtime)?
+        }
+        None => {
+            let listener = std::net::TcpListener::bind(("127.0.0.1", port))
+                .map_err(|err| runtime(format!("127.0.0.1:{port}: {err}")))?;
+            eprintln!("Waiting on http://127.0.0.1:{port} for a sales-order capture.");
+            eprintln!("  1. In Chrome, open https://qbo.intuit.com/app/salesorders?tab=sales-orders");
+            eprintln!("  2. Open DevTools (Cmd-Opt-J) and paste the script from:");
+            eprintln!("       qbo-local capture-sales-orders --print-script --port {port} | pbcopy");
+            eprintln!("Reads go through the web app's own session; no developer API calls.");
+            sales_order_capture::receive(listener, realm, out).map_err(runtime)?
+        }
+    };
+    println!("{}", sales_order_capture::summary_line(&received));
+    let problems = &received.assembled.problems;
+    for problem in problems.iter().take(20) {
+        println!("  - {problem}");
+    }
+    if problems.len() > 20 {
+        println!("  … and {} more", problems.len() - 20);
+    }
+    if !received.assembled.feed.complete {
+        return Err(runtime(format!(
+            "the capture is not complete; {} was left as it was",
+            out.display()
+        )));
+    }
     Ok(())
 }
 
