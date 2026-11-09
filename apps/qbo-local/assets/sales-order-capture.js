@@ -65,7 +65,8 @@
     return pageFetch.apply(this, arguments);
   };
   try {
-    document.querySelector(`tr[data-item-id="${listed[0]}"] td`).click();
+    // Whichever order is on screen: paging has left the first ones behind.
+    document.querySelector('tr[data-item-id] td').click();
     for (let i = 0; i < 80 && !template; i++) await sleep(250);
   } finally {
     window.fetch = pageFetch;
