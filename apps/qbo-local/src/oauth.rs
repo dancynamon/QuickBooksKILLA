@@ -179,6 +179,33 @@ fn handle_callback(stream: TcpStream) -> Result<AuthCode, AuthFlowError> {
     })
 }
 
+/// The `code`/`state`/`realmId` an Intuit redirect carried, read from the
+/// address the browser landed on — pasted by a person, for a redirect URI
+/// that is not this machine's loopback (the OAuth Playground's page, which a
+/// production app may register where it may not register `http://localhost`).
+/// Accepts the whole URL or just its query string.
+pub fn parse_redirect(pasted: &str) -> Result<AuthCode, AuthFlowError> {
+    // A terminal paste can carry stray keystrokes (arrow keys arrive as
+    // `ESC [ A`); the address ends at the first control character or space.
+    let pasted = pasted.trim();
+    let pasted = pasted
+        .find(|c: char| c.is_control() || c.is_whitespace())
+        .map_or(pasted, |end| &pasted[..end]);
+    let query = pasted.split_once('?').map_or(pasted, |(_, query)| query);
+    let query = query.split_once('#').map_or(query, |(query, _)| query);
+    let params = parse_query_string(query);
+    let code = params
+        .get("code")
+        .filter(|code| !code.is_empty())
+        .cloned()
+        .ok_or(AuthFlowError::MissingCode)?;
+    Ok(AuthCode {
+        code,
+        state: params.get("state").cloned().unwrap_or_default(),
+        realm_id: params.get("realmId").cloned().unwrap_or_default(),
+    })
+}
+
 fn parse_query_string(query: &str) -> HashMap<String, String> {
     query
         .split('&')
@@ -403,5 +430,24 @@ mod tests {
 
         let result = run_loopback(port, Duration::from_millis(80));
         assert!(matches!(result, Err(AuthFlowError::Timeout)));
+    }
+
+    #[test]
+    fn parse_redirect_reads_a_pasted_playground_address() {
+        let got = parse_redirect(
+            "  https://developer.intuit.com/v2/OAuth2Playground/RedirectUrl?code=AB%2Bc1&state=s-1&realmId=123\n",
+        )
+        .unwrap();
+        assert_eq!(got.code, "AB+c1");
+        assert_eq!(got.state, "s-1");
+        assert_eq!(got.realm_id, "123");
+        assert_eq!(parse_redirect("code=x&state=y").unwrap().code, "x");
+        // Arrow keys pressed after the paste arrive as escape sequences.
+        let noisy = parse_redirect("cb?code=c&state=s&realmId=123\u{1b}[A\u{1b}[B").unwrap();
+        assert_eq!(noisy.realm_id, "123");
+        assert!(matches!(
+            parse_redirect("https://example.invalid/cb?error=access_denied&state=s"),
+            Err(AuthFlowError::MissingCode)
+        ));
     }
 }

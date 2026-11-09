@@ -12,6 +12,7 @@ import assert from "node:assert/strict";
 
 import { createFixtureProvider } from "../js/data/ledger/fixture.js";
 import { SCHEMA, firstMissingField } from "../js/data/ledger/schema.js";
+import { toCents } from "../js/screens/ledger/entry.js";
 
 function assertRow(row, fields, label) {
   const missing = firstMissingField(row, fields);
@@ -562,4 +563,45 @@ test("a sales order posts nothing, lists as open, and converts whole into an inv
   const all = await ledger.openSalesOrders("2026-10-15", true);
   assert.equal(all[0].invoiced, "199.50");
   await assert.rejects(ledger.convertToInvoice(so.document_id, "2026-10-11", "dan"), /nothing left/);
+});
+
+test("a refund receipt reverses the sale out of checking without touching AR", async () => {
+  const ledger = createFixtureProvider();
+  const before = { ar: await control(ledger, "1200"), bank: await control(ledger, "1100") };
+  const refund = await ledger.createDocument({
+    kind: "RefundReceipt", txn_date: "2026-10-05", contact: BLUE, pay_from: "1100",
+    lines: [{ kind: "Item", item_id: "sign-custom", amount: "100.00", is_taxable: true }],
+  }, "dan");
+  assert.equal(refund.number, "1001", "its own sequence");
+  assert.equal(refund.tax, "6.63");
+  assert.equal(refund.total, "106.63");
+  const legs = Object.fromEntries(refund.entry.lines.map((l) => [l.account, l]));
+  assert.equal(legs["4950"].debit, "100.00");
+  assert.equal(legs["2200"].debit, "6.63");
+  assert.equal(legs["1100"].credit, "106.63");
+  assert.equal(await control(ledger, "1200"), before.ar, "a refund is not an open item");
+  assert.ok(!(await ledger.openDocuments("receivable", "2026-12-31")).some((d) => d.document_id === refund.document_id));
+  assert.equal(toCents(await control(ledger, "1100")), toCents(before.bank) - 10663);
+});
+
+test("a vendor credit debits AP, credits the line's account, and applies to an open bill", async () => {
+  const ledger = createFixtureProvider();
+  const SPECTRA = { kind: "Vendor", id: "vend-spectra" };
+  const credit = await ledger.createDocument({
+    kind: "VendorCredit", txn_date: "2026-10-05", contact: SPECTRA, number: "CR-77",
+    lines: [{ kind: "Account", account: "6100", amount: "25.00", class: "foam" }],
+  }, "dan");
+  assert.equal(credit.number, "CR-77");
+  assert.equal(credit.tax, null, "a purchase is never taxed here");
+  const legs = Object.fromEntries(credit.entry.lines.map((l) => [l.account, l]));
+  assert.equal(legs["2000"].debit, "25.00");
+  assert.equal(legs["6100"].credit, "25.00");
+
+  let ap = await ledger.aging("payable", "2026-12-31");
+  assert.equal(`-${ap.totals.total}`, await control(ledger, "2000"), "the open credit nets in the aging");
+  const bill = (await ledger.openDocuments("payable", "2026-12-31")).find((d) => d.kind === "Bill" && d.contact_id === "vend-spectra");
+  const applied = await ledger.applyCredit(credit.document_id, bill.document_id, undefined, "dan");
+  assert.equal(applied.applied, "25.00");
+  ap = await ledger.aging("payable", "2026-12-31");
+  assert.equal(`-${ap.totals.total}`, await control(ledger, "2000"));
 });
