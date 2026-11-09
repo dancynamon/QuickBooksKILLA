@@ -10,7 +10,7 @@
 // API quota is spent). The raw answers go, unconverted, to the local
 // receiver through a relay window on 127.0.0.1, because QBO's CSP blocks a
 // direct fetch to localhost. Every rule about what the fields mean lives in
-// Rust (src/sales_order_capture.rs), where it is tested.
+// Rust (src/sales_orders/capture.rs), where it is tested.
 //
 // If the relay window is blocked, click anywhere on the page and run
 // `await __soDeliver()` in the console. As a last resort, `copy(__soCapture)`

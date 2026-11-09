@@ -91,7 +91,7 @@ qbo-local sales-orders --db .local/replica.db --realm REALM
 - Take the `replica-copy.db` backup below **after** the sync, so the copy
   carries the feed.
 - The feed's producer is `qbo-local capture-sales-orders`
-  (`src/sales_order_capture.rs`). Sales orders are only readable with the
+  (`src/sales_orders/capture.rs`). Sales orders are only readable with the
   QBO web app's own session, so it captures from a signed-in Chrome tab:
   a console script lists every order on the Sales Orders grid and replays
   the page's own `GetSalesOrder` request per order (web-app traffic, no

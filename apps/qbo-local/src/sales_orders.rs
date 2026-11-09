@@ -37,6 +37,8 @@ use thiserror::Error;
 
 use crate::domain::RealmId;
 
+pub mod capture;
+
 /// The `feed` tag a [`SalesOrderFeed`] must carry.
 pub const FEED_FORMAT: &str = "qbo-sales-orders/1";
 

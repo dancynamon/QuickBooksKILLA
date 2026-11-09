@@ -21,7 +21,7 @@
 //! (same origin as this server) POSTs it in. The server takes one capture
 //! and stops.
 
-use std::io::Write;
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 
@@ -33,13 +33,12 @@ use crate::domain::RealmId;
 use crate::sales_orders::{
     FeedLine, FeedSalesOrder, SalesOrder, SalesOrderError, SalesOrderFeed, FEED_FORMAT,
 };
-use crate::serve::{read_request_up_to, respond};
 
 /// The `capture` tag the page script writes.
 pub const CAPTURE_FORMAT: &str = "qbo-sales-order-capture/1";
 
 /// The console script, with `__PORT__` where the receiver's port goes.
-pub const PAGE_SCRIPT: &str = include_str!("../assets/sales-order-capture.js");
+pub const PAGE_SCRIPT: &str = include_str!("../../assets/sales-order-capture.js");
 
 /// The only origin the relay accepts a capture from.
 pub const QBO_ORIGIN: &str = "https://qbo.intuit.com";
@@ -346,6 +345,88 @@ pub fn receive(listener: TcpListener, realm: &RealmId, out: &Path) -> std::io::R
     Err(std::io::Error::other("listener closed"))
 }
 
+struct Request {
+    method: String,
+    path: String,
+    body: Vec<u8>,
+    content_type: Option<String>,
+    origin: Option<String>,
+}
+
+/// Read one request, refusing a body over [`MAX_CAPTURE`] rather than
+/// truncating it.
+fn read_request(stream: &mut TcpStream) -> std::io::Result<Option<Request>> {
+    let mut reader = BufReader::new(stream);
+    let mut line = String::new();
+    if reader.read_line(&mut line)? == 0 {
+        return Ok(None);
+    }
+    let mut parts = line.split_whitespace();
+    let (Some(method), Some(target)) = (parts.next(), parts.next()) else {
+        return Ok(None);
+    };
+    let (method, target) = (method.to_string(), target.to_string());
+    let mut length = 0usize;
+    let (mut content_type, mut origin) = (None, None);
+    loop {
+        let mut header = String::new();
+        if reader.read_line(&mut header)? == 0 || header.trim().is_empty() {
+            break;
+        }
+        if let Some((name, value)) = header.split_once(':') {
+            let name = name.trim();
+            let value = value.trim().to_string();
+            if name.eq_ignore_ascii_case("content-length") {
+                length = value.parse().unwrap_or(0);
+            } else if name.eq_ignore_ascii_case("content-type") {
+                content_type = Some(value);
+            } else if name.eq_ignore_ascii_case("origin") {
+                origin = Some(value);
+            }
+        }
+    }
+    if length > MAX_CAPTURE {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("request body of {length} bytes is over the {MAX_CAPTURE}-byte limit"),
+        ));
+    }
+    let mut body = vec![0; length];
+    reader.read_exact(&mut body)?;
+    let path = target.split('?').next().unwrap_or("/").to_string();
+    Ok(Some(Request {
+        method,
+        path,
+        body,
+        content_type,
+        origin,
+    }))
+}
+
+fn respond(
+    stream: &mut TcpStream,
+    status: u16,
+    content_type: &str,
+    body: &[u8],
+) -> std::io::Result<()> {
+    let reason = match status {
+        200 => "OK",
+        400 => "Bad Request",
+        403 => "Forbidden",
+        404 => "Not Found",
+        413 => "Payload Too Large",
+        415 => "Unsupported Media Type",
+        _ => "Internal Server Error",
+    };
+    write!(
+        stream,
+        "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\n\
+         Cache-Control: no-store\r\nConnection: close\r\n\r\n",
+        body.len()
+    )?;
+    stream.write_all(body)
+}
+
 fn handle(
     stream: &mut TcpStream,
     port: u16,
@@ -353,7 +434,7 @@ fn handle(
     realm: &RealmId,
     out: &Path,
 ) -> std::io::Result<Option<Received>> {
-    let request = match read_request_up_to(stream, MAX_CAPTURE) {
+    let request = match read_request(stream) {
         Ok(Some(request)) => request,
         Ok(None) => return Ok(None),
         Err(err) if err.kind() == std::io::ErrorKind::InvalidData => {

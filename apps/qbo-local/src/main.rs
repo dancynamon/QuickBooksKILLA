@@ -35,8 +35,8 @@ use qbo_local::oauth::{self, OAuthConfig};
 use qbo_local::ratelimit::RealmLimits;
 use qbo_local::reconcile::{ReconcileOptions, ReconcileReport, Reconciler};
 use qbo_local::reports;
-use qbo_local::sales_order_capture;
 use qbo_local::sales_orders;
+use qbo_local::sales_orders::capture as sales_order_capture;
 use qbo_local::slice::{self, SliceOptions};
 use qbo_local::store::backup::SnapshotPolicy;
 use qbo_local::store::{latest_version, ProjectedTable, RealmSummary, Store};
@@ -208,7 +208,10 @@ enum Command {
     },
     /// `demo`, `serve`, `writes`: offline commands that never reach Intuit,
     /// handed their raw arguments.
-    Offline { name: String, args: Vec<String> },
+    Offline {
+        name: String,
+        args: Vec<String>,
+    },
     Snapshots {
         realm: RealmId,
         from_year: i32,
@@ -1069,9 +1072,12 @@ fn execute(command: Command) -> Result<(), CommandError> {
         Command::Replay { db, realm, dir } => run_replay(&db, &realm, &dir),
         Command::SyncSalesOrders { db, realm, feed } => run_sync_sales_orders(&db, &realm, &feed),
         Command::SalesOrders { db, realm, all } => run_sales_orders(&db, &realm, all),
-        Command::CaptureSalesOrders { realm, out, port, capture } => {
-            run_capture_sales_orders(&realm, &out, port, capture.as_deref())
-        }
+        Command::CaptureSalesOrders {
+            realm,
+            out,
+            port,
+            capture,
+        } => run_capture_sales_orders(&realm, &out, port, capture.as_deref()),
         Command::PrintCaptureScript { port } => {
             print!("{}", sales_order_capture::page_script(port));
             Ok(())
@@ -1716,9 +1722,13 @@ fn run_capture_sales_orders(
             let listener = std::net::TcpListener::bind(("127.0.0.1", port))
                 .map_err(|err| runtime(format!("127.0.0.1:{port}: {err}")))?;
             eprintln!("Waiting on http://127.0.0.1:{port} for a sales-order capture.");
-            eprintln!("  1. In Chrome, open https://qbo.intuit.com/app/salesorders?tab=sales-orders");
+            eprintln!(
+                "  1. In Chrome, open https://qbo.intuit.com/app/salesorders?tab=sales-orders"
+            );
             eprintln!("  2. Open DevTools (Cmd-Opt-J) and paste the script from:");
-            eprintln!("       qbo-local capture-sales-orders --print-script --port {port} | pbcopy");
+            eprintln!(
+                "       qbo-local capture-sales-orders --print-script --port {port} | pbcopy"
+            );
             eprintln!("Reads go through the web app's own session; no developer API calls.");
             sales_order_capture::receive(listener, realm, out).map_err(runtime)?
         }

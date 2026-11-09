@@ -41,8 +41,6 @@
 //!   API, so Dan's existing skills can be repointed off the QuickBooks MCP
 //! - [`reports`]  — `LEDGER-DESIGN.md` §6, §7: parsing the Reports API's
 //!   JSON into trial-balance and aging rows, and the CSV `ledger` reads
-//! - [`sales_order_capture`] — D42: the sales-order feed's producer, a
-//!   console script plus its loopback receiver
 //! - [`slice`]    — `HANDOFF.md` §2.6, D31: a small, referentially closed
 //!   slice of the replica, recorded as fixtures for the scrubber
 
@@ -71,7 +69,6 @@ pub mod ratelimit;
 pub mod reconcile;
 pub mod reports;
 pub mod sales_orders;
-pub mod sales_order_capture;
 pub mod slice;
 pub mod store;
 pub mod safety;
