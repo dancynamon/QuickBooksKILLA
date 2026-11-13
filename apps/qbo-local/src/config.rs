@@ -51,7 +51,22 @@ pub enum ConfigError {
     Keychain { service: String, detail: String },
     #[error("realm {0:?} is not listed under [[realms]] in the config file")]
     UnknownRealm(String),
+    /// [`ENV_BASE_URL`] named something other than a loopback `http://`
+    /// address. The override exists only so the binary can be run against a
+    /// fake Intuit server on this machine; it can never redirect tokens to
+    /// another host.
+    #[error(
+        "{ENV_BASE_URL}={0:?} is refused: only http://127.0.0.1:PORT or http://localhost:PORT \
+         is accepted (a fake Intuit server for offline tests)"
+    )]
+    NonLoopbackBaseUrl(String),
 }
+
+/// Points `--live` at a fake Intuit server on the loopback interface instead
+/// of [`LocalConfig::base_url`], so `tests/cli.rs` can run `daemon --live`
+/// through the real binary without leaving the machine (`HANDOFF.md` §3.7).
+/// Loopback only: anything else is [`ConfigError::NonLoopbackBaseUrl`].
+pub const ENV_BASE_URL: &str = "BUNZBOOKS_QBO_BASE_URL";
 
 fn default_environment() -> String {
     "production".to_string()
@@ -243,6 +258,12 @@ impl LocalConfig {
         }
     }
 
+    /// The API base URL `--live` actually uses: [`Self::base_url`], unless
+    /// [`ENV_BASE_URL`] names a loopback fake server.
+    pub fn api_base_url(&self) -> Result<String, ConfigError> {
+        resolve_base_url(self.base_url(), std::env::var(ENV_BASE_URL).ok())
+    }
+
     /// Look up a configured realm by its raw id and validate it as a
     /// [`RealmId`] in the same step, so a typo in the config file is caught
     /// here rather than surfacing later as a confusing empty sync.
@@ -252,6 +273,25 @@ impl LocalConfig {
         }
         Ok(RealmId::parse(id)?)
     }
+}
+
+/// [`LocalConfig::api_base_url`] with the environment passed in.
+fn resolve_base_url(configured: &str, overridden: Option<String>) -> Result<String, ConfigError> {
+    let Some(url) = non_empty(overridden) else {
+        return Ok(configured.to_string());
+    };
+    let rest = url
+        .strip_prefix("http://")
+        .ok_or_else(|| ConfigError::NonLoopbackBaseUrl(url.clone()))?;
+    let authority = rest.split('/').next().unwrap_or("");
+    let (host, port) = authority
+        .rsplit_once(':')
+        .ok_or_else(|| ConfigError::NonLoopbackBaseUrl(url.clone()))?;
+    let loopback = matches!(host, "127.0.0.1" | "localhost");
+    if !loopback || port.parse::<u16>().is_err() || rest.contains('@') {
+        return Err(ConfigError::NonLoopbackBaseUrl(url));
+    }
+    Ok(url.trim_end_matches('/').to_string())
 }
 
 fn non_empty(value: Option<String>) -> Option<String> {
@@ -325,6 +365,41 @@ fn read_keychain(_service: &str, _account: &str) -> Result<Option<String>, Strin
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_base_url_override_accepts_only_a_loopback_http_address() {
+        let production = crate::http::PRODUCTION_BASE_URL;
+        assert_eq!(resolve_base_url(production, None).unwrap(), production);
+        assert_eq!(
+            resolve_base_url(production, Some("  ".into())).unwrap(),
+            production
+        );
+        assert_eq!(
+            resolve_base_url(production, Some("http://127.0.0.1:4321/".into())).unwrap(),
+            "http://127.0.0.1:4321"
+        );
+        assert_eq!(
+            resolve_base_url(production, Some("http://localhost:8080".into())).unwrap(),
+            "http://localhost:8080"
+        );
+        for refused in [
+            "https://127.0.0.1:4321",
+            "http://example.com:80",
+            "http://127.0.0.1.example.com:80",
+            "http://evil@127.0.0.1:80",
+            "http://127.0.0.1",
+            "http://10.0.0.1:80",
+            "https://quickbooks.api.intuit.com",
+        ] {
+            assert!(
+                matches!(
+                    resolve_base_url(production, Some(refused.into())),
+                    Err(ConfigError::NonLoopbackBaseUrl(_))
+                ),
+                "{refused} must be refused"
+            );
+        }
+    }
 
     fn write(directory: &Path, contents: &str) -> PathBuf {
         let path = directory.join("config.toml");

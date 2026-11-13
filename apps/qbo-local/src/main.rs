@@ -1090,10 +1090,12 @@ fn build_http_client(
     let oauth_config = OAuthConfig::intuit(app.client_id, app.client_secret, redirect_uri);
     let (token_store, _) = open_token_store(&config)?;
     let tokens = TokenSource::new(token_store, oauth_config, realm.clone());
-    Ok(
-        HttpQboClient::new(config.base_url(), tokens, config.rotation_log.clone())
-            .with_call_budget(budget),
+    Ok(HttpQboClient::new(
+        config.api_base_url().map_err(runtime)?,
+        tokens,
+        config.rotation_log.clone(),
     )
+    .with_call_budget(budget))
 }
 
 /// The token store `config` selects (`token_store`, defaulting to the
