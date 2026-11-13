@@ -220,11 +220,15 @@ Report actual row counts and wall-clock time. The brief is explicit that these
 are measured and reported, never asserted. Expect roughly nine thousand invoices
 and tens of thousands of documents in total, going back to 2012.
 
-### 2.5 CDC poll loop — built (`daemon.rs`), not yet wired into a binary
+### 2.5 CDC poll loop — built (`daemon.rs`), wired into `qbo-local daemon --live`
 
 `Daemon::run` loops `SyncDriver::sync_realm` on a focused/idle cadence with
-backoff, and takes the nightly snapshot. What remains is the binary that
-constructs it with the real client and keychain store.
+backoff, and takes the nightly snapshot. `qbo-local daemon --live` builds it
+with `HttpQboClient` and the configured token store (the keychain on macOS);
+`launchd/qbo-local-daemon.plist.in` runs that command. It has run live since
+14 Oct 2026 (D26). `tests/daemon_live_cli.rs` drives the same binary path
+offline, against the fake Intuit server, through `BUNZBOOKS_QBO_BASE_URL`
+(loopback addresses only; anything else is refused).
 
 15 seconds focused, 5 minutes idle, both configurable.
 
