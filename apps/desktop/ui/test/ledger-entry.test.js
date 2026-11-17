@@ -115,6 +115,26 @@ test("buildDocument names the money account only when one is chosen, and a bill 
   assert.equal(receipt.lines[0].is_taxable, true);
 });
 
+test("a refund receipt is a taxed sale paid out of checking; a vendor credit is a bill's account lines, untaxed", () => {
+  const refund = buildDocument("RefundReceipt", {
+    txnDate: "2026-10-10", contactId: "c", lines: [{ itemId: "i", amount: "100.00", taxable: true }],
+  });
+  assert.equal(refund.pay_from, "1100", "money out names the account it leaves");
+  assert.equal(refund.lines[0].is_taxable, true);
+  assert.deepEqual(previewTotals("RefundReceipt", [{ amount: "100.00", taxable: true }], null),
+    { subtotal: "100.00", tax: "6.63", total: "106.63", exempt: false });
+
+  const credit = buildDocument("VendorCredit", {
+    txnDate: "2026-10-10", contactId: "v", number: "CR-77",
+    lines: [{ account: "6100", amount: "25.00", taxable: true }],
+  });
+  assert.deepEqual(credit.contact, { kind: "Vendor", id: "v" });
+  assert.equal(credit.number, "CR-77", "the vendor's own number travels");
+  assert.deepEqual(credit.lines, [{ kind: "Account", amount: "25.00", is_taxable: false, account: "6100" }]);
+  assert.equal("pay_from" in credit, false);
+  assert.equal(previewTotals("VendorCredit", [{ amount: "25.00", taxable: true }], null).tax, "0.00");
+});
+
 // --- master data editors (`js/screens/ledger/masterData.js`) ---------------
 
 import { buildContact, buildItem, newId, slug } from "../js/screens/ledger/masterData.js";

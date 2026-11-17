@@ -51,6 +51,18 @@ pub enum ConfigError {
     Keychain { service: String, detail: String },
     #[error("realm {0:?} is not listed under [[realms]] in the config file")]
     UnknownRealm(String),
+    /// `[budget]` asks for more than the hard maximum. Lowering a ceiling is
+    /// fine; raising one past the maximum is how a month's quota goes.
+    #[error(
+        "{path}: [budget].{key} = {value} is above the maximum of {max}; \
+         Intuit's monthly quota is 500,000 calls and qbo-local stays under it"
+    )]
+    BudgetAboveMaximum {
+        path: PathBuf,
+        key: &'static str,
+        value: u32,
+        max: u32,
+    },
 }
 
 fn default_environment() -> String {
@@ -95,8 +107,18 @@ fn default_daily_calls() -> u32 {
     crate::budget::DEFAULT_DAILY_CALLS
 }
 
-fn default_budget_ledger() -> PathBuf {
-    PathBuf::from(".local/call-budget.json")
+fn default_monthly_calls() -> u32 {
+    crate::budget::DEFAULT_MONTHLY_CALLS
+}
+
+/// The one ledger every qbo-local on this Mac spends from, whatever the
+/// working directory or checkout: the quota belongs to the Intuit app, not
+/// to a folder.
+pub fn default_budget_ledger() -> PathBuf {
+    match std::env::var_os("HOME") {
+        Some(home) => PathBuf::from(home).join(".bunzbooks/intuit-call-budget.json"),
+        None => PathBuf::from(".local/call-budget.json"),
+    }
 }
 
 /// `[budget]` — the daily ceiling on Intuit calls ([`crate::budget`]).
@@ -104,15 +126,20 @@ fn default_budget_ledger() -> PathBuf {
 pub struct BudgetConfig {
     #[serde(default = "default_daily_calls")]
     pub daily_calls: u32,
-    #[serde(default = "default_budget_ledger")]
-    pub ledger: PathBuf,
+    #[serde(default = "default_monthly_calls")]
+    pub monthly_calls: u32,
+    /// Omitted: [`default_budget_ledger`]. A relative path is taken from the
+    /// config file's directory, never the working directory.
+    #[serde(default)]
+    pub ledger: Option<PathBuf>,
 }
 
 impl Default for BudgetConfig {
     fn default() -> Self {
         BudgetConfig {
             daily_calls: default_daily_calls(),
-            ledger: default_budget_ledger(),
+            monthly_calls: default_monthly_calls(),
+            ledger: None,
         }
     }
 }
@@ -207,6 +234,27 @@ impl LocalConfig {
                 source: Box::new(source),
             })?;
         config.path = path.to_path_buf();
+        for (key, value, max) in [
+            (
+                "daily_calls",
+                config.budget.daily_calls,
+                crate::budget::MAX_DAILY_CALLS,
+            ),
+            (
+                "monthly_calls",
+                config.budget.monthly_calls,
+                crate::budget::MAX_MONTHLY_CALLS,
+            ),
+        ] {
+            if value > max {
+                return Err(ConfigError::BudgetAboveMaximum {
+                    path: path.to_path_buf(),
+                    key,
+                    value,
+                    max,
+                });
+            }
+        }
         Ok(config)
     }
 
@@ -224,8 +272,18 @@ impl LocalConfig {
         )
     }
 
+    /// Where the call ledger lives ([`BudgetConfig::ledger`]).
+    pub fn budget_ledger(&self) -> PathBuf {
+        match &self.budget.ledger {
+            None => default_budget_ledger(),
+            Some(path) if path.is_absolute() => path.clone(),
+            Some(path) => self.path.parent().unwrap_or(Path::new(".")).join(path),
+        }
+    }
+
     pub fn call_budget(&self) -> crate::budget::CallBudget {
-        crate::budget::CallBudget::persistent(&self.budget.ledger, self.budget.daily_calls)
+        crate::budget::CallBudget::persistent(self.budget_ledger(), self.budget.daily_calls)
+            .with_monthly_limit(self.budget.monthly_calls)
     }
 
     pub fn token_store_kind(&self) -> TokenStoreKind {
@@ -489,11 +547,50 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let config = bare(directory.path());
         assert_eq!(config.budget.daily_calls, 15_000);
-        assert_eq!(
-            config.budget.ledger,
-            PathBuf::from(".local/call-budget.json")
-        );
+        assert_eq!(config.budget.monthly_calls, 450_000);
+        assert_eq!(config.budget_ledger(), default_budget_ledger());
         assert_eq!(config.intuit.token_keychain_service, TOKEN_KEYCHAIN_SERVICE);
+    }
+
+    #[test]
+    fn a_budget_above_the_maximum_is_refused() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = write(
+            directory.path(),
+            "[intuit]\n[budget]\ndaily_calls = 100000\n[[realms]]\nid = \"1\"\nname = \"A\"\n",
+        );
+        assert!(matches!(
+            LocalConfig::load(&path),
+            Err(ConfigError::BudgetAboveMaximum {
+                key: "daily_calls",
+                ..
+            })
+        ));
+        let path = write(
+            directory.path(),
+            "[intuit]\n[budget]\nmonthly_calls = 600000\n[[realms]]\nid = \"1\"\nname = \"A\"\n",
+        );
+        assert!(matches!(
+            LocalConfig::load(&path),
+            Err(ConfigError::BudgetAboveMaximum {
+                key: "monthly_calls",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn a_relative_budget_ledger_is_read_from_the_config_files_directory() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = write(
+            directory.path(),
+            "[intuit]\n[budget]\nledger = \"budget.json\"\n[[realms]]\nid = \"1\"\nname = \"A\"\n",
+        );
+        let config = LocalConfig::load(&path).unwrap();
+        assert_eq!(
+            config.budget_ledger(),
+            path.parent().unwrap().join("budget.json")
+        );
     }
 
     #[test]

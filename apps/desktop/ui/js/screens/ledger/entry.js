@@ -33,9 +33,15 @@ export const ENTRY_KINDS = Object.freeze({
   Estimate: { label: "Estimate", contact: "customer", lines: true, taxed: true, numbered: true, accountLines: false, posts: false },
   SalesOrder: { label: "Sales order", contact: "customer", lines: true, taxed: true, numbered: true, accountLines: false, posts: false },
   CreditMemo: { label: "Credit memo", contact: "customer", lines: true, taxed: true, numbered: true, accountLines: false, posts: true },
+  // A credit memo paid out at once: the same return legs, money out of the
+  // bank instead of off AR (`post.rs::post_refund_receipt`).
+  RefundReceipt: { label: "Refund receipt", noun: "refund receipt", contact: "customer", lines: true, taxed: true, numbered: true, accountLines: false, posts: true, bank: PAY_FROM },
   Payment: { label: "Receive payment", noun: "payment", contact: "customer", lines: false, taxed: false, numbered: false, accountLines: false, posts: true, bank: DEPOSIT_TO, applies: { book: "receivable", kind: "Invoice" } },
   PurchaseOrder: { label: "Purchase order", contact: "vendor", lines: true, taxed: false, numbered: true, accountLines: false, posts: false },
   Bill: { label: "Bill", contact: "vendor", lines: true, taxed: false, numbered: false, accountLines: true, posts: true },
+  // Carries the vendor's own number, like a bill; applied to a bill from
+  // Payables (`post.rs::post_vendor_credit`).
+  VendorCredit: { label: "Vendor credit", noun: "vendor credit", contact: "vendor", lines: true, taxed: false, numbered: false, accountLines: true, posts: true },
   BillPayment: { label: "Pay bills", noun: "bill payment", contact: "vendor", lines: false, taxed: false, numbered: false, accountLines: false, posts: true, bank: PAY_FROM, applies: { book: "payable", kind: "Bill" } },
 });
 

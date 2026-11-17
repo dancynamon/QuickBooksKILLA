@@ -36,6 +36,7 @@ use qbo_local::ratelimit::RealmLimits;
 use qbo_local::reconcile::{ReconcileOptions, ReconcileReport, Reconciler};
 use qbo_local::reports;
 use qbo_local::sales_orders;
+use qbo_local::sales_orders::capture as sales_order_capture;
 use qbo_local::slice::{self, SliceOptions};
 use qbo_local::store::backup::SnapshotPolicy;
 use qbo_local::store::{latest_version, ProjectedTable, RealmSummary, Store};
@@ -120,6 +121,7 @@ enum Command {
         realm: RealmId,
         port: Option<u16>,
         config: Option<PathBuf>,
+        redirect_uri: Option<String>,
     },
     ImportToken {
         realm: RealmId,
@@ -195,9 +197,21 @@ enum Command {
         realm: RealmId,
         all: bool,
     },
+    CaptureSalesOrders {
+        realm: RealmId,
+        out: PathBuf,
+        port: u16,
+        capture: Option<PathBuf>,
+    },
+    PrintCaptureScript {
+        port: u16,
+    },
     /// `demo`, `serve`, `writes`: offline commands that never reach Intuit,
     /// handed their raw arguments.
-    Offline { name: String, args: Vec<String> },
+    Offline {
+        name: String,
+        args: Vec<String>,
+    },
     Snapshots {
         realm: RealmId,
         from_year: i32,
@@ -248,7 +262,7 @@ qbo-local — local SQLite replica of QuickBooks Online
 USAGE:
     qbo-local status [--db PATH] [--config PATH]
     qbo-local init --db PATH --realm ID --name \"Display Name\"
-    qbo-local auth --realm ID [--port N] [--config PATH]
+    qbo-local auth --realm ID [--port N | --redirect-uri URL] [--config PATH]
     qbo-local import-token --realm ID [--config PATH] [--force] < refresh-token
     qbo-local whoami --realm ID [--config PATH]
     qbo-local daemon --db PATH --realm ID [--focused-secs N] [--idle-secs N]
@@ -265,6 +279,8 @@ USAGE:
                       (--live [--config PATH] | --replay DIR) [--record DIR]
     qbo-local sync-sales-orders --db PATH --realm ID --feed URL|PATH
     qbo-local sales-orders --db PATH --realm ID [--all]
+    qbo-local capture-sales-orders --realm ID --out PATH [--port 8765]
+                      [--capture FILE | --print-script]
     qbo-local demo --db PATH [--invoices N]
     qbo-local serve --db PATH [--port 8780] [--ui DIR] [--demo-writes]
     qbo-local writes --db PATH --realm ID [--enable [--confirm] | --disable]
@@ -319,6 +335,13 @@ SUBCOMMANDS:
     sales-orders
                 List the mirrored sales orders still open (--all: every one),
                 with what is left to invoice. Opens the replica read-only.
+    capture-sales-orders
+                Produce the sales-order feed from a signed-in QBO tab. Waits on
+                127.0.0.1 for the console script (--print-script prints it;
+                paste it on QBO's Sales Orders list), then writes a complete
+                feed to --out, or a .partial.json beside it if any order was
+                missed. Web-app reads only: no developer API calls. --capture
+                FILE converts a saved capture instead of waiting.
     demo        Write a synthetic book to a new --db file (no Intuit).
     serve       Serve the UI and its API on 127.0.0.1 over --db; with
                 --demo-writes, the synthetic book's writes land in a
@@ -364,6 +387,9 @@ FLAGS:
     --to-year YYYY          Last year to snapshot, inclusive (snapshots only).
     --feed URL|PATH         Where the sales-order feed is (sync-sales-orders).
     --all                   Every sales order, not only open ones (sales-orders).
+    --out PATH              Where the captured feed goes (capture-sales-orders).
+    --capture FILE          A saved qbo-sales-order-capture/1 file to convert.
+    --print-script          Print the console script and exit.
 
 Without --live or --mock, daemon, sweep and record exit 2: choose one.
 Without --live or --replay DIR, report and snapshots exit 2: choose one.
@@ -448,6 +474,7 @@ fn parse(args: &[String]) -> Result<Command, UsageError> {
         "snapshots" => parse_snapshots(args),
         "sync-sales-orders" => parse_sync_sales_orders(args),
         "sales-orders" => parse_sales_orders(args),
+        "capture-sales-orders" => parse_capture_sales_orders(args),
         "demo" | "serve" | "writes" => Ok(Command::Offline {
             name: subcommand.clone(),
             args: args.cloned().collect(),
@@ -568,11 +595,13 @@ fn parse_auth(mut args: Args<'_>) -> Result<Command, UsageError> {
     let mut realm = None;
     let mut port = None;
     let mut config = None;
+    let mut redirect_uri = None;
     while let Some(flag) = args.next() {
         match flag.as_str() {
             "--realm" => realm = Some(parse_realm(&next_value(&mut args, "--realm")?)?),
             "--port" => port = Some(parse_u16(&next_value(&mut args, "--port")?, "--port")?),
             "--config" => config = Some(PathBuf::from(next_value(&mut args, "--config")?)),
+            "--redirect-uri" => redirect_uri = Some(next_value(&mut args, "--redirect-uri")?),
             other => return Err(UsageError::unknown_flag(other)),
         }
     }
@@ -580,6 +609,7 @@ fn parse_auth(mut args: Args<'_>) -> Result<Command, UsageError> {
         realm: realm.ok_or_else(|| UsageError::missing_flag("--realm"))?,
         port,
         config,
+        redirect_uri,
     })
 }
 
@@ -767,6 +797,33 @@ fn parse_sync_sales_orders(mut args: Args<'_>) -> Result<Command, UsageError> {
         db: db.ok_or_else(|| UsageError::missing_flag("--db"))?,
         realm: realm.ok_or_else(|| UsageError::missing_flag("--realm"))?,
         feed: feed.ok_or_else(|| UsageError::missing_flag("--feed"))?,
+    })
+}
+
+fn parse_capture_sales_orders(mut args: Args<'_>) -> Result<Command, UsageError> {
+    let mut realm = None;
+    let mut out = None;
+    let mut port = sales_order_capture::DEFAULT_PORT;
+    let mut capture = None;
+    let mut print_script = false;
+    while let Some(flag) = args.next() {
+        match flag.as_str() {
+            "--realm" => realm = Some(parse_realm(&next_value(&mut args, "--realm")?)?),
+            "--out" => out = Some(PathBuf::from(next_value(&mut args, "--out")?)),
+            "--port" => port = parse_u16(&next_value(&mut args, "--port")?, "--port")?,
+            "--capture" => capture = Some(PathBuf::from(next_value(&mut args, "--capture")?)),
+            "--print-script" => print_script = true,
+            other => return Err(UsageError::unknown_flag(other)),
+        }
+    }
+    if print_script {
+        return Ok(Command::PrintCaptureScript { port });
+    }
+    Ok(Command::CaptureSalesOrders {
+        realm: realm.ok_or_else(|| UsageError::missing_flag("--realm"))?,
+        out: out.ok_or_else(|| UsageError::missing_flag("--out"))?,
+        port,
+        capture,
     })
 }
 
@@ -963,7 +1020,8 @@ fn execute(command: Command) -> Result<(), CommandError> {
             realm,
             port,
             config,
-        } => run_auth(&realm, port, config.as_deref()),
+            redirect_uri,
+        } => run_auth(&realm, port, config.as_deref(), redirect_uri.as_deref()),
         Command::ImportToken {
             realm,
             config,
@@ -1014,6 +1072,16 @@ fn execute(command: Command) -> Result<(), CommandError> {
         Command::Replay { db, realm, dir } => run_replay(&db, &realm, &dir),
         Command::SyncSalesOrders { db, realm, feed } => run_sync_sales_orders(&db, &realm, &feed),
         Command::SalesOrders { db, realm, all } => run_sales_orders(&db, &realm, all),
+        Command::CaptureSalesOrders {
+            realm,
+            out,
+            port,
+            capture,
+        } => run_capture_sales_orders(&realm, &out, port, capture.as_deref()),
+        Command::PrintCaptureScript { port } => {
+            print!("{}", sales_order_capture::page_script(port));
+            Ok(())
+        }
         Command::Slice {
             db,
             realm,
@@ -1080,11 +1148,14 @@ fn build_http_client(
     // On stderr, so it lands at the top of the daemon log: which app this
     // process spends, and how much of today's ceiling is already gone.
     eprintln!(
-        "qbo-local: Intuit app {} (from the {}); {}/{} calls used today (UTC)",
+        "qbo-local: Intuit app {} (from the {}); {}/{} calls used today, {}/{} this month (UTC; ledger {})",
         app.client_id,
         app.source,
         budget.used(Utc::now()).map_err(runtime)?,
-        budget.limit()
+        budget.limit(),
+        budget.used_this_month(Utc::now()).map_err(runtime)?,
+        budget.monthly_limit(),
+        budget.path().map_or_else(|| "in memory".to_string(), |p| p.display().to_string())
     );
     let redirect_uri = format!("http://localhost:{}/callback", config.intuit.redirect_port);
     let oauth_config = OAuthConfig::intuit(app.client_id, app.client_secret, redirect_uri);
@@ -1320,25 +1391,43 @@ fn run_init(db: &Path, realm: &RealmId, name: &str) -> Result<(), CommandError> 
 /// Run the OAuth loopback flow for one realm and save generation zero
 /// through the configured token store ([`open_token_store`]: the keychain on
 /// macOS, `FileTokenStore` elsewhere). `HANDOFF.md` §2.1, §2.2.
+///
+/// With `pasted_redirect`, the redirect goes to that URI instead of the
+/// loopback — the OAuth Playground's page, for an app that may not register
+/// `http://localhost` — and the person pastes the address the browser landed
+/// on. The code is exchanged here with the secret from the keychain, so the
+/// secret is never typed into a web page.
 fn run_auth(
     realm: &RealmId,
     port: Option<u16>,
     config_path: Option<&Path>,
+    pasted_redirect: Option<&str>,
 ) -> Result<(), CommandError> {
     let path = config_path.unwrap_or(Path::new(DEFAULT_CONFIG_PATH));
     let config = LocalConfig::load(path).map_err(runtime)?;
     let app = config.credentials().map_err(runtime)?;
     let port = port.unwrap_or(config.intuit.redirect_port);
-    let redirect_uri = format!("http://localhost:{port}/callback");
+    let redirect_uri = pasted_redirect.map_or_else(
+        || format!("http://localhost:{port}/callback"),
+        str::to_string,
+    );
     println!("Intuit app {} (from the {})", app.client_id, app.source);
     let oauth_config = OAuthConfig::intuit(app.client_id, app.client_secret, redirect_uri);
 
     let state = Uuid::now_v7().to_string();
     println!("Open this URL to authorize qbo-local for realm {realm}:\n");
     println!("  {}\n", oauth_config.authorize_url(&state));
-    println!("Waiting for the redirect on http://localhost:{port}/callback ...");
 
-    let auth_code = oauth::run_loopback(port, Duration::from_secs(300)).map_err(runtime)?;
+    let auth_code = if pasted_redirect.is_some() {
+        println!("After you click Connect, copy the full address the browser lands on,");
+        println!("paste it here and press Enter:");
+        let mut line = String::new();
+        std::io::stdin().read_line(&mut line).map_err(runtime)?;
+        oauth::parse_redirect(&line).map_err(runtime)?
+    } else {
+        println!("Waiting for the redirect on http://localhost:{port}/callback ...");
+        oauth::run_loopback(port, Duration::from_secs(300)).map_err(runtime)?
+    };
     if auth_code.state != state {
         return Err(CommandError::Runtime(
             "state mismatch on the OAuth callback (possible CSRF) — aborting without saving anything".to_string(),
@@ -1614,6 +1703,50 @@ fn run_sync_sales_orders(db: &Path, realm: &RealmId, feed: &str) -> Result<(), C
     println!("  unchanged : {}", summary.unchanged);
     println!("  deleted   : {}", summary.deleted);
     println!("  open now  : {}", summary.open);
+    Ok(())
+}
+
+fn run_capture_sales_orders(
+    realm: &RealmId,
+    out: &Path,
+    port: u16,
+    capture: Option<&Path>,
+) -> Result<(), CommandError> {
+    let received = match capture {
+        Some(path) => {
+            let raw = std::fs::read_to_string(path)
+                .map_err(|err| runtime(format!("{}: {err}", path.display())))?;
+            sales_order_capture::assemble_and_write(&raw, realm, out).map_err(runtime)?
+        }
+        None => {
+            let listener = std::net::TcpListener::bind(("127.0.0.1", port))
+                .map_err(|err| runtime(format!("127.0.0.1:{port}: {err}")))?;
+            eprintln!("Waiting on http://127.0.0.1:{port} for a sales-order capture.");
+            eprintln!(
+                "  1. In Chrome, open https://qbo.intuit.com/app/salesorders?tab=sales-orders"
+            );
+            eprintln!("  2. Open DevTools (Cmd-Opt-J) and paste the script from:");
+            eprintln!(
+                "       qbo-local capture-sales-orders --print-script --port {port} | pbcopy"
+            );
+            eprintln!("Reads go through the web app's own session; no developer API calls.");
+            sales_order_capture::receive(listener, realm, out).map_err(runtime)?
+        }
+    };
+    println!("{}", sales_order_capture::summary_line(&received));
+    let problems = &received.assembled.problems;
+    for problem in problems.iter().take(20) {
+        println!("  - {problem}");
+    }
+    if problems.len() > 20 {
+        println!("  … and {} more", problems.len() - 20);
+    }
+    if !received.assembled.feed.complete {
+        return Err(runtime(format!(
+            "the capture is not complete; {} was left as it was",
+            out.display()
+        )));
+    }
     Ok(())
 }
 
@@ -2568,6 +2701,7 @@ mod tests {
                 realm: RealmId::parse("1234567890123456").unwrap(),
                 port: Some(9999),
                 config: Some(PathBuf::from("custom.toml")),
+                redirect_uri: None,
             })
         );
     }

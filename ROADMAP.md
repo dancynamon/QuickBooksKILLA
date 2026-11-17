@@ -245,9 +245,9 @@ book's own customers, vendors and items; *Receivables* and *Payables* show the
 own aging, checked against 1200 and 2000. Proven against the fixture book and,
 for the exact payloads the form sends, against the real `create_document`
 (`apps/desktop/README.md`). Sales receipts, credit memos and bill payments
-too, and customer, vendor and item editors over the `upsert_*` tools. Not yet:
-editing or voiding a saved document, applying a credit memo to an invoice,
-and refund receipts.
+too, and customer, vendor and item editors over the `upsert_*` tools. Since then: editing and voiding a saved
+document, applying a credit memo or vendor credit, and (6 Nov 2026) refund
+receipts and vendor credits on the *New document* screen.
 
 The change from the first draft: **a save commits to your own document store
 and posts to your own ledger**, then enqueues the outbox record that mirrors it
