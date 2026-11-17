@@ -34,6 +34,7 @@
   --crit:        #B22F22;
   --crit-soft:   rgba(178, 47, 34, .12);
   --shadow:      0 18px 44px -22px rgba(13, 25, 34, .45);
+  --card-shadow: 0 1px 2px rgba(13, 25, 34, .05), 0 4px 14px -8px rgba(13, 25, 34, .12);
   --bun-top:     #E39B3A;
   --bun-seed:    #FFF1D6;
   --bun-fill:    #8C4A28;
@@ -73,6 +74,7 @@
     --crit:        #F4695B;
     --crit-soft:   rgba(244, 105, 91, .13);
     --shadow:      0 20px 50px -20px rgba(0, 0, 0, .78);
+    --card-shadow: none;
     --bun-top:     #F0A94A;
     --bun-seed:    #FFF6E4;
     --bun-fill:    #A85A31;
@@ -102,6 +104,7 @@
   --crit:        #F4695B;
   --crit-soft:   rgba(244, 105, 91, .13);
   --shadow:      0 20px 50px -20px rgba(0, 0, 0, .78);
+  --card-shadow: none;
   --bun-top:     #F0A94A;
   --bun-seed:    #FFF6E4;
   --bun-fill:    #A85A31;
@@ -124,6 +127,7 @@ body {
 }
 
 button, input, select { font: inherit; color: inherit; }
+a { color: inherit; text-decoration: none; }
 button { cursor: pointer; background: none; border: none; padding: 0; }
 
 :focus-visible {
@@ -280,31 +284,31 @@ kbd {
 .rail {
   background: var(--surface);
   border-right: 1px solid var(--line);
-  padding: 8px 0;
+  padding: 10px 8px 16px;
   overflow-y: auto;
-  display: flex; flex-direction: column; gap: 2px;
+  display: flex; flex-direction: column; gap: 1px;
 }
-.rail-head { padding: 8px 14px 4px; }
+.rail-head { flex: none; padding: 14px 10px 5px; color: var(--ink-3); }
+.rail-head:first-child { padding-top: 4px; }
 .rail-item {
-  display: flex; align-items: center; gap: 9px;
+  display: flex; flex: none; align-items: center; gap: 10px;
   width: 100%;
-  height: calc(27px * var(--fs));
-  padding: 0 10px 0 14px;
+  height: calc(29px * var(--fs));
+  padding: 0 10px;
+  border-radius: 6px;
   color: var(--ink-2);
   font-weight: 450;
   font-size: calc(12.5px * var(--fs));
-  border-left: 2px solid transparent;
   text-align: left;
-  transition: background .1s, color .1s;
+  transition: background .12s, color .12s;
 }
 .rail-item:hover { background: var(--surface-2); color: var(--ink); }
 .rail-item[aria-current="true"] {
   background: var(--accent-soft);
-  border-left-color: var(--accent);
-  color: var(--ink);
-  font-weight: 500;
+  color: var(--accent);
+  font-weight: 550;
 }
-.rail-item .ri-glyph { width: 15px; flex: none; display: grid; place-items: center; color: var(--ink-3); }
+.rail-item .ri-glyph { width: 15px; flex: none; display: grid; place-items: center; color: var(--ink-3); font-size: .9em; opacity: .8; }
 .rail-item[aria-current="true"] .ri-glyph { color: var(--accent); }
 .rail-item .ri-count {
   margin-left: auto;
@@ -338,16 +342,17 @@ kbd {
   display: inline-flex; align-items: center; gap: 6px;
   height: calc(26px * var(--fs)); padding: 0 10px;
   border: 1px solid var(--line);
-  border-radius: 5px;
+  border-radius: 6px;
   background: var(--surface);
   font-size: calc(12px * var(--fs));
-  transition: border-color .12s, color .12s;
+  white-space: nowrap;
+  transition: border-color .12s, color .12s, background .12s;
 }
-.btn:hover { border-color: var(--accent-line); color: var(--accent); }
+.btn:hover { border-color: var(--accent-line); color: var(--accent); background: var(--accent-soft); }
 .btn-primary {
   background: var(--accent); border-color: var(--accent); color: var(--accent-ink); font-weight: 500;
 }
-.btn-primary:hover { color: var(--accent-ink); filter: brightness(1.07); }
+.btn-primary:hover { color: var(--accent-ink); background: var(--accent); filter: brightness(1.07); }
 
 .pad { padding: 14px 16px 28px; }
 
@@ -356,12 +361,13 @@ kbd {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(146px, 1fr));
   border: 1px solid var(--line);
-  border-radius: 7px;
+  border-radius: 10px;
+  box-shadow: var(--card-shadow);
   overflow: hidden;
   background: var(--surface);
   margin-bottom: 14px;
 }
-.strip-cell { padding: 9px 12px; border-right: 1px solid var(--line-soft); }
+.strip-cell { padding: 11px 14px; border-right: 1px solid var(--line-soft); }
 .strip-cell:last-child { border-right: none; }
 .strip-val { font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: calc(18px * var(--fs)); font-weight: 500; letter-spacing: -.02em; margin-top: 2px; }
 .strip-val.pos { color: var(--ok); }
@@ -372,7 +378,8 @@ kbd {
 /* ─── grid ──────────────────────────────────────────────────────────── */
 .grid-wrap {
   border: 1px solid var(--line);
-  border-radius: 7px;
+  border-radius: 10px;
+  box-shadow: var(--card-shadow);
   overflow: hidden;
   background: var(--surface);
 }
@@ -466,8 +473,8 @@ tbody tr[data-clickable]:hover { background: var(--accent-soft); }
 }
 .link-row:last-child { border-bottom: none; }
 /* A document number that opens it (Receivables/Payables -> #ledger-edit). */
-.doc-link { color: var(--accent); text-decoration: none; }
-.doc-link:hover { text-decoration: underline; }
+.doc-link { color: var(--accent); font-weight: 500; }
+.doc-link:hover { text-decoration: underline; text-underline-offset: 2px; }
 .link-row:hover .link-main { color: var(--accent); }
 .link-glyph {
   width: calc(24px * var(--fs)); height: calc(24px * var(--fs)); flex: none;
@@ -686,3 +693,21 @@ tbody tr[data-clickable]:hover { background: var(--accent-soft); }
   background: var(--warn-soft);
   color: var(--warn);
 }
+
+/* ─── document-type picker: sales and purchases as two rows of chips ─── */
+.kind-picker { display: flex; flex-direction: column; gap: 6px; width: 100%; }
+.chips { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; }
+.chips-lbl { width: calc(72px * var(--fs)); color: var(--ink-3); flex: none; }
+.chip {
+  height: calc(26px * var(--fs));
+  padding: 0 11px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--ink-2);
+  font-size: calc(12px * var(--fs));
+  white-space: nowrap;
+  transition: color .12s, background .12s, border-color .12s;
+}
+.chip:hover { color: var(--accent); border-color: var(--accent-line); }
+.chip[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); font-weight: 500; }

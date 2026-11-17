@@ -182,6 +182,7 @@ fn a_spent_daily_budget_sleeps_until_the_utc_reset() {
             day: day_start(1, 0).date_naive(),
             used: 15_000,
             limit: 15_000,
+            period: qbo_local::budget::BudgetPeriod::Day,
         },
     ));
     let store = store();
@@ -708,6 +709,7 @@ fn focus_does_not_cut_a_backoff_short() {
             day: day_start(1, 0).date_naive(),
             used: 15_000,
             limit: 15_000,
+            period: qbo_local::budget::BudgetPeriod::Day,
         },
     ));
     let mut daemon = daemon_at_clock(qbo, clock.clone());
@@ -743,6 +745,7 @@ fn stop_during_a_long_wait_is_honoured_within_one_focused_interval() {
             day: day_start(1, 0).date_naive(),
             used: 15_000,
             limit: 15_000,
+            period: qbo_local::budget::BudgetPeriod::Day,
         },
     ));
     let mut daemon = daemon_at_clock(qbo, clock.clone());

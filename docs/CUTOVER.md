@@ -90,14 +90,30 @@ qbo-local sales-orders --db .local/replica.db --realm REALM
   alongside its own, which SQLite's WAL serialises.
 - Take the `replica-copy.db` backup below **after** the sync, so the copy
   carries the feed.
-- The feed's producer is not in this repo: it reads each sales order out of
-  the QBO web app's own order store through the qbo-headless browser
-  session (the only credential QBO accepts for sales orders) and writes the
-  commerce fields across one for one. Until it exists, a feed can be
-  written by hand from the Sales Orders list: every order still "Not
-  invoiced" or partly invoiced, plus the newest order whatever its status
-  (the ledger's SO numbering continues past the highest number in the
-  feed), marked `"complete": true`.
+- The feed's producer is `qbo-local capture-sales-orders`
+  (`src/sales_orders/capture.rs`). Sales orders are only readable with the
+  QBO web app's own session, so it captures from a signed-in Chrome tab:
+  a console script lists every order on the Sales Orders grid and replays
+  the page's own `GetSalesOrder` request per order (web-app traffic, no
+  developer-API quota, D43). The raw answers come back to a receiver on
+  127.0.0.1, which converts them, writes a complete feed to `--out`, and
+  writes anything short of complete to a `.partial.json` beside it, never
+  over a good feed:
+
+```bash
+qbo-local capture-sales-orders --realm REALM --out .local/cutover/sales-orders.json
+```
+
+```bash
+qbo-local capture-sales-orders --print-script | pbcopy
+```
+
+  Run the first, open `https://qbo.intuit.com/app/salesorders?tab=sales-orders`
+  in Chrome, paste the script into the DevTools console (Cmd-Opt-J). The
+  receiver prints the result and exits; a partial capture exits non-zero
+  with the orders it missed. If Chrome blocks the relay window, click the
+  page and run `await __soDeliver()`; failing that, `copy(__soCapture)`,
+  save it to a file and run with `--capture FILE`.
 
 ## Rehearsing against the live replica
 
@@ -392,9 +408,8 @@ the passing numbers mean):
 1. **QBO sales orders** (D42): the replica, the import and the ledger now
    carry them (a mirrored feed, open lines as of the date, a `SalesOrder`
    kind that converts to its invoice), and the run fails without a feed.
-   What is still missing is the feed's **producer** (qbo-headless reading
-   each order through the browser session); until it exists, a hand-written
-   feed of the orders still "Not invoiced" does the job (Dan).
+   The feed's producer is `qbo-local capture-sales-orders` (above); run it
+   after the last sales order of the year is entered and invoiced.
 2. **D35 / the 185 (now 184) accounts** need Joel's mapping table before
    the run's must-tier pass means what it says, and before sign-off (§2).
 3. **QBO's Opening Balance Equity** must be zero at the FY2026 close, or the
